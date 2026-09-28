@@ -135,6 +135,12 @@ pub trait PlatformInputInjector: Send {
         true
     }
     fn release_all(&mut self) -> Result<(), PlatformError>;
+    /// End this control relationship while an explicitly selected listener
+    /// may retain its local portal grant for another authorized relationship.
+    /// Backends without a reusable grant close the session normally.
+    fn park(&mut self) -> Result<(), PlatformError> {
+        self.end()
+    }
     fn end(&mut self) -> Result<(), PlatformError>;
 }
 
@@ -153,6 +159,18 @@ impl<I: PlatformInputInjector> RemoteInputSink<I> {
             active: false,
             entered: false,
         }
+    }
+
+    pub fn shutdown(&mut self) -> Result<(), String> {
+        let released = if self.active {
+            self.injector.release_all()
+        } else {
+            Ok(())
+        };
+        self.active = false;
+        self.entered = false;
+        let ended = self.injector.end();
+        released.and(ended).map_err(|e| e.to_string())
     }
 }
 
@@ -227,7 +245,7 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
         self.active = false;
         self.entered = false;
         let released = self.injector.release_all();
-        let ended = self.injector.end();
+        let ended = self.injector.park();
         released.and(ended).map_err(|e| e.to_string())
     }
 }
@@ -432,5 +450,72 @@ mod injector_tests {
             sink.end_session().unwrap();
             assert_eq!(*held.lock().unwrap(), (false, false));
         }
+    }
+
+    struct ReusableInjector {
+        grants: Arc<AtomicUsize>,
+        parks: Arc<AtomicUsize>,
+        closes: Arc<AtomicUsize>,
+        granted: bool,
+    }
+
+    impl PlatformInputInjector for ReusableInjector {
+        fn capabilities(&self) -> InjectionCapabilities {
+            InjectionCapabilities {
+                pointer_absolute: true,
+                ..InjectionCapabilities::default()
+            }
+        }
+        fn begin(&mut self) -> Result<(), PlatformError> {
+            if !self.granted {
+                self.grants.fetch_add(1, Ordering::SeqCst);
+                self.granted = true;
+            }
+            Ok(())
+        }
+        fn inject(&mut self, _: &InputEvent) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn enter_remote(&mut self, _: EdgePosition) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn park(&mut self) -> Result<(), PlatformError> {
+            self.parks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), PlatformError> {
+            self.granted = false;
+            self.closes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn listener_reuses_one_local_grant_then_closes_it() {
+        let grants = Arc::new(AtomicUsize::new(0));
+        let parks = Arc::new(AtomicUsize::new(0));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let mut sink = RemoteInputSink::new(ReusableInjector {
+            grants: Arc::clone(&grants),
+            parks: Arc::clone(&parks),
+            closes: Arc::clone(&closes),
+            granted: false,
+        });
+        for _ in 0..3 {
+            sink.begin_session().unwrap();
+            sink.enter_remote(EdgePosition {
+                edge: ukvm_protocol::Edge::Left,
+                fraction: 0.5,
+            })
+            .unwrap();
+            sink.end_session().unwrap();
+        }
+        assert_eq!(grants.load(Ordering::SeqCst), 1);
+        assert_eq!(parks.load(Ordering::SeqCst), 3);
+        sink.shutdown().unwrap();
+        assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 }

@@ -247,7 +247,13 @@ fn listen_remote(args: &[String]) -> ExitCode {
         };
         let mut sink = RemoteInputSink::new(injector);
         loop {
-            let accepted = tokio::select! { accepted = listener.accept() => accepted, _ = tokio::signal::ctrl_c() => return ExitCode::SUCCESS };
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = tokio::signal::ctrl_c() => {
+                    if let Err(err) = sink.shutdown() { eprintln!("Injector shutdown: {err}"); }
+                    return ExitCode::SUCCESS;
+                }
+            };
             let (tcp, addr) = match accepted {
                 Ok(value) => value,
                 Err(err) => {
@@ -337,8 +343,19 @@ fn listen_remote(args: &[String]) -> ExitCode {
                 eprintln!("Remote session released: {err}");
             }
             match stop_reason.load(Ordering::Acquire) {
-                1 => return ExitCode::SUCCESS,
-                2 => eprintln!("Remote input authorization revoked; session closed."),
+                1 => {
+                    if let Err(err) = sink.shutdown() {
+                        eprintln!("Injector shutdown: {err}");
+                    }
+                    return ExitCode::SUCCESS;
+                }
+                2 => {
+                    eprintln!("Remote input authorization revoked; session closed.");
+                    if let Err(err) = sink.shutdown() {
+                        eprintln!("Injector shutdown: {err}");
+                    }
+                    return ExitCode::SUCCESS;
+                }
                 _ => {}
             }
         }

@@ -46,6 +46,7 @@ enum Command {
         reply::SyncSender<Result<Option<EdgePosition>, PlatformError>>,
     ),
     Release(reply::SyncSender<Result<(), PlatformError>>),
+    Park(reply::SyncSender<Result<(), PlatformError>>),
     End(reply::SyncSender<Result<(), PlatformError>>),
 }
 
@@ -232,6 +233,10 @@ impl PlatformInputInjector for WaylandInputInjector {
 
     fn release_all(&mut self) -> Result<(), PlatformError> {
         self.request(Command::Release, COMMAND_TIMEOUT)
+    }
+
+    fn park(&mut self) -> Result<(), PlatformError> {
+        self.request(Command::Park, COMMAND_TIMEOUT)
     }
 
     fn end(&mut self) -> Result<(), PlatformError> {
@@ -693,38 +698,58 @@ async fn run_actor(
     portal: RemoteDesktop,
 ) {
     let mut session: Option<PortalEisSession> = None;
+    let mut in_use = false;
     loop {
         if let Some(active) = session.as_mut() {
             tokio::select! {
                 command = commands.recv() => match command {
                     Some(Command::Event(event, reply)) => {
-                        let result = active.inject(&event);
+                        let result = if in_use { active.inject(&event) } else { Err(PlatformError::SessionClosed) };
                         if result.is_err() { healthy.store(false, Ordering::Release); }
                         let _ = reply.send(result);
                     }
                     Some(Command::Enter(entry, reply)) => {
-                        let result = active.enter_remote(entry);
+                        let result = if in_use { active.enter_remote(entry) } else { Err(PlatformError::SessionClosed) };
                         if result.is_err() { healthy.store(false, Ordering::Release); }
                         let _ = reply.send(result);
                     }
                     Some(Command::RemoteEvent(event, reply)) => {
-                        let result = active.inject_remote(&event);
+                        let result = if in_use { active.inject_remote(&event) } else { Err(PlatformError::SessionClosed) };
                         if result.is_err() { healthy.store(false, Ordering::Release); }
                         let _ = reply.send(result);
                     }
                     Some(Command::Release(reply)) => {
                         let _ = reply.send(active.release_all());
                     }
+                    Some(Command::Park(reply)) => {
+                        let result = active.release_all();
+                        active.remote_pointer = None;
+                        in_use = false;
+                        let _ = reply.send(result);
+                    }
                     Some(Command::End(reply)) => {
                         healthy.store(false, Ordering::Release);
+                        in_use = false;
                         let result = session.take().expect("active session").close().await;
                         let _ = reply.send(result);
                     }
                     Some(Command::Begin(reply)) => {
-                        let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
+                        let result = if in_use {
+                            Err(PlatformError::Backend("injector session already active".into()))
+                        } else {
+                            in_use = true;
+                            Ok(())
+                        };
+                        let _ = reply.send(result);
                     }
                     Some(Command::BeginAsync(reply)) => {
-                        let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
+                        let result = if in_use {
+                            Err(PlatformError::Backend("injector session already active".into()))
+                        } else {
+                            in_use = true;
+                            Ok(())
+                        };
+                        let _ = reply.send(result);
                     }
                     None => break,
                 },
@@ -732,6 +757,7 @@ async fn run_actor(
                     let failed = matches!(event, Some(Ok(EiEvent::Disconnected(_) | EiEvent::DeviceRemoved(_) | EiEvent::DevicePaused(_))) | Some(Err(_)) | None);
                     if failed {
                         healthy.store(false, Ordering::Release);
+                        in_use = false;
                         if let Some(active) = session.take() {
                             let _ = active.close().await;
                         }
@@ -756,6 +782,7 @@ async fn run_actor(
                                 *value = opened.capabilities();
                             }
                             healthy.store(true, Ordering::Release);
+                            in_use = true;
                             session = Some(opened);
                             let _ = reply.send(Ok(()));
                         }
@@ -779,6 +806,7 @@ async fn run_actor(
                                 healthy.store(false, Ordering::Release);
                                 let _ = opened.close().await;
                             } else {
+                                in_use = true;
                                 session = Some(opened);
                             }
                         }
@@ -787,8 +815,12 @@ async fn run_actor(
                         }
                     }
                 }
-                Some(Command::Event(_, reply) | Command::Release(reply) | Command::End(reply)) => {
+                Some(Command::Event(_, reply) | Command::Release(reply) | Command::Park(reply)) => {
                     let _ = reply.send(Err(PlatformError::SessionClosed));
+                }
+                Some(Command::End(reply)) => {
+                    let _ = reply.send(Ok(()));
+                    break;
                 }
                 Some(Command::Enter(_, reply)) => {
                     let _ = reply.send(Err(PlatformError::SessionClosed));
