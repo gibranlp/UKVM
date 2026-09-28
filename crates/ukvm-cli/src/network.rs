@@ -238,6 +238,14 @@ fn listen_remote(args: &[String]) -> ExitCode {
             Err(err) => return super::fail(&err),
         };
         println!("UniversalKVM Remote Input Receiver\n  Node: {}\n  Listening: {}\n  Local consent will be requested for each session. Ctrl+C stops and releases input.", options.name, listener.local_addr().unwrap());
+        // Keep the injector actor's Tokio runtime alive for the listener's
+        // lifetime. Portal/EI connections created in that runtime must not be
+        // reused after it has been torn down between peer sessions.
+        let injector = match WaylandInputInjector::open_verbose(options.verbose).await {
+            Ok(injector) => injector,
+            Err(err) => return super::fail(&format!("Injector unavailable: {err}")),
+        };
+        let mut sink = RemoteInputSink::new(injector);
         loop {
             let accepted = tokio::select! { accepted = listener.accept() => accepted, _ = tokio::signal::ctrl_c() => return ExitCode::SUCCESS };
             let (tcp, addr) = match accepted {
@@ -254,14 +262,6 @@ fn listen_remote(args: &[String]) -> ExitCode {
                     continue;
                 }
             };
-            let injector = match WaylandInputInjector::open_verbose(options.verbose).await {
-                Ok(injector) => injector,
-                Err(err) => {
-                    eprintln!("Injector unavailable: {err}");
-                    continue;
-                }
-            };
-            let mut sink = RemoteInputSink::new(injector);
             let connection = match transport::accept_remote_trusted(
                 tcp,
                 &identity,

@@ -412,4 +412,25 @@ mod injector_tests {
             .handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
             .is_err());
     }
+
+    #[test]
+    fn one_remote_sink_can_serve_repeated_sessions() {
+        let held = Arc::new(Mutex::new((false, false)));
+        let mut sink = RemoteInputSink::new(HeldInjector(Arc::clone(&held)));
+        for _ in 0..3 {
+            sink.begin_session().unwrap();
+            sink.enter_remote(EdgePosition {
+                edge: ukvm_protocol::Edge::Left,
+                fraction: 0.5,
+            })
+            .unwrap();
+            sink.handle_event(&InputEvent::Key {
+                code: ukvm_protocol::KeyCode::LinuxEvdev(42),
+                pressed: true,
+            })
+            .unwrap();
+            sink.end_session().unwrap();
+            assert_eq!(*held.lock().unwrap(), (false, false));
+        }
+    }
 }

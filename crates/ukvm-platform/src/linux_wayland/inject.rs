@@ -690,7 +690,6 @@ async fn run_actor(
                         healthy.store(false, Ordering::Release);
                         let result = session.take().expect("active session").close().await;
                         let _ = reply.send(result);
-                        break;
                     }
                     Some(Command::Begin(reply)) => {
                         let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
@@ -704,7 +703,9 @@ async fn run_actor(
                     let failed = matches!(event, Some(Ok(EiEvent::Disconnected(_) | EiEvent::DeviceRemoved(_) | EiEvent::DevicePaused(_))) | Some(Err(_)) | None);
                     if failed {
                         healthy.store(false, Ordering::Release);
-                        break;
+                        if let Some(active) = session.take() {
+                            let _ = active.close().await;
+                        }
                     }
                 }
             }
