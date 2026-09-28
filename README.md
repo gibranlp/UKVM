@@ -2,7 +2,7 @@
 
 UniversalKVM (`ukvm`) is a planned cross-platform software KVM for moving keyboard and mouse control between computers while each uses its own display. One installation can act as controller, controlled machine, or both. Targets are Linux Wayland, Linux X11, macOS, and Windows.
 
-**Current state:** Linux Wayland InputCapture and the development transport are proven across two physical computers. LAN tests carried 528 and 621 pointer events with none dropped and about 1.26 and 1.39 ms heartbeat RTT, respectively. A live receiver termination stopped capture after about 30 pointer events; portal Release succeeded and local input returned. UKVM now stores peer certificates, aliases, permissions, and node-level edge links. The receiver remains a **DebugSink** and never injects. The active Hyprland portal has no RemoteDesktop interface, so injection is unavailable here. Discovery, pairing, and the background node are not implemented.
+**Current state:** Linux Wayland InputCapture and the development transport are proven across two physical computers. LAN tests carried 528 and 621 pointer events with none dropped and about 1.26 and 1.39 ms heartbeat RTT, respectively. A live receiver termination stopped capture after about 30 pointer events; portal Release succeeded and local input returned. The configured right-edge → peer alias → pinned certificate → mTLS → DebugSink workflow was also physically tested across PC A and PC B and reported to work flawlessly. UKVM now stores peer certificates, aliases, permissions, and node-level edge links. First-contact pairing can create those trust records without exchanging `.der` files manually; it has passed localhost tests but awaits a physical two-PC pairing test. The receiver remains a **DebugSink** and never injects. The active Hyprland portal has no RemoteDesktop interface, so injection is unavailable here. Discovery and the background node are not implemented.
 
 ## Build and inspect
 
@@ -26,9 +26,11 @@ For transport testing, exchange each node's **public** `node.der` certificate an
 
 For the configured workflow, import and verify each other's public certificates once with `ukvm peer add CERT --name ALIAS --address HOST`. On the receiver, explicitly run `ukvm peer allow ALIAS debug-input`, then `ukvm listen`. On the controller, run `ukvm layout set right ALIAS` and `ukvm control right --debug`. This remains a non-injecting DebugSink session. `ukvm peer show ALIAS` displays the full SHA-256 fingerprint; names and addresses are labels and connection hints, never identity.
 
+As an alternative to manual certificate exchange, run `ukvm pair` on one node and `ukvm pair HOST` on the other. Compare the same short verification code on both screens and confirm on both terminals. Pairing uses a temporary listener on port 24801 and creates the same pinned peer records with **both input permissions denied**. See [pairing security and safe physical trial](docs/PAIRING.md). Manual `peer add` remains available.
+
 ## Design
 
-The CLI remains independent of the future background process. Core policy, input backends, configuration, protocol types and transport are separate Rust crates. Discovery and pairing remain future work. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), and [roadmap](docs/ROADMAP.md).
+The CLI remains independent of the future background process. Core policy, input backends, configuration, protocol types and transport are separate Rust crates. Discovery remains future work. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), and [roadmap](docs/ROADMAP.md).
 
 ## License
 

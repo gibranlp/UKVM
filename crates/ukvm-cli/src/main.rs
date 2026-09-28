@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 mod network;
+mod pairing;
 mod settings;
 
 const HELP: &str = "UniversalKVM\n\
@@ -22,7 +23,8 @@ Commands:\n\
   status    Show node, peers, layout, and capabilities\n\
   start     Start UKVM (not implemented yet)\n\
   stop      Stop UKVM (not implemented yet)\n\
-  pair      Pair a peer (not implemented yet)\n\
+  pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
+  pair --bind ADDR:PORT  Test with an explicit temporary pairing listener\n\
   devices   List peers (not implemented yet)\n\
   help      Show this help";
 
@@ -49,6 +51,7 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "config" => settings::config(rest),
         [command, rest @ ..] if command == "peer" => settings::peer(rest),
         [command, rest @ ..] if command == "layout" => settings::layout(rest),
+        [command, rest @ ..] if command == "pair" => pairing::pair(rest),
         [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
         [command] if command == "status" => settings::status(),
         [command] if command == "doctor" => doctor(),
@@ -199,7 +202,7 @@ fn main() -> ExitCode {
                 }
             })
         }
-        [command, ..] if matches!(command.as_str(), "start" | "stop" | "pair" | "devices") => {
+        [command, ..] if matches!(command.as_str(), "start" | "stop" | "devices") => {
             fail(&format!("{command} is not implemented yet"))
         }
         _ => {

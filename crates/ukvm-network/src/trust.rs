@@ -24,6 +24,28 @@ pub fn default_trust_dir() -> Result<PathBuf, String> {
     }
 }
 
+/// Serialize read-modify-write trust operations across local processes.
+pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(dir.join(".edit.lock"))
+        .map_err(|e| e.to_string())?;
+    fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("cannot lock UKVM edits: {e}"))?;
+    Ok(file)
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
