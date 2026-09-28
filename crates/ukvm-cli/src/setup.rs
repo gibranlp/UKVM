@@ -65,6 +65,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
+fn address_changed(current: Option<&str>, verified: &str) -> bool {
+    current
+        .and_then(|value| ukvm_network::trust::resolve_address(value).ok())
+        .as_deref()
+        != Some(verified)
+}
+
 fn ask(prompt: &str) -> Result<String, String> {
     print!("{prompt}");
     io::stdout().flush().map_err(|e| e.to_string())?;
@@ -190,7 +197,7 @@ async fn run(options: Options) -> Result<(), String> {
                         .find_id(&peer.id)
                         .ok_or("trusted peer disappeared")?
                         .clone();
-                    if current.address.as_deref() != Some(address.as_str())
+                    if address_changed(current.address.as_deref(), &address)
                         && yes_no(
                             &format!(
                                 "Update {}'s connection address from {} to {address}?",
@@ -628,6 +635,13 @@ async fn platform_capability() -> setup_model::CapabilitySummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_hint_with_default_port_is_unchanged() {
+        assert!(!address_changed(Some("192.168.1.40"), "192.168.1.40:24800"));
+        assert!(address_changed(Some("192.168.1.41"), "192.168.1.40:24800"));
+    }
+
     #[test]
     fn setup_options_require_explicit_host_and_no_yes_bypass() {
         assert_eq!(parse(&[]).unwrap(), Options::default());
