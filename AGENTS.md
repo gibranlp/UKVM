@@ -48,3 +48,9 @@ cargo build --workspace
 ```
 
 Tests should cover meaningful policy, version compatibility, parsing, malformed input and backend capability behavior. Platform backend claims require tests on actual target OS/session and, for Wayland, representative compositors. Record untested platforms honestly. Keep `README.md` and `docs/` aligned with reality; update protocol versioning and security notes when behavior changes. Do not mark a CLI command or backend operational until it really works end to end.
+
+## Two-computer testing and Git attribution
+
+When a change needs to be checked on the other computer, complete local review and validation, then commit and push the relevant code to the configured Git remote before giving instructions to pull or test it there. Verify that the push succeeded and report the commit ID. If it cannot be pushed, say so clearly; do not present an unpublished change as ready for the other computer. Check the staged files for secrets and build output before committing.
+
+Use the repository owner's configured Git identity. Do not add Codex as an author, co-author, contributor, or commit trailer, and do not add Codex to a contributors list.
