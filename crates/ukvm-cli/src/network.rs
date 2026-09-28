@@ -1,7 +1,7 @@
 use std::{
     path::PathBuf,
     process::ExitCode,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicU8, Ordering},
     time::{Duration, Instant},
 };
 use ukvm_network::{
@@ -80,6 +80,9 @@ pub fn identity(args: &[String]) -> ExitCode {
 }
 
 pub fn listen(args: &[String]) -> ExitCode {
+    if let Some(rest) = args.strip_prefix(&["--remote".to_string()]) {
+        return listen_remote(rest);
+    }
     let result = options(args).and_then(|options| {
         let mut options = options;
         if !args.iter().any(|arg| arg == "--bind") {
@@ -180,6 +183,135 @@ pub fn listen(args: &[String]) -> ExitCode {
                     }
                 }
                 Err(err) => eprintln!("Rejected connection from {addr}: {err}"),
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn listen_remote(args: &[String]) -> ExitCode {
+    if args.iter().any(|arg| arg == "--peer-cert") {
+        return super::fail(
+            "remote input requires a trusted peer with control-this-node permission",
+        );
+    }
+    let prepared = options(args).and_then(|options| {
+        let store = TrustStore::load(&options.trust_dir)?;
+        if !store
+            .peers
+            .iter()
+            .any(|p| p.permissions.connect && p.permissions.control_this_node)
+        {
+            return Err("no trusted peer has control-this-node permission".into());
+        }
+        let identity = Identity::load_or_create(&options.state_dir)?;
+        Ok((options, identity))
+    });
+    let (options, identity) = match prepared {
+        Ok(value) => value,
+        Err(err) => return super::fail(&err),
+    };
+    super::with_runtime(async move {
+        use ukvm_platform::{linux_wayland::WaylandInputInjector, RemoteInputSink};
+        let probe = ukvm_platform::linux_wayland::probe().await;
+        if probe.remote.version.is_none_or(|v| v < 2) || !probe.remote.pointer_advertised {
+            return super::fail("RemoteDesktop v2/ConnectToEIS pointer injection is unavailable");
+        }
+        let listener = match transport::bind(&options.bind).await {
+            Ok(listener) => listener,
+            Err(err) => return super::fail(&err),
+        };
+        println!("UniversalKVM Remote Input Receiver\n  Node: {}\n  Listening: {}\n  Local consent will be requested for each session. Ctrl+C stops and releases input.", options.name, listener.local_addr().unwrap());
+        loop {
+            let accepted = tokio::select! { accepted = listener.accept() => accepted, _ = tokio::signal::ctrl_c() => return ExitCode::SUCCESS };
+            let (tcp, addr) = match accepted {
+                Ok(value) => value,
+                Err(err) => {
+                    eprintln!("Accept error: {err}");
+                    continue;
+                }
+            };
+            let store = match TrustStore::load(&options.trust_dir) {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("Trust store error: {err}");
+                    continue;
+                }
+            };
+            let injector = match WaylandInputInjector::open().await {
+                Ok(injector) => injector,
+                Err(err) => {
+                    eprintln!("Injector unavailable: {err}");
+                    continue;
+                }
+            };
+            let mut sink = RemoteInputSink::new(injector);
+            let connection = match transport::accept_remote_trusted(
+                tcp,
+                &identity,
+                &store,
+                &options.trust_dir,
+                &options.name,
+                &sink,
+            )
+            .await
+            {
+                Ok(connection) => connection,
+                Err(err) => {
+                    eprintln!("Rejected connection from {addr}: {err}");
+                    continue;
+                }
+            };
+            let peer_id = connection.peer.id.clone();
+            println!(
+                "Authenticated remote-control peer {} ({peer_id}) from {addr}",
+                connection.peer.name
+            );
+            let trust_dir = options.trust_dir.clone();
+            let revoked = async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(500));
+                loop {
+                    tick.tick().await;
+                    let permitted = TrustStore::load(&trust_dir)
+                        .ok()
+                        .and_then(|s| s.find_id(&peer_id).cloned())
+                        .is_some_and(|p| p.permissions.connect && p.permissions.control_this_node);
+                    if !permitted {
+                        break;
+                    }
+                }
+            };
+            let stop_reason = AtomicU8::new(0);
+            let shutdown = async {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => stop_reason.store(1, Ordering::Release),
+                    _ = revoked => stop_reason.store(2, Ordering::Release),
+                }
+            };
+            let result = transport::receive_session_until(
+                connection,
+                &mut sink,
+                |notice| match notice {
+                    ReceiverNotice::SessionStarted => println!("Remote input session active."),
+                    ReceiverNotice::Counts(c) => println!(
+                        "Received: pointer={} buttons={} scroll={} keyboard={}",
+                        c.pointer, c.buttons, c.scroll, c.keyboard
+                    ),
+                    ReceiverNotice::SessionEnded(c) => println!(
+                        "Remote input released: pointer={} buttons={} scroll={} keyboard={}",
+                        c.pointer, c.buttons, c.scroll, c.keyboard
+                    ),
+                },
+                shutdown,
+            )
+            .await;
+            if let Err(err) = result {
+                eprintln!("Remote session released: {err}");
+            }
+            match stop_reason.load(Ordering::Acquire) {
+                1 => return ExitCode::SUCCESS,
+                2 => eprintln!("Remote input authorization revoked; session closed."),
+                _ => {}
             }
         }
     })
@@ -294,6 +426,18 @@ pub fn capture_send(
     args: &[String],
     verbose: bool,
 ) -> ExitCode {
+    capture_send_for(edge, zone, target, args, verbose, false)
+}
+
+#[cfg(target_os = "linux")]
+fn capture_send_for(
+    edge: ukvm_platform::linux_wayland::Edge,
+    zone: Option<usize>,
+    target: &str,
+    args: &[String],
+    verbose: bool,
+    remote: bool,
+) -> ExitCode {
     let result = options(args).and_then(|options| {
         let (target, cert) = resolve_target(target, &options)?;
         let identity = Identity::load_or_create(&options.state_dir)?;
@@ -310,14 +454,24 @@ pub fn capture_send(
                 Err(err) => return super::fail(&err),
             };
         println!(
-            "Authenticated peer {} ({}). Requesting debug session before capture.",
-            connection.peer.name, connection.peer.id
+            "Authenticated peer {} ({}). Requesting {} session before capture.",
+            connection.peer.name,
+            connection.peer.id,
+            if remote { "remote input" } else { "debug" }
         );
-        let sender = match transport::start_sender(connection).await {
+        let sender = match if remote {
+            transport::start_remote_sender(connection).await
+        } else {
+            transport::start_sender(connection).await
+        } {
             Ok(sender) => sender,
             Err(err) => return super::fail(&err),
         };
-        println!("Remote DebugSink accepted. Cross the selected {edge:?} edge to send event counts. Press Esc to release.");
+        if remote {
+            println!("Remote input authorized. Cross the selected {edge:?} edge. Release: Ctrl+Alt+Shift+Escape or Ctrl+C; active capture ends after 30 seconds.");
+        } else {
+            println!("Remote DebugSink accepted. Cross the selected {edge:?} edge to send event counts. Press Esc to release.");
+        }
         let dropped = AtomicU64::new(0);
         let queue = sender.queue.clone();
         let mut health = sender.alive.clone();
@@ -338,10 +492,22 @@ pub fn capture_send(
         };
         let mut healthy = || *health.borrow_and_update();
         let mut notice = |event| super::print_capture_notice(event, verbose);
-        let capture = ukvm_platform::linux_wayland::capture_with_events(
+        let capture = ukvm_platform::linux_wayland::capture_with_events_mode(
             edge,
             zone,
-            Duration::from_secs(60),
+            ukvm_platform::linux_wayland::CaptureTiming {
+                duration: Duration::from_secs(60),
+                release_mode: if remote {
+                    ukvm_platform::linux_wayland::ReleaseMode::EmergencyChord
+                } else {
+                    ukvm_platform::linux_wayland::ReleaseMode::Escape
+                },
+                active_duration: if remote {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_secs(5)
+                },
+            },
             &mut notice,
             &mut on_event,
             &mut healthy,
@@ -374,6 +540,11 @@ pub fn capture_send(
 #[cfg(target_os = "linux")]
 pub fn control(edge: &str, args: &[String]) -> ExitCode {
     let zone = match args {
+        [] => None,
+        [flag, value] if flag == "--zone" => match value.parse::<usize>() {
+            Ok(n) => Some(n),
+            Err(_) => return super::fail("--zone requires a nonnegative zone index"),
+        },
         [debug] if debug == "--debug" => None,
         [debug, flag, value] if debug == "--debug" && flag == "--zone" => {
             match value.parse::<usize>() {
@@ -381,11 +552,7 @@ pub fn control(edge: &str, args: &[String]) -> ExitCode {
                 Err(_) => return super::fail("--zone requires a nonnegative zone index"),
             }
         }
-        _ => {
-            return super::fail(
-                "usage: ukvm control <edge> --debug [--zone INDEX] (DebugSink only)",
-            )
-        }
+        _ => return super::fail("usage: ukvm control <edge> [--debug] [--zone INDEX]"),
     };
     let edge = match ukvm_config::Edge::parse(edge) {
         Ok(e) => e,
@@ -425,6 +592,15 @@ pub fn control(edge: &str, args: &[String]) -> ExitCode {
         Ok(v) => v,
         Err(e) => return super::fail(&e),
     };
-    println!("UniversalKVM development control\n  Peer: {alias}\n  Edge: {}\n  Session: DebugSink; no remote input injection", edge.as_str());
-    capture_send(platform_edge, zone, &alias, &[], false)
+    let debug = args.first().is_some_and(|arg| arg == "--debug");
+    println!(
+        "UniversalKVM control\n  Peer: {alias}\n  Edge: {}\n  Session: {}",
+        edge.as_str(),
+        if debug {
+            "DebugSink; no remote input injection"
+        } else {
+            "Remote input; receiver must authorize and provide an injector"
+        }
+    );
+    capture_send_for(platform_edge, zone, &alias, &[], false, !debug)
 }

@@ -116,6 +116,9 @@ pub trait PlatformInputInjector: Send {
     /// Must clean up partial native state before returning an error.
     fn begin(&mut self) -> Result<(), PlatformError>;
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError>;
+    fn is_healthy(&self) -> bool {
+        true
+    }
     fn release_all(&mut self) -> Result<(), PlatformError>;
     fn end(&mut self) -> Result<(), PlatformError>;
 }
@@ -163,6 +166,10 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
             return Err("injector capability mismatch".into());
         }
         self.injector.inject(event).map_err(|e| e.to_string())
+    }
+
+    fn is_healthy(&self) -> bool {
+        !self.active || self.injector.is_healthy()
     }
 
     fn end_session(&mut self) -> Result<(), String> {

@@ -1,7 +1,7 @@
 //! Portal-based Wayland probing and experimental input capture.
 //! D-Bus and EI details stay in this module.
 
-use crate::{CapabilityEvidence, PlatformError};
+use crate::CapabilityEvidence;
 use ashpd::desktop::input_capture::{
     ActivatedBarrier, Barrier, BarrierID, BarrierPosition, Capabilities as CaptureFlags,
     CreateSession2Options, CreateSessionOptions, InputCapture, StartOptions,
@@ -13,7 +13,7 @@ use reis::{
     ei::{self, button::ButtonState, keyboard::KeyState},
     event::{DeviceCapability, EiEvent},
 };
-use std::{os::unix::net::UnixStream, path::PathBuf, time::Duration};
+use std::{collections::HashSet, os::unix::net::UnixStream, path::PathBuf, time::Duration};
 use ukvm_protocol::{InputEvent, KeyCode};
 
 mod geometry;
@@ -91,29 +91,8 @@ impl InjectionPortalCapability {
     }
 }
 
-/// Portal presence is only detection. UKVM has no EI sender implementation yet.
-pub struct WaylandInputInjector {
-    _private: (),
-}
-
-impl WaylandInputInjector {
-    pub async fn open() -> Result<Self, PlatformError> {
-        let report = probe().await;
-        if report.remote.version.is_none() {
-            return Err(PlatformError::Unsupported(
-                "RemoteDesktop portal interface not provided by active backend",
-            ));
-        }
-        if report.remote.version.is_some_and(|version| version < 2) {
-            return Err(PlatformError::Unsupported(
-                "RemoteDesktop portal does not provide ConnectToEIS",
-            ));
-        }
-        Err(PlatformError::Unsupported(
-            "Wayland EI sender and portal authorization are not implemented",
-        ))
-    }
-}
+mod inject;
+pub use inject::WaylandInputInjector;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WaylandInjectionEvidence {
@@ -127,14 +106,16 @@ pub fn injection_evidence(probe: &InterfaceProbe) -> WaylandInjectionEvidence {
     let eis = probe.version.is_some_and(|version| version >= 2);
     let pointer = CapabilityEvidence {
         detected: eis && probe.pointer_advertised,
+        implemented: true,
         ..CapabilityEvidence::default()
     };
     WaylandInjectionEvidence {
         pointer,
-        button: CapabilityEvidence::default(),
-        scroll: CapabilityEvidence::default(),
+        button: pointer,
+        scroll: pointer,
         keyboard: CapabilityEvidence {
             detected: eis && probe.keyboard_advertised,
+            implemented: true,
             ..CapabilityEvidence::default()
         },
     }
@@ -503,6 +484,49 @@ where
     G: FnMut(InputEvent) -> Result<(), String>,
     H: FnMut() -> bool,
 {
+    capture_with_events_mode(
+        edge,
+        zone_index,
+        CaptureTiming {
+            duration,
+            active_duration: Duration::from_secs(5),
+            release_mode: ReleaseMode::Escape,
+        },
+        on_notice,
+        on_event,
+        is_healthy,
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReleaseMode {
+    Escape,
+    EmergencyChord,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureTiming {
+    pub duration: Duration,
+    pub active_duration: Duration,
+    pub release_mode: ReleaseMode,
+}
+
+/// Remote sessions reserve Ctrl+Alt+Shift+Escape for local release. Escape
+/// remains an ordinary forwarded key unless all three modifiers are held.
+pub async fn capture_with_events_mode<F, G, H>(
+    edge: Edge,
+    zone_index: Option<usize>,
+    timing: CaptureTiming,
+    on_notice: &mut F,
+    on_event: &mut G,
+    is_healthy: &mut H,
+) -> Result<CaptureSummary, String>
+where
+    F: FnMut(CaptureNotice),
+    G: FnMut(InputEvent) -> Result<(), String>,
+    H: FnMut() -> bool,
+{
     let session = CaptureSession::open().await?;
     on_notice(CaptureNotice::SessionCreated {
         version: session.portal.version(),
@@ -514,7 +538,7 @@ where
         is_healthy,
     };
     let result = capture_inner(
-        &session, edge, zone_index, duration, on_notice, &mut hooks, &mut phase,
+        &session, edge, zone_index, timing, on_notice, &mut hooks, &mut phase,
     )
     .await;
     let close = session.close().await;
@@ -538,7 +562,7 @@ async fn capture_inner<F, G, H>(
     session: &CaptureSession,
     edge: Edge,
     zone_index: Option<usize>,
-    duration: Duration,
+    timing: CaptureTiming,
     on_notice: &mut F,
     hooks: &mut CaptureHooks<'_, G, H>,
     phase: &mut CapturePhase,
@@ -628,7 +652,7 @@ where
         .map_err(|e| e.to_string())?;
     on_notice(CaptureNotice::Enabled);
     let mut summary = CaptureSummary::default();
-    let deadline = tokio::time::sleep(duration);
+    let deadline = tokio::time::sleep(timing.duration);
     tokio::pin!(deadline);
     let mut portal_active = false;
     let mut eis_active = false;
@@ -637,6 +661,7 @@ where
     let mut active_until = None;
     let mut abort_reason = None;
     let mut health_tick = tokio::time::interval(Duration::from_millis(100));
+    let mut held_keys = HashSet::new();
     loop {
         tokio::select! {
             _ = health_tick.tick() => {
@@ -662,7 +687,7 @@ where
                 summary.activations += 1;
                 if *phase == CapturePhase::Captured { abort_reason = Some("duplicate InputCapture activation".into()); break; }
                 *phase = phase.advance(CapturePhase::Captured)?;
-                active_until = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                active_until = Some(tokio::time::Instant::now() + timing.active_duration);
                 on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier });
             }
             signal = deactivated.next() => {
@@ -711,12 +736,20 @@ where
                     other if portal_active || eis_active => {
                         if let Some(input) = normalize_event(&other) {
                             if !(hooks.is_healthy)() { abort_reason = Some("peer connection lost; releasing local InputCapture".into()); break; }
+                            if let InputEvent::Key { code: KeyCode::LinuxEvdev(code), pressed } = &input {
+                                if *pressed { held_keys.insert(*code); } else { held_keys.remove(code); }
+                                if *pressed && *code == 1 && match timing.release_mode {
+                                    ReleaseMode::Escape => true,
+                                    ReleaseMode::EmergencyChord => emergency_modifiers_held(&held_keys),
+                                } {
+                                    break;
+                                }
+                            }
                             if let Err(err) = (hooks.on_event)(input.clone()) { abort_reason = Some(format!("event forwarding stopped: {err}")); break; }
                             match input {
                                 InputEvent::PointerMotion { .. } => summary.pointer_events += 1,
                                 InputEvent::PointerButton { .. } => summary.button_events += 1,
                                 InputEvent::Scroll { .. } => summary.scroll_events += 1,
-                                InputEvent::Key { code: KeyCode::LinuxEvdev(1), pressed: true } => break,
                                 InputEvent::Key { .. } => summary.key_events += 1,
                             }
                             let total = summary.pointer_events + summary.button_events + summary.scroll_events + summary.key_events;
@@ -759,6 +792,12 @@ where
     }
 }
 
+fn emergency_modifiers_held(keys: &HashSet<u32>) -> bool {
+    (keys.contains(&29) || keys.contains(&97))
+        && (keys.contains(&56) || keys.contains(&100))
+        && (keys.contains(&42) || keys.contains(&54))
+}
+
 fn normalize_event(event: &EiEvent) -> Option<InputEvent> {
     match event {
         EiEvent::PointerMotion(e) => Some(InputEvent::PointerMotion {
@@ -784,9 +823,21 @@ fn normalize_event(event: &EiEvent) -> Option<InputEvent> {
 #[cfg(test)]
 mod tests {
     use super::{
-        select_barriers, validate_barriers, CapturePhase, Edge, InjectionPortalCapability,
-        InterfaceProbe, Zone,
+        emergency_modifiers_held, select_barriers, validate_barriers, CapturePhase, Edge,
+        InjectionPortalCapability, InterfaceProbe, Zone,
     };
+
+    #[test]
+    fn emergency_release_requires_all_three_modifier_families() {
+        let mut held = [29, 56, 42].into_iter().collect();
+        assert!(emergency_modifiers_held(&held));
+        held.remove(&42);
+        assert!(!emergency_modifiers_held(&held));
+        held.insert(54);
+        assert!(emergency_modifiers_held(&held));
+        held.remove(&29);
+        assert!(!emergency_modifiers_held(&held));
+    }
 
     #[test]
     fn remote_desktop_probe_does_not_imply_proven_injection() {

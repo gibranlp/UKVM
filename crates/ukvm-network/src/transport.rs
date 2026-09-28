@@ -177,6 +177,33 @@ pub async fn accept_trusted(
     state_dir: &Path,
     name: &str,
 ) -> Result<Connection, String> {
+    accept_trusted_for(tcp, identity, store, state_dir, name, SinkKind::Debug).await
+}
+
+/// Remote input must be selected by the listener and authorized by the
+/// receiving node's trust store. A trusted TLS connection alone is insufficient.
+pub async fn accept_remote_trusted<S: InputSink>(
+    tcp: TcpStream,
+    identity: &Identity,
+    store: &TrustStore,
+    state_dir: &Path,
+    name: &str,
+    sink: &S,
+) -> Result<Connection, String> {
+    if sink.kind() != SinkKind::RemoteInput {
+        return Err("remote listener requires a RemoteInput sink".into());
+    }
+    accept_trusted_for(tcp, identity, store, state_dir, name, SinkKind::RemoteInput).await
+}
+
+async fn accept_trusted_for(
+    tcp: TcpStream,
+    identity: &Identity,
+    store: &TrustStore,
+    state_dir: &Path,
+    name: &str,
+    sink: SinkKind,
+) -> Result<Connection, String> {
     let certificates = store
         .peers
         .iter()
@@ -190,14 +217,14 @@ pub async fn accept_trusted(
         .map_err(|_| "TLS handshake timed out".to_string())?
         .map_err(|e| format!("TLS client authentication failed: {e}"))?;
     let mut stream = TlsStream::from(tls);
-    let peer = exchange_hello(&mut stream, identity, name, false, Some(SinkKind::Debug)).await?;
+    let peer = exchange_hello(&mut stream, identity, name, false, Some(sink)).await?;
     let trusted = store.authorize(&peer.id, SessionPermission::Connect)?;
     Ok(Connection {
         stream,
         peer,
-        local_sink: SinkKind::Debug,
-        allowed_debug: trusted.permissions.debug_input,
-        allowed_remote: false,
+        local_sink: sink,
+        allowed_debug: sink == SinkKind::Debug && trusted.permissions.debug_input,
+        allowed_remote: sink == SinkKind::RemoteInput && trusted.permissions.control_this_node,
     })
 }
 
@@ -299,12 +326,27 @@ where
     let mut counts = EventCounts::default();
     let mut rate_window = Instant::now();
     let mut rate_count = 0u32;
+    let mut health_tick = tokio::time::interval(Duration::from_millis(100));
     tokio::pin!(shutdown);
     let result = loop {
-        let frame = tokio::select! {
-            _ = &mut shutdown => break Err("local control override".into()),
-            frame = tokio::time::timeout(HEALTH_TIMEOUT, read_frame(&mut connection.stream)) => {
-                frame.map_err(|_| "peer heartbeat timed out".to_string()).and_then(|r| r)
+        // Keep the frame read pinned across health checks. Cancelling a partial
+        // length-prefixed read would desynchronize the authenticated stream.
+        let frame = {
+            let read = read_frame(&mut connection.stream);
+            tokio::pin!(read);
+            let timeout = tokio::time::sleep(HEALTH_TIMEOUT);
+            tokio::pin!(timeout);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown => break Err("local control override".into()),
+                    _ = health_tick.tick() => {
+                        if state == ControlledState::ReceivingInput && !sink.is_healthy() {
+                            break Err("input backend disconnected; releasing remote input".into());
+                        }
+                    }
+                    _ = &mut timeout => break Err("peer heartbeat timed out".into()),
+                    frame = &mut read => break frame,
+                }
             }
         };
         let message = match frame {
@@ -445,9 +487,14 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
         }
     };
     write_frame(&mut connection.stream, &request).await?;
-    let (response, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut connection.stream))
+    let accept_timeout = if kind == SinkKind::RemoteInput {
+        Duration::from_secs(125)
+    } else {
+        HANDSHAKE_TIMEOUT
+    };
+    let (response, _) = tokio::time::timeout(accept_timeout, read_frame(&mut connection.stream))
         .await
-        .map_err(|_| "debug session acceptance timed out".to_string())??;
+        .map_err(|_| "session acceptance timed out".to_string())??;
     if response != accepted {
         return Err("peer rejected requested session".into());
     }
@@ -779,6 +826,48 @@ mod tests {
             .await
             .unwrap();
         write_frame(&mut connection.stream, &WireMessage::SessionStart)
+            .await
+            .unwrap();
+        assert!(receiver.await.unwrap().contains("lacks permission"));
+    }
+
+    #[tokio::test]
+    async fn trusted_remote_session_requires_control_permission_not_debug_permission() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b")).unwrap();
+        let state = temp.path().join("trust");
+        let mut store = TrustStore::default();
+        store
+            .import(
+                &state,
+                "a".into(),
+                Some("127.0.0.1".into()),
+                &fs::read(&a.cert_path).unwrap(),
+            )
+            .unwrap();
+        store
+            .set_permission(&state, "a", SessionPermission::DebugInput, true)
+            .unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut sink = FailingRemoteSink {
+                ended: Arc::new(AtomicBool::new(false)),
+            };
+            let connection = accept_remote_trusted(tcp, &b, &store, &state, "b", &sink)
+                .await
+                .unwrap();
+            receive_session(connection, &mut sink, |_| {})
+                .await
+                .unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &temp.path().join("b/node.der"), "a")
+            .await
+            .unwrap();
+        assert!(connection.peer.remote_input);
+        write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
             .await
             .unwrap();
         assert!(receiver.await.unwrap().contains("lacks permission"));

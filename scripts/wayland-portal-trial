@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Reversible user-session trial of Hyprland's consent-capable RemoteDesktop PR.
+set -euo pipefail
+
+revision=0204ffbbcb3cef72af76804cdf59f114f2e2f6d9
+runtime_dir=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set in the graphical user session}
+trial_dir=$runtime_dir/ukvm-xdph-trial
+frontend_override=$runtime_dir/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf
+backend_override=$runtime_dir/systemd/user/xdg-desktop-portal-hyprland.service.d/ukvm-trial.conf
+
+usage() {
+    printf 'Usage: %s start SOURCE_DIR BUILD_DIR | stop | status\n' "$0" >&2
+    exit 2
+}
+
+case ${1:-} in
+    start)
+        [[ $# == 3 ]] || usage
+        source_dir=$(realpath "$2")
+        build_dir=$(realpath "$3")
+        [[ $(git -C "$source_dir" rev-parse HEAD) == "$revision" ]] || {
+            printf 'Wrong upstream revision. Expected %s\n' "$revision" >&2
+            exit 1
+        }
+        [[ -x $build_dir/xdg-desktop-portal-hyprland && -x $build_dir/hyprland-share-picker/hyprland-share-picker ]] || {
+            printf 'Build both the portal backend and consent picker first.\n' >&2
+            exit 1
+        }
+        [[ -f $source_dir/hyprland.portal ]] || {
+            printf 'Pinned source is missing hyprland.portal.\n' >&2
+            exit 1
+        }
+        [[ ! -e $trial_dir && ! -e $frontend_override && ! -e $backend_override ]] || {
+            printf 'Trial or conflicting override already exists; inspect with status.\n' >&2
+            exit 1
+        }
+        mkdir -p "$trial_dir/portals" "$(dirname "$frontend_override")" "$(dirname "$backend_override")"
+        cp /usr/share/xdg-desktop-portal/portals/*.portal "$trial_dir/portals/"
+        cp "$source_dir/hyprland.portal" "$trial_dir/portals/hyprland.portal"
+        # Match the effective Hyprland-specific or generic config precedence.
+        config_source=
+        for candidate in \
+            "${XDG_CONFIG_HOME:-$HOME/.config}/xdg-desktop-portal/hyprland-portals.conf" \
+            "${XDG_CONFIG_HOME:-$HOME/.config}/xdg-desktop-portal/portals.conf" \
+            /etc/xdg/xdg-desktop-portal/hyprland-portals.conf \
+            /etc/xdg/xdg-desktop-portal/portals.conf \
+            /usr/share/xdg-desktop-portal/hyprland-portals.conf; do
+            if [[ -f $candidate ]]; then
+                config_source=$candidate
+                break
+            fi
+        done
+        [[ -n $config_source ]] || { printf 'No effective portal configuration found.\n' >&2; exit 1; }
+        cp "$config_source" "$trial_dir/portals/hyprland-portals.conf"
+        printf 'Copied portal configuration from %s\n' "$config_source"
+        cat > "$frontend_override" <<EOF
+[Service]
+Environment=XDG_DESKTOP_PORTAL_DIR=$trial_dir/portals
+EOF
+        cat > "$backend_override" <<EOF
+[Service]
+ExecStart=
+ExecStart=$build_dir/xdg-desktop-portal-hyprland
+Environment=PATH=$build_dir/hyprland-share-picker:/usr/local/bin:/usr/bin
+EOF
+        printf '%s\n' "$revision" > "$trial_dir/owned-by-ukvm-trial"
+        trap '"$0" stop >/dev/null || true' ERR
+        systemctl --user daemon-reload
+        systemctl --user restart xdg-desktop-portal-hyprland.service
+        systemctl --user restart xdg-desktop-portal.service
+        trap - ERR
+        printf 'Trial active. Verify with ukvm doctor. Roll back: %s stop\n' "$0"
+        ;;
+    stop)
+        [[ -f $trial_dir/owned-by-ukvm-trial ]] || {
+            printf 'No UKVM trial marker; refusing to remove unrelated overrides.\n' >&2
+            exit 1
+        }
+        [[ $(cat "$trial_dir/owned-by-ukvm-trial") == "$revision" ]] || {
+            printf 'Unknown trial marker; inspect manually.\n' >&2
+            exit 1
+        }
+        rm -f "$frontend_override" "$backend_override"
+        rm -f "$trial_dir/portals/"*.portal "$trial_dir/portals/"*portals.conf "$trial_dir/owned-by-ukvm-trial"
+        rmdir "$trial_dir/portals" "$trial_dir"
+        rmdir "$(dirname "$frontend_override")" "$(dirname "$backend_override")" 2>/dev/null || true
+        systemctl --user daemon-reload
+        systemctl --user restart xdg-desktop-portal-hyprland.service
+        systemctl --user restart xdg-desktop-portal.service
+        printf 'Packaged portal restored. Verify InputCapture and RemoteDesktop with ukvm doctor.\n'
+        ;;
+    status)
+        if [[ -f $trial_dir/owned-by-ukvm-trial ]]; then
+            printf 'UKVM runtime portal trial active: %s\n' "$(cat "$trial_dir/owned-by-ukvm-trial")"
+        else
+            printf 'No UKVM runtime portal trial marker.\n'
+        fi
+        systemctl --user cat xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
+        ;;
+    *) usage ;;
+esac

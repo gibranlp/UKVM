@@ -231,7 +231,8 @@ pub fn status() -> ExitCode {
         #[cfg(target_os = "linux")]
         {
             let probe = super::with_runtime(ukvm_platform::linux_wayland::probe());
-            println!("Capabilities\n  Controller pointer: {}\n  Controller keyboard: {}\n  Controlled pointer: false\n  Reason: {}",probe.capture.pointer_advertised,probe.capture.keyboard_advertised,if probe.remote.version.is_some() { "UKVM Wayland injector not implemented" } else { "RemoteDesktop portal unavailable" });
+            let injection = ukvm_platform::linux_wayland::injection_evidence(&probe.remote);
+            println!("Capabilities\n  Controller pointer: {}\n  Controller keyboard: {}\n  Controlled pointer: detected={} implemented={} physically_proven={}\n  Reason: {}",probe.capture.pointer_advertised,probe.capture.keyboard_advertised,injection.pointer.detected,injection.pointer.implemented,injection.pointer.physically_proven,if injection.pointer.detected { "requires local portal consent and physical inject-test" } else { "RemoteDesktop v2 pointer endpoint unavailable" });
         }
         println!("Discovery\n  Backend: mDNS/DNS-SD\n  Supported: yes\n  Active: no (only while ukvm pair listens)");
         println!("Configuration: valid");

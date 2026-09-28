@@ -14,13 +14,16 @@ Commands:\n\
   config [path|check|show]  Inspect configuration\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
   layout [set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
-  control EDGE --debug [--zone INDEX]  Forward captured input to a configured DebugSink\n\
+  control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
+  control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
   doctor    Probe the current graphical session and portal capabilities\n\
   platform wayland zones               Request capture permission and list zones\n\
   platform wayland capture <edge> [zone] [--verbose]  Test local capture\n\
   platform wayland capture <edge> [zone] --send HOST --peer-cert PATH  Send to DebugSink\n\
+  platform wayland inject-test         Opt-in local pointer motion through RemoteDesktop/EIS\n\
   identity [--state-dir DIR]  Show or create persistent node identity\n\
   listen [--peer-cert PATH] [--bind ADDR] [--state-dir DIR]  Authenticated DebugSink\n\
+  listen --remote [--bind ADDR]  Authorized RemoteDesktop/EIS input receiver\n\
   connect PEER [--peer-cert PATH] [--state-dir DIR]  Check peer connection\n\
   debug send-test-events HOST --peer-cert PATH  Send safe synthetic debug events\n\
   status    Show node, peers, layout, and capabilities\n\
@@ -125,6 +128,12 @@ fn main() -> ExitCode {
             })
         }
         #[cfg(target_os = "linux")]
+        [platform, wayland, inject]
+            if platform == "platform" && wayland == "wayland" && inject == "inject-test" =>
+        {
+            inject_test()
+        }
+        #[cfg(target_os = "linux")]
         [platform, wayland, capture, edge, rest @ ..]
             if platform == "platform" && wayland == "wayland" && capture == "capture" =>
         {
@@ -224,6 +233,58 @@ fn main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn inject_test() -> ExitCode {
+    use std::io::{IsTerminal, Write};
+    use ukvm_platform::PlatformInputInjector;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return fail("inject-test requires an interactive terminal");
+    }
+    println!("UniversalKVM Wayland Injection Test\n\nThis will request permission to control the pointer.\n\nThe pointer will:\n  move approximately 100 pixels right\n  pause\n  move approximately 100 pixels left\n\nNo mouse buttons will be pressed.\nNo scrolling will occur.\nNo keyboard input will be generated.\n");
+    print!("Continue? [y/N] ");
+    if let Err(err) = std::io::stdout().flush() {
+        return fail(&err.to_string());
+    }
+    let mut answer = String::new();
+    if let Err(err) = std::io::stdin().read_line(&mut answer) {
+        return fail(&err.to_string());
+    }
+    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES") {
+        println!("Injection test cancelled.");
+        return ExitCode::SUCCESS;
+    }
+    with_runtime(async {
+        let mut injector =
+            match ukvm_platform::linux_wayland::WaylandInputInjector::open_pointer_only().await {
+                Ok(injector) => injector,
+                Err(err) => return fail(&format!("controlled node unavailable: {err}")),
+            };
+        if let Err(err) = injector.begin() {
+            return fail(&format!("RemoteDesktop/EIS authorization failed: {err}"));
+        }
+        let motion =
+            injector.inject(&ukvm_protocol::InputEvent::PointerMotion { dx: 100.0, dy: 0.0 });
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let return_motion = if motion.is_ok() {
+            injector.inject(&ukvm_protocol::InputEvent::PointerMotion {
+                dx: -100.0,
+                dy: 0.0,
+            })
+        } else {
+            Ok(())
+        };
+        let released = injector.release_all();
+        let ended = injector.end();
+        for result in [motion, return_motion, released, ended] {
+            if let Err(err) = result {
+                return fail(&format!("injection test stopped: {err}"));
+            }
+        }
+        println!("Pointer motion submitted and RemoteDesktop session closed. Confirm movement by physical observation; API success alone is not proof.");
+        ExitCode::SUCCESS
+    })
+}
+
 fn fail(message: &str) -> ExitCode {
     eprintln!("ukvm: {message}");
     ExitCode::FAILURE
@@ -307,9 +368,9 @@ fn doctor() -> ExitCode {
         println!(
             "    EIS sender: {}",
             if injection.eis_api_available {
-                "API advertised; UKVM sender not implemented or tested"
+                "implemented; authorization and physical input not tested by doctor"
             } else {
-                "unavailable through this portal"
+                "implemented in UKVM; unavailable through this portal"
             }
         );
         let evidence = ukvm_platform::linux_wayland::injection_evidence(&report.remote);
@@ -357,7 +418,7 @@ fn doctor() -> ExitCode {
             } else if !injection.pointer_advertised && !injection.keyboard_advertised {
                 "UNAVAILABLE (no input devices advertised)"
             } else {
-                "UNPROVEN (portal advertised; UKVM injection not implemented)"
+                "UNPROVEN (portal advertised; opt-in inject-test required)"
             }
         );
         if !session.wayland_socket_reachable {

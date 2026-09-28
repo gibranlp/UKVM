@@ -14,6 +14,11 @@ pub trait InputSink {
     fn kind(&self) -> SinkKind;
     fn begin_session(&mut self) -> Result<(), String>;
     fn handle_event(&mut self, event: &InputEvent) -> Result<(), String>;
+    /// The receiver polls this while idle so backend loss ends the network
+    /// session even when no further input arrives.
+    fn is_healthy(&self) -> bool {
+        true
+    }
     /// Must release held inputs even after an event failure or disconnect.
     fn end_session(&mut self) -> Result<(), String>;
 }
