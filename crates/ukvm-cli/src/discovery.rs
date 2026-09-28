@@ -5,6 +5,16 @@ use std::{
 use ukvm_discovery::{DiscoveryResult, DiscoveryService, DEFAULT_BROWSE};
 use ukvm_network::pairing::PAIRING_VERSION;
 
+const DISCOVER_HELP: &str = "Usage: ukvm discover [--interface NAME]\nBrowse for nearby pairing nodes for four seconds. Results are untrusted address hints.";
+
+fn parse_discover_args(args: &[String]) -> Result<Option<&str>, &'static str> {
+    match args {
+        [] => Ok(None),
+        [flag, name] if flag == "--interface" && !name.starts_with('-') => Ok(Some(name)),
+        _ => Err(DISCOVER_HELP),
+    }
+}
+
 pub async fn browse(interface: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
     let service = DiscoveryService::new(interface)?;
     service.browse_for(DEFAULT_BROWSE).await
@@ -33,10 +43,13 @@ pub fn print_candidates(candidates: &[DiscoveryResult]) {
 }
 
 pub fn discover(args: &[String]) -> ExitCode {
-    let interface = match args {
-        [] => None,
-        [flag, name] if flag == "--interface" => Some(name.as_str()),
-        _ => return super::fail("usage: ukvm discover [--interface NAME]"),
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("{DISCOVER_HELP}");
+        return ExitCode::SUCCESS;
+    }
+    let interface = match parse_discover_args(args) {
+        Ok(interface) => interface,
+        Err(help) => return super::fail(help),
     };
     super::with_runtime(async move {
         println!(
@@ -93,4 +106,20 @@ pub async fn select_candidate(interface: Option<&str>) -> Result<DiscoveryResult
         return Err(format!("{} advertises pairing protocol {}; this build requires {}. The actual handshake also verifies the version", candidate.display_name, candidate.pairing_version, PAIRING_VERSION));
     }
     Ok(candidate.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_and_help_parse_as_discovery() {
+        assert_eq!(parse_discover_args(&[]), Ok(None));
+        assert_eq!(
+            parse_discover_args(&["--interface".into(), "enp10s0".into()]),
+            Ok(Some("enp10s0"))
+        );
+        assert!(parse_discover_args(&["--help".into()]).is_err());
+        assert!(DISCOVER_HELP.starts_with("Usage: ukvm discover"));
+    }
 }

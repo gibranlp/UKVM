@@ -1623,6 +1623,7 @@ dependencies = [
 name = "ukvm-discovery"
 version = "0.1.0"
 dependencies = [
+ "if-addrs",
  "mdns-sd",
  "tokio",
 ]

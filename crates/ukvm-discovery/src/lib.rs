@@ -12,6 +12,7 @@ use std::{
 /// Provisional UKVM DNS-SD service type, scoped to the mDNS `.local.` domain.
 pub const SERVICE_TYPE: &str = "_ukvm._tcp.local.";
 pub const DEFAULT_BROWSE: Duration = Duration::from_secs(4);
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(5);
 const CACHE_LIFETIME: Duration = Duration::from_secs(10);
 const MAX_CANDIDATES: usize = 64;
 const MAX_ADDRESSES: usize = 16;
@@ -244,16 +245,46 @@ impl DiscoveryService {
         Ok(Self { daemon, monitor })
     }
 
-    pub fn advertise(&self, advertisement: &Advertisement) -> Result<AdvertisementGuard, String> {
+    pub async fn advertise(
+        &self,
+        advertisement: &Advertisement,
+    ) -> Result<AdvertisementGuard, String> {
         let info = advertisement.service_info()?;
         let fullname = info.get_fullname().to_string();
+        let hostname = info.get_hostname().to_string();
         self.daemon
             .register(info)
             .map_err(|e| format!("mDNS registration: {e}"))?;
-        Ok(AdvertisementGuard {
+        let mut guard = AdvertisementGuard {
             daemon: self.daemon.clone(),
-            fullname,
+            fullname: fullname.clone(),
+            hostname,
+            announcement_target: String::new(),
+        };
+        // `register` only enqueues a command. An Announce event confirms that
+        // the daemon actually sent a packet on at least one interface.
+        let announced = tokio::time::timeout(ANNOUNCE_TIMEOUT, async {
+            loop {
+                match self.monitor.recv_async().await {
+                    Ok(DaemonEvent::Announce(service, addresses))
+                        if service.eq_ignore_ascii_case(&fullname) =>
+                    {
+                        return Ok(addresses);
+                    }
+                    Ok(DaemonEvent::Error(error)) => {
+                        return Err(format!("mDNS registration failed: {error}"));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(format!("mDNS daemon stopped: {error}")),
+                }
+            }
         })
+        .await
+        .map_err(|_| {
+            "mDNS registration did not announce on any interface within five seconds".to_string()
+        })??;
+        guard.announcement_target = announced;
+        Ok(guard)
     }
 
     pub async fn browse_for(&self, duration: Duration) -> Result<Vec<DiscoveryResult>, String> {
@@ -329,12 +360,40 @@ impl Drop for DiscoveryService {
 pub struct AdvertisementGuard {
     daemon: ServiceDaemon,
     fullname: String,
+    hostname: String,
+    announcement_target: String,
 }
 
 impl AdvertisementGuard {
+    pub fn fullname(&self) -> &str {
+        &self.fullname
+    }
+    pub fn hostname(&self) -> &str {
+        &self.hostname
+    }
+    /// The daemon's announcement target (hostname and interface), not a DNS
+    /// address record. Use `local_interface_addresses` for local IP details.
+    pub fn announcement_target(&self) -> &str {
+        &self.announcement_target
+    }
     pub fn stop(self) {
         drop(self);
     }
+}
+
+/// Diagnostic snapshot of local addresses that may be used for mDNS. The
+/// daemon independently selects active multicast interfaces at send time.
+pub fn local_interface_addresses(interface: Option<&str>) -> Result<Vec<String>, String> {
+    let mut addresses: Vec<_> = if_addrs::get_if_addrs()
+        .map_err(|e| format!("cannot inspect local interfaces: {e}"))?
+        .into_iter()
+        .filter(|item| item.is_oper_up() && !item.is_loopback() && !item.is_p2p())
+        .filter(|item| interface.is_none_or(|name| item.name == name))
+        .map(|item| format!("{} {}", item.name, item.ip()))
+        .collect();
+    addresses.sort();
+    addresses.dedup();
+    Ok(addresses)
 }
 
 impl Drop for AdvertisementGuard {
@@ -500,7 +559,7 @@ mod tests {
             pairing_version: 2,
             input_version: (1, 1),
         };
-        let guard = service.advertise(&advertisement).unwrap();
+        let guard = service.advertise(&advertisement).await.unwrap();
         let found = service.browse_for(Duration::from_secs(3)).await.unwrap();
         assert!(found.iter().any(|c| c.display_name == "ukvm-smoke"));
         guard.stop();

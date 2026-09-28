@@ -64,7 +64,85 @@ async fn confirm(offer: PairOffer) -> Result<bool, String> {
         .map_err(|_| "pairing confirmation input cancelled".to_string())?
 }
 
+const PAIR_HELP: &str = "Usage: ukvm pair [HOST[:PORT]|--discover [--interface NAME]|--interface NAME [--debug]|--debug|--bind ADDR]\n\
+Listening advertises through mDNS for 90 seconds; --debug prints advertiser details.\n\
+Direct HOST pairing and pair recover do not use discovery.";
+
+#[derive(Debug, PartialEq)]
+enum Target<'a> {
+    Listen {
+        bind: String,
+        interface: Option<&'a str>,
+        advertise: bool,
+        debug: bool,
+    },
+    Direct(&'a str),
+    Discover(Option<&'a str>),
+}
+
+fn parse_target(args: &[String]) -> Result<Target<'_>, &'static str> {
+    let default_bind = || format!("0.0.0.0:{PAIRING_PORT}");
+    match args {
+        [] => Ok(Target::Listen {
+            bind: default_bind(),
+            interface: None,
+            advertise: true,
+            debug: false,
+        }),
+        [flag] if flag == "--debug" => Ok(Target::Listen {
+            bind: default_bind(),
+            interface: None,
+            advertise: true,
+            debug: true,
+        }),
+        [flag] if flag == "--discover" => Ok(Target::Discover(None)),
+        [flag, option, name]
+            if flag == "--discover" && option == "--interface" && !name.starts_with('-') =>
+        {
+            Ok(Target::Discover(Some(name)))
+        }
+        [flag, name] if flag == "--interface" && !name.starts_with('-') => Ok(Target::Listen {
+            bind: default_bind(),
+            interface: Some(name),
+            advertise: true,
+            debug: false,
+        }),
+        [flag, name, debug]
+            if flag == "--interface" && !name.starts_with('-') && debug == "--debug" =>
+        {
+            Ok(Target::Listen {
+                bind: default_bind(),
+                interface: Some(name),
+                advertise: true,
+                debug: true,
+            })
+        }
+        [debug, flag, name]
+            if debug == "--debug" && flag == "--interface" && !name.starts_with('-') =>
+        {
+            Ok(Target::Listen {
+                bind: default_bind(),
+                interface: Some(name),
+                advertise: true,
+                debug: true,
+            })
+        }
+        [flag, address] if flag == "--bind" => Ok(Target::Listen {
+            bind: address.clone(),
+            interface: None,
+            advertise: false,
+            debug: false,
+        }),
+        [host] if !host.starts_with('-') => Ok(Target::Direct(host)),
+        _ => Err(PAIR_HELP),
+    }
+}
+
 pub fn pair(args: &[String]) -> ExitCode {
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        println!("{PAIR_HELP}");
+        return ExitCode::SUCCESS;
+    }
     if args.first().is_some_and(|v| v == "status") {
         return pair_status(&args[1..]);
     }
@@ -74,23 +152,9 @@ pub fn pair(args: &[String]) -> ExitCode {
     if args.first().is_some_and(|v| v == "cleanup") {
         return pair_cleanup(&args[1..]);
     }
-    enum Target<'a> {
-        Listen {
-            bind: String,
-            interface: Option<&'a str>,
-            advertise: bool,
-        },
-        Direct(&'a str),
-        Discover(Option<&'a str>),
-    }
-    let target = match args {
-        [] => Target::Listen { bind: format!("0.0.0.0:{PAIRING_PORT}"), interface: None, advertise: true },
-        [flag] if flag == "--discover" => Target::Discover(None),
-        [flag, option, name] if flag == "--discover" && option == "--interface" => Target::Discover(Some(name)),
-        [flag, name] if flag == "--interface" => Target::Listen { bind: format!("0.0.0.0:{PAIRING_PORT}"), interface: Some(name), advertise: true },
-        [flag, address] if flag == "--bind" => Target::Listen { bind: address.clone(), interface: None, advertise: false },
-        [host] if !host.starts_with('-') => Target::Direct(host),
-        _ => return super::fail("usage: ukvm pair [HOST[:PORT]|--discover [--interface NAME]|--interface NAME|--bind ADDR]"),
+    let target = match parse_target(args) {
+        Ok(target) => target,
+        Err(help) => return super::fail(help),
     };
     let config = match ukvm_config::default_path()
         .map_err(|e| e.to_string())
@@ -137,6 +201,7 @@ pub fn pair(args: &[String]) -> ExitCode {
                     bind,
                     interface,
                     advertise,
+                    debug,
                 } => {
                     let listener = tokio::net::TcpListener::bind(&bind)
                         .await
@@ -154,10 +219,24 @@ pub fn pair(args: &[String]) -> ExitCode {
                                 ukvm_protocol::PROTOCOL_MINOR,
                             ),
                         };
+                        if debug {
+                            eprintln!("mDNS advertiser starting: service type={} node={} pairing port={} control port={} input protocol={}.{} interface={}", ukvm_discovery::SERVICE_TYPE, local_name, local_addr.port(), control_port, ukvm_protocol::PROTOCOL_MAJOR, ukvm_protocol::PROTOCOL_MINOR, interface.unwrap_or("eligible non-loopback interfaces"));
+                            match ukvm_discovery::local_interface_addresses(interface) {
+                                Ok(addresses) if addresses.is_empty() => eprintln!("mDNS local interface addresses: none matched; registration may fail"),
+                                Ok(addresses) => for address in addresses { eprintln!("mDNS local interface address: {address}"); },
+                                Err(error) => eprintln!("mDNS interface diagnostics unavailable: {error}"),
+                            }
+                        }
                         match DiscoveryService::new(interface) {
-                            Ok(service) => match service.advertise(&announcement) {
-                                Ok(guard) => { advertised = Some(guard); discovery_service = Some(service);
-                                    println!("Discoverable by mDNS while pairing is active."); },
+                            Ok(service) => match service.advertise(&announcement).await {
+                                Ok(guard) => {
+                                    if debug {
+                                        eprintln!("mDNS registration announced: instance={} hostname={} target={}", guard.fullname(), guard.hostname(), guard.announcement_target());
+                                    }
+                                    advertised = Some(guard);
+                                    discovery_service = Some(service);
+                                    println!("Discoverable by mDNS while pairing is active.");
+                                },
                                 Err(e) => eprintln!("Discovery advertisement unavailable: {e}; direct pairing still works."),
                             },
                             Err(e) => eprintln!("Discovery advertisement unavailable: {e}; direct pairing still works."),
@@ -390,6 +469,39 @@ fn pair_recover(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
     use ukvm_network::{identity::Identity, trust::TrustStore};
+
+    #[test]
+    fn pairing_interface_and_debug_options_parse() {
+        let interface = vec!["--interface".into(), "enp0s20u2u1u2".into()];
+        assert!(matches!(
+            parse_target(&interface),
+            Ok(Target::Listen {
+                interface: Some("enp0s20u2u1u2"),
+                advertise: true,
+                debug: false,
+                ..
+            })
+        ));
+        let debug = vec![
+            "--interface".into(),
+            "enp0s20u2u1u2".into(),
+            "--debug".into(),
+        ];
+        assert!(matches!(
+            parse_target(&debug),
+            Ok(Target::Listen {
+                interface: Some("enp0s20u2u1u2"),
+                advertise: true,
+                debug: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_target(&["--discover".into()]),
+            Ok(Target::Discover(None))
+        ));
+        assert!(PAIR_HELP.starts_with("Usage: ukvm pair"));
+    }
 
     #[test]
     fn direct_address_still_uses_pairing_port() {

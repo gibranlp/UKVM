@@ -26,7 +26,7 @@ Commands:\n\
   stop      Stop UKVM (not implemented yet)\n\
   pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
   pair --discover [--interface NAME]  Find and select a pairing node\n\
-  pair --interface NAME  Advertise pairing on one interface\n\
+  pair --interface NAME [--debug]  Advertise pairing on one interface\n\
   pair --bind ADDR:PORT  Test with an explicit temporary pairing listener\n\
   pair status  Inspect pairing recovery records\n\
   pair recover [HOST[:PORT] [TRANSACTION_ID]]  Reconcile confirmed pairing\n\
@@ -48,7 +48,7 @@ fn main() -> ExitCode {
         }
         [command] if command == "version" || command == "--version" || command == "-V" => {
             println!(
-                "ukvm {} (protocol {}.{})",
+                "ukvm {} (protocol {}.{}, discovery mDNS/DNS-SD)",
                 env!("CARGO_PKG_VERSION"),
                 ukvm_protocol::PROTOCOL_MAJOR,
                 ukvm_protocol::PROTOCOL_MINOR
