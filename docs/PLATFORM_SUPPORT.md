@@ -1,19 +1,20 @@
 # Platform support plan
 
-**Current status:** Linux Wayland capture and authenticated forwarding to DebugSink are proven across two physical computers. Controlled-node injection is unavailable through this machine's active portal; no platform has end-to-end UKVM control yet. A green build on one OS does not claim runtime support on another.
+**Current status:** Linux Wayland capture and authenticated forwarding to DebugSink are proven across two physical computers. An experimental, consent-capable Hyprland portal draft on io also physically delivered cross-PC pointer movement, clicks and keyboard input. The packaged portal on spectrum and io does not expose RemoteDesktop; scroll and receiver-disconnect cleanup remain unproven. A green build on one OS does not claim runtime support on another.
 
 In Milestone 5, a physical right-edge capture on this Hyprland machine sent 611 normalized pointer events through a localhost mutual-TLS connection to UKVM's DebugSink. The receiver counted exactly 611 pointer events, no keyboard events, and injected nothing. InputCapture `Release` succeeded; the user confirmed local mouse and keyboard control returned normally. Later two-computer tests sent 528 and 621 pointer events with none dropped. A receiver-kill test during capture released local control. Other compositors remain untested. See [network transport](NETWORK.md).
 
 | Environment | InputCapture | Controlled-node injection |
 | --- | --- | --- |
-| Arch Linux / Hyprland 0.56.2 | Pointer and keyboard proven by physical tests | Unavailable: active portal has no RemoteDesktop |
+| Arch Linux / Hyprland 0.56.2, packaged portal | Pointer and keyboard proven by physical tests | Unavailable: packaged portal has no RemoteDesktop |
+| Arch Linux / Hyprland 0.56.2, consent-capable draft portal on io | Pointer and keyboard proven | Relative pointer, clicks and keyboard physically proven across two PCs; scroll unproven |
 | GNOME Wayland | Untested | Untested |
 | KDE Plasma Wayland | Untested | Untested |
 | Other wlroots/COSMIC | Untested | Untested |
 
 | Target | Candidate sanctioned mechanisms | Main open questions |
 | --- | --- | --- |
-| Linux Wayland | InputCapture portal and EI pointer/keyboard capture verified locally on Hyprland; RemoteDesktop/EI injection remains planned | A compatible RemoteDesktop backend, other compositors, zone-change recovery, button/scroll events and cross-platform key mapping need testing |
+| Linux Wayland | InputCapture/EI capture and experimental RemoteDesktop/EI injection verified on Hyprland with a draft portal | A released consent-capable RemoteDesktop backend, other compositors, zone-change recovery, scroll, disconnect cleanup and cross-platform key mapping need testing |
 | Linux X11 | XInput2/X11 event capture and XTEST injection | Grabs, multiple displays, X server security, injected-event loops |
 | macOS | Quartz event taps, Core Graphics event posting, display APIs | Accessibility and Input Monitoring grants, event tap lifecycle, secure input, multi-display coordinates |
 | Windows | Raw input or low-level hooks, `SendInput`, monitor APIs | Hook behavior, integrity levels, secure desktop and session boundaries |

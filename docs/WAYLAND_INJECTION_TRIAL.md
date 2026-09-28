@@ -1,16 +1,22 @@
 # Milestone 12 Wayland injection trial
 
-This is an **experimental, user-session-only** trial for io. Pointer-only local injection has now been physically observed on io; two-node remote input and other event types remain unproven. Keep the packaged portal available for rollback. Do not use the older generic portal revision: its inspected RemoteDesktop `Start` did not mediate user consent.
+This is an **experimental, user-session-only** trial for io. Local pointer injection and two-node pointer, button, and keyboard input have been physically observed on io. Scroll and receiver-disconnect cleanup remain unproven. Keep the packaged portal available for rollback. Do not use the older generic portal revision: its inspected RemoteDesktop `Start` did not mediate user consent.
 
 ## Current evidence and dependency
 
 On spectrum, Hyprland 0.56.2-3, xdg-desktop-portal 1.22.1-2, xdg-desktop-portal-hyprland 1.4.1-2, xdg-desktop-portal-gtk 1.15.3-1, and libei 1.6.0-1 were installed. `ukvm doctor` found InputCapture v1 with pointer and keyboard, but no RemoteDesktop. The packaged `hyprland.portal` does not advertise RemoteDesktop. io is expected to have the same SpectrumOS package set, but its own runtime versions and portal state must be checked before the trial.
 
-The candidate is Hyprland's [draft xdg-desktop-portal-hyprland PR #426](https://github.com/hyprwm/xdg-desktop-portal-hyprland/pull/426), pinned at `0204ffbbcb3cef72af76804cdf59f114f2e2f6d9`. Its source was inspected and built on spectrum and io. The draft adds RemoteDesktop v2 and `ConnectToEIS`, a local consent picker, pointer/button/scroll and keyboard EI devices, and retains InputCapture. The backend uses compositor virtual pointer/keyboard protocols within the portal grant; UKVM itself only connects to the portal-provided EIS socket. The draft remains unmerged. Local pointer motion was observed with UKVM on io; the other input capabilities require physical tests.
+The candidate is Hyprland's [draft xdg-desktop-portal-hyprland PR #426](https://github.com/hyprwm/xdg-desktop-portal-hyprland/pull/426), pinned at `0204ffbbcb3cef72af76804cdf59f114f2e2f6d9`. Its source was inspected and built on spectrum and io. The draft adds RemoteDesktop v2 and `ConnectToEIS`, a local consent picker, pointer/button/scroll and keyboard EI devices, and retains InputCapture. The backend uses compositor virtual pointer/keyboard protocols within the portal grant; UKVM itself only connects to the portal-provided EIS socket. The draft remains unmerged. Local pointer motion and cross-PC pointer, button, and keyboard input were observed with UKVM on io; scroll requires a physical test.
 
 ## Physical local pointer result (2026-09-28)
 
-After activating the pinned draft on io, `ukvm doctor` in its Hyprland session reported a reachable Wayland socket, InputCapture v1 with keyboard/pointer, and RemoteDesktop v2 with keyboard/pointer and `ConnectToEIS`. The user ran `ukvm platform wayland inject-test`, approved the local portal prompt, and observed io's cursor move right and then left. The command was launched through SSH while io's graphical session was running; physical observation and portal consent occurred on io. This proves permissioned local relative pointer motion through UKVM's RemoteDesktop/EI sender. It does not prove remote network control, button/scroll events, keyboard events, held-input cleanup, or pointer return from another computer.
+After activating the pinned draft on io, `ukvm doctor` in its Hyprland session reported a reachable Wayland socket, InputCapture v1 with keyboard/pointer, and RemoteDesktop v2 with keyboard/pointer and `ConnectToEIS`. The user ran `ukvm platform wayland inject-test`, approved the local portal prompt, and observed io's cursor move right and then left. The command was launched through SSH while io's graphical session was running; physical observation and portal consent occurred on io. This proves permissioned local relative pointer motion through UKVM's RemoteDesktop/EI sender. The later two-node test below covers remote pointer, button and keyboard input. It does not prove scroll events, held-input cleanup after disconnect, or seamless edge return.
+
+## Physical two-node result (2026-09-28)
+
+With `ukvm listen --remote --bind 0.0.0.0:24800` running on io and `ukvm control right` on spectrum, the two nodes authenticated with pinned mutual TLS. io authorized the remote session through its portal before spectrum created InputCapture. Spectrum's portal accepted right-edge barrier 1 on zone 1 from `(0, 0)` to `(0, 2159)`, then capture activated. The sender counted 1087 pointer, 8 button, 0 scroll, and 116 keyboard events, with zero dropped pointer events, 32992 input-frame bytes, and about 1.39 ms heartbeat RTT. The user physically observed io's pointer move, clicks take effect, and keyboard input take effect. After 30 seconds, spectrum's portal `Release` succeeded, its session closed, and local control returned normally. No key contents were recorded.
+
+A later short capture sent 173 pointer, 2 button, 0 scroll, and 11 keyboard events with zero dropped motion. The user confirmed Ctrl+Alt+Shift+Escape ended capture before its 30-second active limit, portal `Release` succeeded, and local mouse and keyboard control returned normally. Scroll delivery remains unproven because the user did not scroll during this test. A preceding retry reached peer authentication but stalled before remote-session acceptance and showed no portal prompt; restarting io's listener allowed the next attempt to complete. The cause of that stall was not established.
 
 ## Build on io, without installation
 
@@ -65,7 +71,7 @@ Only after visible local movement, on io explicitly grant spectrum control and r
 
 ```sh
 target/debug/ukvm peer allow spectrum control-this-node
-target/debug/ukvm listen --remote
+target/debug/ukvm listen --remote --bind 0.0.0.0:24800
 ```
 
 On spectrum, verify the configured right-edge peer is io, then run:

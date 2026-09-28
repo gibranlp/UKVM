@@ -185,7 +185,7 @@ fn main() -> ExitCode {
                 println!(
                     "Requesting InputCapture permission. No keyboard contents will be printed."
                 );
-                let mut report = |notice| print_capture_notice(notice, verbose);
+                let mut report = |notice| print_capture_notice(notice, verbose, false);
                 match ukvm_platform::linux_wayland::capture(
                     edge,
                     zone,
@@ -479,7 +479,11 @@ fn show_interface(name: &str, probe: &ukvm_platform::linux_wayland::InterfacePro
 }
 
 #[cfg(target_os = "linux")]
-fn print_capture_notice(notice: ukvm_platform::linux_wayland::CaptureNotice, verbose: bool) {
+fn print_capture_notice(
+    notice: ukvm_platform::linux_wayland::CaptureNotice,
+    verbose: bool,
+    remote: bool,
+) {
     use ukvm_platform::linux_wayland::CaptureNotice;
     match notice {
         CaptureNotice::SessionCreated {
@@ -542,7 +546,11 @@ fn print_capture_notice(notice: ukvm_platform::linux_wayland::CaptureNotice, ver
         }
         CaptureNotice::Enabled => {
             println!("InputCapture enabled. Move the pointer THROUGH the printed outer edge.");
-            println!("Waiting for activation (60-second safety timeout; Esc or Ctrl-C exits). When active, capture releases after 5 seconds.");
+            if remote {
+                println!("Waiting for activation (60-second safety timeout; Ctrl+C exits). When active, Ctrl+Alt+Shift+Escape releases capture, or it ends after 30 seconds.");
+            } else {
+                println!("Waiting for activation (60-second safety timeout; Esc or Ctrl+C exits). When active, capture releases after 5 seconds.");
+            }
         }
         CaptureNotice::Activated {
             activation_id,
@@ -551,7 +559,11 @@ fn print_capture_notice(notice: ukvm_platform::linux_wayland::CaptureNotice, ver
             println!(
                 "CAPTURE ACTIVATED: activation_id={activation_id:?}, barrier_id={barrier_id:?}"
             );
-            println!("Receiving EI events for up to 5 seconds...");
+            if remote {
+                println!("Receiving EI events for up to 30 seconds...");
+            } else {
+                println!("Receiving EI events for up to 5 seconds...");
+            }
         }
         CaptureNotice::Deactivated { activation_id } => {
             if verbose {

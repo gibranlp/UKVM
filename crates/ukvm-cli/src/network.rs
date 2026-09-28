@@ -195,7 +195,14 @@ fn listen_remote(args: &[String]) -> ExitCode {
             "remote input requires a trusted peer with control-this-node permission",
         );
     }
-    let prepared = options(args).and_then(|options| {
+    let prepared = options(args).and_then(|mut options| {
+        if !args.iter().any(|arg| arg == "--bind") {
+            let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
+            options.bind = ukvm_config::load_or_default(&path)
+                .map_err(|e| e.to_string())?
+                .network
+                .listen;
+        }
         let store = TrustStore::load(&options.trust_dir)?;
         if !store
             .peers
@@ -491,7 +498,7 @@ fn capture_send_for(
             }
         };
         let mut healthy = || *health.borrow_and_update();
-        let mut notice = |event| super::print_capture_notice(event, verbose);
+        let mut notice = |event| super::print_capture_notice(event, verbose, remote);
         let capture = ukvm_platform::linux_wayland::capture_with_events_mode(
             edge,
             zone,
