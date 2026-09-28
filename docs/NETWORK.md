@@ -1,4 +1,4 @@
-# Development network transport (Milestone 5)
+# Development network transport
 
 This is a two-node **DebugSink** transport. The receiver validates and counts normalized events; it does not inject input. No pairing, discovery, reconnect loop or service runtime exists. The same `ukvm` binary can listen or connect. The listener currently serves one connection at a time.
 
@@ -10,9 +10,9 @@ UKVM currently uses persistent TCP with mutual TLS 1.3 through `tokio-rustls`/`r
 
 ## Identity and manual trust
 
-`ukvm identity` creates `node.der` (public) and `node.key` (private) under the local user data directory's `ukvm` subdirectory. `--state-dir PATH` overrides it for tests. On Unix, the directory is mode 0700 and the key is mode 0600; loading rejects a key readable by other users or a non-regular key file. Exchange **only** `node.der` using a separately authenticated channel, verify its fingerprint/node ID with the other operator, and supply the peer's certificate with `--peer-cert`. Both sides require the other certificate. A peer name or IP address never grants trust. No automatic pairing, certificate rotation/revocation UI, OS keychain integration or multi-peer trust store exists. A compromised/exchanged-wrong certificate defeats this manual trust step. Do not share `node.key`.
+`ukvm identity` creates `node.der` (public) and `node.key` (private) under the local user data directory's `ukvm` subdirectory. `--state-dir PATH` overrides it for tests. On Unix, the identity directory is mode 0700 and the key is mode 0600; loading rejects a key readable by other users or a non-regular key file. Exchange **only** `node.der` using a separately authenticated channel. `ukvm peer add` displays its full SHA-256 fingerprint for comparison with `ukvm identity` on the remote node before storing the pinned certificate under `$XDG_STATE_HOME/ukvm/peers/` and metadata in `$XDG_STATE_HOME/ukvm/peers.toml` (default `~/.local/state/ukvm` on Linux). Both machines import the other public certificate. A peer alias or IP address never grants trust. `connect` is allowed after import; `debug-input` and `control-this-node` default to deny and are changed only by an explicit `peer allow` command. No automatic pairing, certificate rotation/revocation UI or OS keychain integration exists. A compromised/exchanged-wrong certificate defeats this manual trust step. Do not share `node.key`.
 
-The TLS handshake validates the pinned peer certificate, including possession of its private key. The protocol `Hello.node_id` must equal the SHA-256 fingerprint of the authenticated TLS certificate. Version and capability claims are then validated. The CLI listener advertises `debug_input_sink`, not controlled-node injection. A separate remote receiver API requires an explicit `RemoteInputSink`; no CLI command constructs one yet. Capture starts only after `SessionAccept`.
+The TLS handshake validates the pinned peer certificate, including possession of its private key. The protocol `Hello.node_id` must equal the SHA-256 fingerprint of the authenticated TLS certificate. Version and capability claims are then validated. The configured listener checks `connect` permission after authentication and checks `debug-input` permission when `SessionStart` arrives. The CLI listener advertises `debug_input_sink`, not controlled-node injection. A separate remote receiver API requires an explicit `RemoteInputSink`; no CLI command constructs one yet. Capture starts only after `SessionAccept`.
 
 ## Wire and session lifecycle
 
@@ -54,8 +54,30 @@ For a Wayland controller capture on A:
 ukvm platform wayland capture right --send MACHINE_B_IP:24800 --peer-cert ./machine-b.der --verbose
 ```
 
-Move the pointer through the **outer right edge of the large monitor** after the command reports that the remote DebugSink accepted the session and the portal accepted the barrier. UKVM releases after five seconds of capture; Esc/Ctrl-C also stops it. Specify a zone when edge selection is ambiguous. The listener defaults to `127.0.0.1:24800`, so `--bind 0.0.0.0:24800` is required for LAN listening. Restrict that port to intended peers with ordinary host firewall policy. There is no Internet/cloud requirement.
+Move the pointer through the **outer right edge of the large monitor** after the command reports that the remote DebugSink accepted the session and the portal accepted the barrier. UKVM releases after five seconds of capture; Esc/Ctrl-C also stops it. Specify a zone when edge selection is ambiguous. The legacy `--peer-cert` listener defaults to `127.0.0.1:24800`; add `--bind 0.0.0.0:24800` for LAN listening. The configured `ukvm listen` command uses `[network].listen`, defaulting to `0.0.0.0:24800`. Restrict that port to intended peers with ordinary host firewall policy. There is no Internet/cloud requirement.
 
 ## Validation evidence
+
+### Configured workflow (Milestone 8)
+
+Build the same revision on both machines and run `ukvm identity`. Compare each full SHA-256 fingerprint with the certificate shown during import. On controller A:
+
+```sh
+ukvm peer add ./machine-b.der --name io --address 192.168.1.40
+ukvm layout set right io
+ukvm config check
+ukvm status
+```
+
+On receiver B:
+
+```sh
+ukvm peer add ./machine-a.der --name spectrum --address 192.168.1.21
+ukvm peer allow spectrum debug-input
+ukvm config check
+ukvm listen
+```
+
+Then on A run `ukvm control right --debug`. The edge link resolves B's cryptographic ID, address hint and pinned certificate, and uses the existing capture and DebugSink sender. `ukvm connect io` checks heartbeat without repeating the address or certificate path. The configured listener checks local permissions against the authenticated ID. `control-this-node` remains denied and no input is injected. An isolated two-identity localhost CLI smoke test completed peer import, layout configuration, explicit debug permission, config validation, authenticated `connect`, and `debug send-test-events`. The configured physical capture test has not yet been repeated across both machines on this revision. Peer permissions are loaded when `ukvm listen` starts, so restart it after changing permissions. The listener handles one connection at a time.
 
 On one Arch Linux/Hyprland machine, two identities authenticated over localhost mutual TLS. `connect` completed Hello and a heartbeat RTT check. The synthetic test sent and received exactly two pointer and two keyboard events. A physical right-edge capture then activated InputCapture, delivered 611 normalized pointer events to the sender, and the DebugSink counted exactly 611 pointer events and zero keyboard events. The portal accepted barrier 1 on zone 0 from `(0, 0)` to `(0, 2159)`. Release succeeded and the user confirmed local mouse/keyboard control returned normally. Two physical computers later carried 528 pointer events with none dropped and about 1.26 ms RTT, then 621 with none dropped and about 1.39 ms RTT. In a separate live disconnect test, terminating the receiver during capture stopped it after about 30 pointer events; portal Release succeeded, the session closed, and local input returned. These results prove the two-computer capture-to-TLS-to-DebugSink path and this disconnect recovery case. No receiver injection occurred.

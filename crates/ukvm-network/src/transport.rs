@@ -1,8 +1,13 @@
 //! TLS connection setup and the development debug-input session.
 
 use crate::{
-    identity::{certificate_id, client_config, load_peer_certificate, server_config, Identity},
-    read_frame, write_frame, EventCounts, EVENT_QUEUE,
+    identity::{
+        certificate_id, client_config, load_peer_certificate, server_config, server_config_many,
+        Identity,
+    },
+    read_frame,
+    trust::{cert_path, SessionPermission, TrustStore},
+    write_frame, EventCounts, EVENT_QUEUE,
 };
 use std::{
     future::Future,
@@ -49,6 +54,8 @@ pub struct Connection {
     pub stream: TlsStream<TcpStream>,
     pub peer: PeerInfo,
     local_sink: SinkKind,
+    allowed_debug: bool,
+    allowed_remote: bool,
 }
 
 fn hello(identity: &Identity, name: &str, controller: bool, sink: Option<SinkKind>) -> WireMessage {
@@ -134,6 +141,8 @@ pub async fn connect(
         stream,
         peer,
         local_sink: SinkKind::Debug,
+        allowed_debug: false,
+        allowed_remote: false,
     })
 }
 
@@ -155,6 +164,40 @@ pub async fn accept(
         stream,
         peer,
         local_sink: SinkKind::Debug,
+        allowed_debug: true,
+        allowed_remote: false,
+    })
+}
+
+/// Accept any pinned peer, then bind its authenticated certificate ID to local policy.
+pub async fn accept_trusted(
+    tcp: TcpStream,
+    identity: &Identity,
+    store: &TrustStore,
+    state_dir: &Path,
+    name: &str,
+) -> Result<Connection, String> {
+    let certificates = store
+        .peers
+        .iter()
+        .filter(|p| p.permissions.connect)
+        .map(|p| load_peer_certificate(&cert_path(state_dir, &p.id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let config = server_config_many(identity, certificates)?;
+    tcp.set_nodelay(true).map_err(|e| e.to_string())?;
+    let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, TlsAcceptor::from(config).accept(tcp))
+        .await
+        .map_err(|_| "TLS handshake timed out".to_string())?
+        .map_err(|e| format!("TLS client authentication failed: {e}"))?;
+    let mut stream = TlsStream::from(tls);
+    let peer = exchange_hello(&mut stream, identity, name, false, Some(SinkKind::Debug)).await?;
+    let trusted = store.authorize(&peer.id, SessionPermission::Connect)?;
+    Ok(Connection {
+        stream,
+        peer,
+        local_sink: SinkKind::Debug,
+        allowed_debug: trusted.permissions.debug_input,
+        allowed_remote: false,
     })
 }
 
@@ -189,6 +232,8 @@ pub async fn accept_remote<S: InputSink>(
         stream,
         peer,
         local_sink: SinkKind::RemoteInput,
+        allowed_debug: false,
+        allowed_remote: true,
     })
 }
 
@@ -277,6 +322,11 @@ where
                 };
                 if requested != sink.kind() {
                     break Err("session type does not match receiver sink".into());
+                }
+                if (requested == SinkKind::Debug && !connection.allowed_debug)
+                    || (requested == SinkKind::RemoteInput && !connection.allowed_remote)
+                {
+                    break Err("peer lacks permission for requested session type".into());
                 }
                 if let Err(err) = state
                     .request()
@@ -701,6 +751,37 @@ mod tests {
         assert_eq!(received.pointer, 1);
         assert_eq!(received.keyboard, 1);
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn trusted_peer_can_connect_but_cannot_start_denied_debug_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b")).unwrap();
+        let state = temp.path().join("trust");
+        let mut store = TrustStore::default();
+        store
+            .import(
+                &state,
+                "a".into(),
+                Some("127.0.0.1".into()),
+                &fs::read(&a.cert_path).unwrap(),
+            )
+            .unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let connection = accept_trusted(tcp, &b, &store, &state, "b").await.unwrap();
+            receive_debug(connection, |_| {}).await.unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &temp.path().join("b/node.der"), "a")
+            .await
+            .unwrap();
+        write_frame(&mut connection.stream, &WireMessage::SessionStart)
+            .await
+            .unwrap();
+        assert!(receiver.await.unwrap().contains("lacks permission"));
     }
 
     #[tokio::test]

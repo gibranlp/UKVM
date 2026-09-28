@@ -1129,6 +1129,7 @@ name = "ukvm"
 version = "0.1.0"
 dependencies = [
  "tokio",
+ "toml",
  "ukvm-config",
  "ukvm-network",
  "ukvm-platform",
@@ -1140,6 +1141,7 @@ name = "ukvm-config"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
  "toml",
  "ukvm-core",
 ]
@@ -1161,8 +1163,10 @@ dependencies = [
  "rustls",
  "serde",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-rustls",
+ "toml",
  "ukvm-core",
  "ukvm-protocol",
 ]

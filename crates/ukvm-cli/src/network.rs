@@ -7,29 +7,34 @@ use std::{
 use ukvm_network::{
     identity::{default_state_dir, Identity},
     transport::{self, ReceiverNotice},
+    trust::{cert_path, default_trust_dir, resolve_address, TrustStore},
     EventCounts,
 };
 use ukvm_protocol::{InputEvent, KeyCode, WireMessage};
 
 struct Options {
     state_dir: PathBuf,
+    trust_dir: PathBuf,
     peer_cert: Option<PathBuf>,
     bind: String,
     name: String,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
-    let configured_name = ukvm_config::default_path()
+    let configured = ukvm_config::default_path()
         .ok()
-        .and_then(|path| ukvm_config::load(&path).ok())
-        .map(|config| config.node.name);
+        .and_then(|path| ukvm_config::load(&path).ok());
     let mut options = Options {
         state_dir: default_state_dir()?,
+        trust_dir: default_trust_dir()?,
         peer_cert: None,
-        bind: format!("127.0.0.1:{}", ukvm_network::DEFAULT_PORT),
-        name: configured_name
-            .or_else(|| std::env::var("HOSTNAME").ok())
-            .unwrap_or_else(|| "ukvm-node".into()),
+        bind: configured
+            .as_ref()
+            .map(|c| c.network.listen.clone())
+            .unwrap_or_else(|| format!("127.0.0.1:{}", ukvm_network::DEFAULT_PORT)),
+        name: configured
+            .map(|c| c.node.name)
+            .unwrap_or_else(ukvm_config::default_name),
     };
     let mut iter = args.iter();
     while let Some(option) = iter.next() {
@@ -37,7 +42,10 @@ fn options(args: &[String]) -> Result<Options, String> {
             .next()
             .ok_or_else(|| format!("missing value for {option}"))?;
         match option.as_str() {
-            "--state-dir" => options.state_dir = PathBuf::from(value),
+            "--state-dir" => {
+                options.state_dir = PathBuf::from(value);
+                options.trust_dir = PathBuf::from(value).join("trust");
+            }
             "--peer-cert" => options.peer_cert = Some(PathBuf::from(value)),
             "--bind" => options.bind = value.clone(),
             "--name" => options.name = value.clone(),
@@ -53,16 +61,8 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(options)
 }
 
-fn peer_cert(options: &Options) -> Result<&std::path::Path, String> {
-    options.peer_cert.as_deref().ok_or("--peer-cert PATH is required; exchange public node.der certificates out of band before connecting".into())
-}
-
-fn address(value: &str) -> String {
-    if value.contains(':') {
-        value.to_string()
-    } else {
-        format!("{value}:{}", ukvm_network::DEFAULT_PORT)
-    }
+fn address(value: &str) -> Result<String, String> {
+    resolve_address(value)
 }
 
 pub fn identity(args: &[String]) -> ExitCode {
@@ -81,11 +81,36 @@ pub fn identity(args: &[String]) -> ExitCode {
 
 pub fn listen(args: &[String]) -> ExitCode {
     let result = options(args).and_then(|options| {
-        let cert = peer_cert(&options)?.to_path_buf();
+        let mut options = options;
+        if !args.iter().any(|arg| arg == "--bind") {
+            if options.peer_cert.is_some() {
+                options.bind = format!("127.0.0.1:{}", ukvm_network::DEFAULT_PORT);
+            } else {
+                let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
+                options.bind = ukvm_config::load_or_default(&path)
+                    .map_err(|e| e.to_string())?
+                    .network
+                    .listen;
+            }
+        }
+        let cert = options.peer_cert.clone();
+        let store = if cert.is_none() {
+            Some(TrustStore::load(&options.trust_dir)?)
+        } else {
+            None
+        };
+        if store
+            .as_ref()
+            .is_some_and(|s| !s.peers.iter().any(|p| p.permissions.connect))
+        {
+            return Err(
+                "no peers allowed to connect; use ukvm peer add/allow or --peer-cert".into(),
+            );
+        }
         let identity = Identity::load_or_create(&options.state_dir)?;
-        Ok((options, cert, identity))
+        Ok((options, cert, store, identity))
     });
-    let (options, peer_cert, identity) = match result {
+    let (options, peer_cert, store, identity) = match result {
         Ok(value) => value,
         Err(err) => return super::fail(&err),
     };
@@ -104,7 +129,19 @@ pub fn listen(args: &[String]) -> ExitCode {
                     continue;
                 }
             };
-            match transport::accept(tcp, &identity, &peer_cert, &options.name).await {
+            let accepted = if let Some(path) = &peer_cert {
+                transport::accept(tcp, &identity, path, &options.name).await
+            } else {
+                transport::accept_trusted(
+                    tcp,
+                    &identity,
+                    store.as_ref().expect("loaded trust store"),
+                    &options.trust_dir,
+                    &options.name,
+                )
+                .await
+            };
+            match accepted {
                 Ok(connection) => {
                     println!(
                         "Peer authenticated: {} ({}) from {addr}",
@@ -150,15 +187,14 @@ pub fn listen(args: &[String]) -> ExitCode {
 
 pub fn connect(target: &str, args: &[String], synthetic: bool) -> ExitCode {
     let result = options(args).and_then(|options| {
-        let cert = peer_cert(&options)?.to_path_buf();
+        let (target, cert) = resolve_target(target, &options)?;
         let identity = Identity::load_or_create(&options.state_dir)?;
-        Ok((options, cert, identity))
+        Ok((options, cert, target, identity))
     });
-    let (options, peer_cert, identity) = match result {
+    let (options, peer_cert, target, identity) = match result {
         Ok(value) => value,
         Err(err) => return super::fail(&err),
     };
-    let target = address(target);
     super::with_runtime(async move {
         let mut connection =
             match transport::connect(&target, &identity, &peer_cert, &options.name).await {
@@ -225,6 +261,27 @@ pub fn connect(target: &str, args: &[String], synthetic: bool) -> ExitCode {
     })
 }
 
+fn resolve_target(target: &str, options: &Options) -> Result<(String, PathBuf), String> {
+    if let Some(cert) = &options.peer_cert {
+        return Ok((address(target)?, cert.clone()));
+    }
+    let store = TrustStore::load(&options.trust_dir)?;
+    let peer = store
+        .find(target)
+        .ok_or("unknown peer alias; use ukvm peer add or --peer-cert")?;
+    if !peer.permissions.connect {
+        return Err("connection to peer is denied by local policy".into());
+    }
+    let address = peer
+        .address
+        .as_deref()
+        .ok_or("peer has no configured address")?;
+    Ok((
+        resolve_address(address)?,
+        cert_path(&options.trust_dir, &peer.id),
+    ))
+}
+
 fn print_stats(counts: &EventCounts, bytes: u64, rtt: u64, dropped: u64) {
     println!("Sent: pointer={} buttons={} scroll={} keyboard={}\n  Input frame bytes: {bytes}\n  Dropped pointer motion: {dropped}\n  RTT: {}", counts.pointer, counts.buttons, counts.scroll, counts.keyboard, if rtt == 0 { "not measured".into() } else { format!("{:.2} ms", rtt as f64 / 1000.0) });
 }
@@ -238,15 +295,14 @@ pub fn capture_send(
     verbose: bool,
 ) -> ExitCode {
     let result = options(args).and_then(|options| {
-        let cert = peer_cert(&options)?.to_path_buf();
+        let (target, cert) = resolve_target(target, &options)?;
         let identity = Identity::load_or_create(&options.state_dir)?;
-        Ok((options, cert, identity))
+        Ok((options, cert, target, identity))
     });
-    let (options, peer_cert, identity) = match result {
+    let (options, peer_cert, target, identity) = match result {
         Ok(value) => value,
         Err(err) => return super::fail(&err),
     };
-    let target = address(target);
     super::with_runtime(async move {
         let connection =
             match transport::connect(&target, &identity, &peer_cert, &options.name).await {
@@ -313,4 +369,62 @@ pub fn capture_send(
             (_, Err(err)) => super::fail(err),
         }
     })
+}
+
+#[cfg(target_os = "linux")]
+pub fn control(edge: &str, args: &[String]) -> ExitCode {
+    let zone = match args {
+        [debug] if debug == "--debug" => None,
+        [debug, flag, value] if debug == "--debug" && flag == "--zone" => {
+            match value.parse::<usize>() {
+                Ok(n) => Some(n),
+                Err(_) => return super::fail("--zone requires a nonnegative zone index"),
+            }
+        }
+        _ => {
+            return super::fail(
+                "usage: ukvm control <edge> --debug [--zone INDEX] (DebugSink only)",
+            )
+        }
+    };
+    let edge = match ukvm_config::Edge::parse(edge) {
+        Ok(e) => e,
+        Err(e) => return super::fail(&e),
+    };
+    let result = (|| -> Result<_, String> {
+        let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
+        let config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
+        let link = config
+            .layout
+            .links
+            .iter()
+            .find(|l| l.edge == edge)
+            .ok_or("no peer configured on that edge")?;
+        let state = default_trust_dir()?;
+        let store = TrustStore::load(&state)?;
+        let peer = store
+            .find_id(&link.peer_id)
+            .ok_or("layout references unknown peer")?;
+        if !peer.permissions.connect {
+            return Err("connection to peer is denied by local policy".into());
+        }
+        if peer.address.is_none() {
+            return Err("peer has no configured address".into());
+        }
+        Ok((
+            peer.alias.clone(),
+            match edge {
+                ukvm_config::Edge::Left => ukvm_platform::linux_wayland::Edge::Left,
+                ukvm_config::Edge::Right => ukvm_platform::linux_wayland::Edge::Right,
+                ukvm_config::Edge::Top => ukvm_platform::linux_wayland::Edge::Top,
+                ukvm_config::Edge::Bottom => ukvm_platform::linux_wayland::Edge::Bottom,
+            },
+        ))
+    })();
+    let (alias, platform_edge) = match result {
+        Ok(v) => v,
+        Err(e) => return super::fail(&e),
+    };
+    println!("UniversalKVM development control\n  Peer: {alias}\n  Edge: {}\n  Session: DebugSink; no remote input injection", edge.as_str());
+    capture_send(platform_edge, zone, &alias, &[], false)
 }

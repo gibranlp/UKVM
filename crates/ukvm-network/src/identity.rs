@@ -114,10 +114,22 @@ pub fn server_config(
     identity: &Identity,
     peer: CertificateDer<'static>,
 ) -> Result<Arc<rustls::ServerConfig>, String> {
+    server_config_many(identity, vec![peer])
+}
+
+pub fn server_config_many(
+    identity: &Identity,
+    peers: Vec<CertificateDer<'static>>,
+) -> Result<Arc<rustls::ServerConfig>, String> {
+    if peers.is_empty() {
+        return Err("no trusted peer certificates configured".into());
+    }
     let mut roots = rustls::RootCertStore::empty();
-    roots
-        .add(peer)
-        .map_err(|e| format!("invalid peer certificate: {e}"))?;
+    for peer in peers {
+        roots
+            .add(peer)
+            .map_err(|e| format!("invalid peer certificate: {e}"))?;
+    }
     let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
         .build()
         .map_err(|e| e.to_string())?;

@@ -1,21 +1,25 @@
 use std::process::ExitCode;
 
 mod network;
+mod settings;
 
 const HELP: &str = "UniversalKVM\n\
 Usage: ukvm <command>\n\
 Commands:\n\
   version   Show executable and protocol versions\n\
-  config    Show the default configuration path\n\
+  config [path|check|show]  Inspect configuration\n\
+  peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
+  layout [set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
+  control EDGE --debug [--zone INDEX]  Forward captured input to a configured DebugSink\n\
   doctor    Probe the current graphical session and portal capabilities\n\
   platform wayland zones               Request capture permission and list zones\n\
   platform wayland capture <edge> [zone] [--verbose]  Test local capture\n\
   platform wayland capture <edge> [zone] --send HOST --peer-cert PATH  Send to DebugSink\n\
   identity [--state-dir DIR]  Show or create persistent node identity\n\
-  listen --peer-cert PATH [--bind ADDR] [--state-dir DIR]  Authenticated DebugSink\n\
-  connect HOST --peer-cert PATH [--state-dir DIR]  Check peer connection\n\
+  listen [--peer-cert PATH] [--bind ADDR] [--state-dir DIR]  Authenticated DebugSink\n\
+  connect PEER [--peer-cert PATH] [--state-dir DIR]  Check peer connection\n\
   debug send-test-events HOST --peer-cert PATH  Send safe synthetic debug events\n\
-  status    Show current runtime implementation status\n\
+  status    Show node, peers, layout, and capabilities\n\
   start     Start UKVM (not implemented yet)\n\
   stop      Stop UKVM (not implemented yet)\n\
   pair      Pair a peer (not implemented yet)\n\
@@ -42,17 +46,11 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        [command] if command == "config" => match ukvm_config::default_path() {
-            Ok(path) => {
-                println!("{}", path.display());
-                ExitCode::SUCCESS
-            }
-            Err(err) => fail(&err.to_string()),
-        },
-        [command] if command == "status" => {
-            println!("UKVM runtime is not implemented yet; no session is active.");
-            ExitCode::SUCCESS
-        }
+        [command, rest @ ..] if command == "config" => settings::config(rest),
+        [command, rest @ ..] if command == "peer" => settings::peer(rest),
+        [command, rest @ ..] if command == "layout" => settings::layout(rest),
+        [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
+        [command] if command == "status" => settings::status(),
         [command] if command == "doctor" => doctor(),
         [command, rest @ ..] if command == "identity" => network::identity(rest),
         [command, rest @ ..] if command == "listen" => network::listen(rest),

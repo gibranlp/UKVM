@@ -12,10 +12,10 @@ The eventual runtime flow is: local edge activation -> validate layout and peer 
 | --- | --- |
 | `ukvm` (`crates/ukvm-cli`) | CLI and eventual process entry point |
 | `ukvm-core` | Platform and transport independent roles, focus and layout concepts |
-| `ukvm-config` | User config location and TOML parsing; no secrets |
+| `ukvm-config` | User config location, node preferences and node-level layout; no trust or secrets |
 | `ukvm-protocol` | Semantic input events and provisional versioned debug-session messages |
 | `ukvm-platform` | Input and display traits; eventual OS backends |
-| `ukvm-network` | Mutual TLS transport, bounded framing, development identity and DebugSink |
+| `ukvm-network` | Mutual TLS transport, bounded framing, persistent identity, pinned peer store, authorization and DebugSink |
 
 Discovery, pairing, and service integration will become modules or crates when implementation makes their boundaries concrete. Avoid empty crates. A future daemon can reuse the core, platform and network crates, while the CLI talks to it through a local authenticated control interface. The CLI should never contain OS input logic.
 
@@ -33,4 +33,4 @@ The future long-running node owns both listening and outgoing connections and ca
 
 ## Configuration
 
-`ukvm-config` uses TOML and OS-appropriate user paths: XDG config directory on Linux, Application Support on macOS, and AppData Roaming on Windows. The initial schema contains a node name and configured role. It is not a trust store. Endpoint/layout schema and migration policy must be designed before adding them. An address may identify a connection target, but never prove peer identity. Command line and local IPC decisions may temporarily narrow configured roles at runtime.
+`ukvm-config` uses TOML and OS-appropriate user paths: XDG config directory on Linux, Application Support on macOS, and AppData Roaming on Windows. The schema contains node name, role, listen address and node-level edge links. Links store the peer's certificate fingerprint, not its alias. On Linux, trust metadata and pinned peer certificates live in `$XDG_STATE_HOME/ukvm` (or `~/.local/state/ukvm`), while the unchanged `node.der`/`node.key` identity remains in the existing local user-data directory (`$XDG_DATA_HOME/ukvm` or its platform default). Peer aliases are labels; addresses are replaceable connection hints. Adding a peer defaults to connect allowed, debug input denied and control-this-node denied. The configured `listen` command checks the authenticated certificate ID and the requested session type against those permissions. Layout currently maps one peer per edge; monitor-level geometry remains future work. Existing minimal TOML and identity files remain valid without migration.

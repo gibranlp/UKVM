@@ -2,6 +2,7 @@
 
 pub mod identity;
 pub mod transport;
+pub mod trust;
 
 use bincode::Options;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};

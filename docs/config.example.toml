@@ -2,3 +2,13 @@
 [node]
 name = "desktop"
 role = "both" # controller, controlled, or both
+
+[network]
+listen = "0.0.0.0:24800"
+
+# Layout links are written by `ukvm layout set right PEER_ALIAS` using the
+# peer's cryptographic ID. Example after importing a peer:
+# [[layout.links]]
+# edge = "right"
+# peer_id = "<full 64-character SHA-256 certificate fingerprint>"
+# entry_edge = "left"

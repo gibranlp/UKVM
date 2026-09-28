@@ -5,12 +5,14 @@ This describes intended semantics and a **provisional development** wire format.
 ## Session stages
 
 1. Connect to a configured or discovered endpoint. Discovery is only a hint.
-2. Authenticate the peer against an explicitly supplied public certificate for the development test. Future pairing trust and revocation are not implemented. Reject an unknown certificate before processing any input request.
+2. Authenticate the peer against a pinned public certificate from the trusted-peer store, or an explicitly supplied certificate for a legacy development command. Future pairing and certificate rotation are not implemented. Reject an unknown certificate before processing any input request.
 3. Exchange `Hello` with major/minor protocol versions and stable peer identity. The provisional binary format requires an exact version match. Future minor-version compatibility rules must be designed before the wire format is frozen.
 4. The controller checks the peer's `debug_input_sink` capability, sends `SessionStart`, and waits for `SessionAccept` before starting capture. Display negotiation and injection policy are future work.
 5. Exchange heartbeat and input events while active. End on explicit leave, timeout, disconnect, permission loss, or local user override.
 
 The authenticated transport must bind the claimed node identity to its certificate or key. `Hello.node` alone is never proof of identity. Pairing verification is a separate protocol to be designed. Authentication and encryption are required before control traffic; there is no plaintext mode.
+
+Milestone 8 adds local peer records and authorization policy without changing the version 1.1 wire format. A certificate fingerprint is the stable node ID. Receiver policy distinguishes connection, DebugSink input and control-this-node permission. Trusting an identity never grants an input session by itself. The configured listener checks policy after TLS/Hello and again when `SessionStart` requests DebugSink input. The CLI still has no remote-input listener.
 
 ## Initial message concepts
 
