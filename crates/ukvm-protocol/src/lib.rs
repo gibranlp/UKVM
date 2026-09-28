@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// First protocol major version. Incompatible peers must fail closed.
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 
 /// Stable identity reference; actual identity and trust storage belong to security code.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -23,7 +23,7 @@ impl ProtocolVersion {
     };
 
     pub const fn compatible_with(self, other: Self) -> bool {
-        self.major == other.major
+        self.major == other.major && self.minor == other.minor
     }
 }
 
@@ -55,6 +55,27 @@ pub enum InputEvent {
     },
 }
 
+/// Validate values before any sink sees them, including non-network callers.
+pub fn validate_event(event: &InputEvent) -> Result<(), String> {
+    let valid_delta = |value: f64| value.is_finite() && value.abs() <= 32768.0;
+    match event {
+        InputEvent::PointerMotion { dx, dy } | InputEvent::Scroll { dx, dy } => {
+            if !valid_delta(*dx) || !valid_delta(*dy) {
+                return Err("invalid input delta".into());
+            }
+        }
+        InputEvent::PointerButton { button, .. } if *button == 0 || *button > 0x2ff => {
+            return Err("invalid button code".into())
+        }
+        InputEvent::Key {
+            code: KeyCode::LinuxEvdev(code),
+            ..
+        } if *code == 0 || *code > 0x2ff => return Err("invalid key code".into()),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Negotiated, explicitly versioned messages for the development debug sink.
 /// This is not yet a frozen interoperability format.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -66,6 +87,7 @@ pub enum WireMessage {
         platform: String,
         controller: bool,
         debug_sink: bool,
+        remote_input: bool,
     },
     SessionStart,
     SessionAccept,
@@ -74,6 +96,9 @@ pub enum WireMessage {
     HeartbeatAck(u64),
     SessionEnd,
     Error(String),
+    /// Separate from SessionStart, which always selects the non-injecting DebugSink.
+    RemoteSessionStart,
+    RemoteSessionAccept,
 }
 
 /// Candidate messages for a future authenticated transport. This is not a wire API.
@@ -114,7 +139,8 @@ mod tests {
 
     #[test]
     fn major_version_must_match() {
-        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 9 }));
+        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 1 }));
+        assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 0 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 2, minor: 0 }));
     }
 }

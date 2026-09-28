@@ -274,6 +274,7 @@ fn doctor() -> ExitCode {
         println!("    EIS receive: implemented; live connection not tested by doctor");
         println!("    Physical capture proof: not measured by this read-only command");
         println!("  Controlled node");
+        println!("    DebugSink: implemented; authenticated LAN delivery physically proven");
         println!(
             "    RemoteDesktop portal: {}",
             yes_no(injection.portal_available)
@@ -298,6 +299,19 @@ fn doctor() -> ExitCode {
                 "unavailable through this portal"
             }
         );
+        let evidence = ukvm_platform::linux_wayland::injection_evidence(&report.remote);
+        for (name, status) in [
+            ("Relative pointer", evidence.pointer),
+            ("Button", evidence.button),
+            ("Scroll", evidence.scroll),
+            ("Keyboard", evidence.keyboard),
+        ] {
+            println!(
+                "    {name} injection: detected={} implemented={} authorized={} physically_proven={}",
+                yes_no(status.detected), yes_no(status.implemented),
+                yes_no(status.authorized), yes_no(status.physically_proven)
+            );
+        }
         println!(
             "    Pointer injection: {}",
             if injection.pointer_advertised {

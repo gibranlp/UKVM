@@ -48,3 +48,4 @@ mod tests {
         assert!(!Role::Controlled.can_control());
     }
 }
+pub mod controlled;

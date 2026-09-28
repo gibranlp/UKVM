@@ -1,0 +1,82 @@
+//! Controlled-node session policy, independent of transport and OS input APIs.
+
+use ukvm_protocol::InputEvent;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SinkKind {
+    Debug,
+    RemoteInput,
+}
+
+/// A receiver is explicit about its purpose. `begin_session` must obtain any
+/// local authorization before returning; TLS authentication is insufficient.
+pub trait InputSink {
+    fn kind(&self) -> SinkKind;
+    fn begin_session(&mut self) -> Result<(), String>;
+    fn handle_event(&mut self, event: &InputEvent) -> Result<(), String>;
+    /// Must release held inputs even after an event failure or disconnect.
+    fn end_session(&mut self) -> Result<(), String>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlledState {
+    PeerAuthenticated,
+    Authorizing,
+    ReceivingInput,
+    Releasing,
+    Idle,
+}
+
+impl ControlledState {
+    pub fn request(&mut self) -> Result<(), String> {
+        if *self != Self::PeerAuthenticated {
+            return Err("control session request out of order".into());
+        }
+        *self = Self::Authorizing;
+        Ok(())
+    }
+
+    pub fn accept(&mut self) -> Result<(), String> {
+        if *self != Self::Authorizing {
+            return Err("control session acceptance out of order".into());
+        }
+        *self = Self::ReceivingInput;
+        Ok(())
+    }
+
+    pub fn event(&self) -> Result<(), String> {
+        if *self != Self::ReceivingInput {
+            return Err("input outside an accepted session".into());
+        }
+        Ok(())
+    }
+
+    pub fn release(&mut self) {
+        *self = Self::Releasing;
+    }
+
+    pub fn finish(&mut self) {
+        *self = Self::Idle;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ControlledState;
+
+    #[test]
+    fn input_requires_explicit_request_and_acceptance() {
+        let mut state = ControlledState::PeerAuthenticated;
+        assert!(state.event().is_err());
+        assert!(state.accept().is_err());
+        state.request().unwrap();
+        assert!(state.event().is_err());
+        state.accept().unwrap();
+        state.event().unwrap();
+        assert!(state.request().is_err());
+        state.release();
+        assert!(state.event().is_err());
+        state.finish();
+        assert_eq!(state, ControlledState::Idle);
+    }
+}

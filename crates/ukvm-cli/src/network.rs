@@ -166,11 +166,12 @@ pub fn connect(target: &str, args: &[String], synthetic: bool) -> ExitCode {
                 Err(err) => return super::fail(&err),
             };
         println!(
-            "Connected to {} ({})\n  Platform: {}\n  Transport: mutual TLS 1.3\n  Debug sink: {}",
+            "Connected to {} ({})\n  Platform: {}\n  Transport: mutual TLS 1.3\n  Debug sink: {}\n  Remote input: {}",
             connection.peer.name,
             connection.peer.id,
             connection.peer.platform,
-            connection.peer.debug_sink
+            connection.peer.debug_sink,
+            connection.peer.remote_input
         );
         if !synthetic {
             let began = Instant::now();

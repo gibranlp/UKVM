@@ -1163,6 +1163,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-rustls",
+ "ukvm-core",
  "ukvm-protocol",
 ]
 
@@ -1174,6 +1175,7 @@ dependencies = [
  "futures-util",
  "reis",
  "tokio",
+ "ukvm-core",
  "ukvm-protocol",
  "zbus",
 ]

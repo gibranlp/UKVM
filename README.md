@@ -2,7 +2,7 @@
 
 UniversalKVM (`ukvm`) is a planned cross-platform software KVM for moving keyboard and mouse control between computers while each uses its own display. One installation can act as controller, controlled machine, or both. Targets are Linux Wayland, Linux X11, macOS, and Windows.
 
-**Current state:** Linux Wayland InputCapture is proven on one Hyprland machine. A development transport now carries normalized capture events over mutually authenticated TLS to a **DebugSink** that counts events without injecting them. A physical localhost run delivered all 611 captured pointer events to the sink and restored local control. A two-computer test remains unverified. The active portal on this machine has no RemoteDesktop interface, so controlled-node injection is unavailable there. Discovery, pairing, real remote injection, and the background node are not implemented. `ukvm start`, `stop`, `pair`, and `devices` still return an error.
+**Current state:** Linux Wayland InputCapture and the development transport are proven across two physical computers. LAN tests carried 528 and 621 pointer events with none dropped and about 1.26 and 1.39 ms heartbeat RTT, respectively. A live receiver termination stopped capture after about 30 pointer events; portal Release succeeded and local input returned. The receiver remains a **DebugSink** and never injects. A separate controlled-session and platform-injector boundary now exists in code, but no real injector or pairing policy is implemented. The active Hyprland portal has no RemoteDesktop interface, so injection is unavailable here. Discovery and the background node are not implemented. `ukvm start`, `stop`, `pair`, and `devices` still return an error.
 
 ## Build and inspect
 

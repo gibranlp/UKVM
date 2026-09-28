@@ -5,7 +5,8 @@ pub mod transport;
 
 use bincode::Options;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use ukvm_protocol::{InputEvent, KeyCode, ProtocolVersion, WireMessage};
+pub use ukvm_protocol::validate_event;
+use ukvm_protocol::{InputEvent, ProtocolVersion, WireMessage};
 
 pub const DEFAULT_PORT: u16 = 24800;
 pub const MAX_FRAME: usize = 512;
@@ -96,10 +97,7 @@ pub fn validate(message: &WireMessage) -> Result<(), String> {
             ..
         } => {
             if !ProtocolVersion::CURRENT.compatible_with(*version) {
-                return Err("incompatible protocol major version".into());
-            }
-            if version.minor > ProtocolVersion::CURRENT.minor {
-                return Err("unsupported protocol minor version".into());
+                return Err("incompatible provisional protocol version".into());
             }
             if node_id.len() != 64 || !node_id.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err("invalid node ID".into());
@@ -120,26 +118,6 @@ pub fn validate(message: &WireMessage) -> Result<(), String> {
         WireMessage::Error(message) if message.len() > 120 => {
             return Err("error text too long".into())
         }
-        _ => {}
-    }
-    Ok(())
-}
-
-pub fn validate_event(event: &InputEvent) -> Result<(), String> {
-    let valid_delta = |value: f64| value.is_finite() && value.abs() <= 32768.0;
-    match event {
-        InputEvent::PointerMotion { dx, dy } | InputEvent::Scroll { dx, dy } => {
-            if !valid_delta(*dx) || !valid_delta(*dy) {
-                return Err("invalid input delta".into());
-            }
-        }
-        InputEvent::PointerButton { button, .. } if *button == 0 || *button > 0x2ff => {
-            return Err("invalid button code".into())
-        }
-        InputEvent::Key {
-            code: KeyCode::LinuxEvdev(code),
-            ..
-        } if *code == 0 || *code > 0x2ff => return Err("invalid key code".into()),
         _ => {}
     }
     Ok(())
@@ -170,6 +148,7 @@ impl EventCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ukvm_protocol::KeyCode;
     #[test]
     fn frame_rejects_untrusted_lengths_and_invalid_payload() {
         let message = WireMessage::Input(InputEvent::PointerMotion { dx: 1.0, dy: -2.0 });
@@ -191,6 +170,7 @@ mod tests {
             platform: "linux".into(),
             controller: true,
             debug_sink: true,
+            remote_input: false,
         };
         assert!(encode(&hello).is_err());
     }

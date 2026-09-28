@@ -5,6 +5,7 @@ use crate::{
     read_frame, write_frame, EventCounts, EVENT_QUEUE,
 };
 use std::{
+    future::Future,
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -19,6 +20,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
+use ukvm_core::controlled::{ControlledState, InputSink, SinkKind};
 use ukvm_protocol::{InputEvent, ProtocolVersion, WireMessage};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -40,21 +42,24 @@ pub struct PeerInfo {
     pub platform: String,
     pub controller: bool,
     pub debug_sink: bool,
+    pub remote_input: bool,
 }
 
 pub struct Connection {
     pub stream: TlsStream<TcpStream>,
     pub peer: PeerInfo,
+    local_sink: SinkKind,
 }
 
-fn hello(identity: &Identity, name: &str, controller: bool, debug_sink: bool) -> WireMessage {
+fn hello(identity: &Identity, name: &str, controller: bool, sink: Option<SinkKind>) -> WireMessage {
     WireMessage::Hello {
         version: ProtocolVersion::CURRENT,
         node_id: identity.id.clone(),
         name: name.to_string(),
         platform: std::env::consts::OS.to_string(),
         controller,
-        debug_sink,
+        debug_sink: sink == Some(SinkKind::Debug),
+        remote_input: sink == Some(SinkKind::RemoteInput),
     }
 }
 
@@ -63,10 +68,10 @@ async fn exchange_hello(
     identity: &Identity,
     name: &str,
     controller: bool,
-    debug_sink: bool,
+    sink: Option<SinkKind>,
 ) -> Result<PeerInfo, String> {
     tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        write_frame(stream, &hello(identity, name, controller, debug_sink)).await?;
+        write_frame(stream, &hello(identity, name, controller, sink)).await?;
         let (message, _) = read_frame(stream).await?;
         let WireMessage::Hello {
             node_id,
@@ -74,6 +79,7 @@ async fn exchange_hello(
             platform,
             controller,
             debug_sink,
+            remote_input,
             ..
         } = message
         else {
@@ -94,6 +100,7 @@ async fn exchange_hello(
             platform,
             controller,
             debug_sink,
+            remote_input,
         })
     })
     .await
@@ -122,8 +129,12 @@ pub async fn connect(
     .map_err(|_| "TLS handshake timed out".to_string())?
     .map_err(|e| format!("TLS peer authentication failed: {e}"))?;
     let mut stream = TlsStream::from(tls);
-    let peer = exchange_hello(&mut stream, identity, name, true, false).await?;
-    Ok(Connection { stream, peer })
+    let peer = exchange_hello(&mut stream, identity, name, true, None).await?;
+    Ok(Connection {
+        stream,
+        peer,
+        local_sink: SinkKind::Debug,
+    })
 }
 
 pub async fn accept(
@@ -139,8 +150,46 @@ pub async fn accept(
         .map_err(|_| "TLS handshake timed out".to_string())?
         .map_err(|e| format!("TLS client authentication failed: {e}"))?;
     let mut stream = TlsStream::from(tls);
-    let peer = exchange_hello(&mut stream, identity, name, false, true).await?;
-    Ok(Connection { stream, peer })
+    let peer = exchange_hello(&mut stream, identity, name, false, Some(SinkKind::Debug)).await?;
+    Ok(Connection {
+        stream,
+        peer,
+        local_sink: SinkKind::Debug,
+    })
+}
+
+/// A remote-control listener must supply its own locally authorized sink.
+/// The ordinary `accept` path advertises only the DebugSink.
+pub async fn accept_remote<S: InputSink>(
+    tcp: TcpStream,
+    identity: &Identity,
+    peer_cert: &Path,
+    name: &str,
+    sink: &S,
+) -> Result<Connection, String> {
+    if sink.kind() != SinkKind::RemoteInput {
+        return Err("remote listener requires a RemoteInput sink".into());
+    }
+    let config = server_config(identity, load_peer_certificate(peer_cert)?)?;
+    tcp.set_nodelay(true).map_err(|e| e.to_string())?;
+    let tls = tokio::time::timeout(HANDSHAKE_TIMEOUT, TlsAcceptor::from(config).accept(tcp))
+        .await
+        .map_err(|_| "TLS handshake timed out".to_string())?
+        .map_err(|e| format!("TLS client authentication failed: {e}"))?;
+    let mut stream = TlsStream::from(tls);
+    let peer = exchange_hello(
+        &mut stream,
+        identity,
+        name,
+        false,
+        Some(SinkKind::RemoteInput),
+    )
+    .await?;
+    Ok(Connection {
+        stream,
+        peer,
+        local_sink: SinkKind::RemoteInput,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -150,47 +199,116 @@ pub enum ReceiverNotice {
     SessionEnded(EventCounts),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DebugState {
-    Ready,
-    Active,
-}
+#[derive(Default)]
+pub struct DebugSink;
 
-impl DebugState {
-    fn start(self) -> Result<Self, String> {
-        match self {
-            Self::Ready => Ok(Self::Active),
-            Self::Active => Err("debug session already active".into()),
-        }
+impl InputSink for DebugSink {
+    fn kind(&self) -> SinkKind {
+        SinkKind::Debug
+    }
+    fn begin_session(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+    fn handle_event(&mut self, _event: &InputEvent) -> Result<(), String> {
+        Ok(())
+    }
+    fn end_session(&mut self) -> Result<(), String> {
+        Ok(())
     }
 }
 
 pub async fn receive_debug<F: FnMut(ReceiverNotice)>(
-    mut connection: Connection,
-    mut notice: F,
+    connection: Connection,
+    notice: F,
 ) -> Result<EventCounts, String> {
-    let mut state = DebugState::Ready;
+    receive_session(connection, &mut DebugSink, notice).await
+}
+
+/// Runs one explicitly selected controlled-node session. The caller must create
+/// a locally authorized remote sink before using `accept_remote`.
+pub async fn receive_session<S: InputSink, F: FnMut(ReceiverNotice)>(
+    connection: Connection,
+    sink: &mut S,
+    notice: F,
+) -> Result<EventCounts, String> {
+    receive_session_until(connection, sink, notice, std::future::pending()).await
+}
+
+/// `shutdown` is the local override path. It runs the same sink cleanup as
+/// disconnect, malformed input, timeout, and injector failure.
+pub async fn receive_session_until<S, F, Shutdown>(
+    mut connection: Connection,
+    sink: &mut S,
+    mut notice: F,
+    shutdown: Shutdown,
+) -> Result<EventCounts, String>
+where
+    S: InputSink,
+    F: FnMut(ReceiverNotice),
+    Shutdown: Future<Output = ()>,
+{
+    if sink.kind() != connection.local_sink {
+        return Err("receiver sink does not match advertised session type".into());
+    }
+    let mut state = ControlledState::PeerAuthenticated;
     let mut counts = EventCounts::default();
     let mut rate_window = Instant::now();
     let mut rate_count = 0u32;
-    loop {
-        let (message, _) = tokio::time::timeout(HEALTH_TIMEOUT, read_frame(&mut connection.stream))
-            .await
-            .map_err(|_| "peer heartbeat timed out".to_string())??;
+    tokio::pin!(shutdown);
+    let result = loop {
+        let frame = tokio::select! {
+            _ = &mut shutdown => break Err("local control override".into()),
+            frame = tokio::time::timeout(HEALTH_TIMEOUT, read_frame(&mut connection.stream)) => {
+                frame.map_err(|_| "peer heartbeat timed out".to_string()).and_then(|r| r)
+            }
+        };
+        let message = match frame {
+            Ok((message, _)) => message,
+            Err(err) => break Err(err),
+        };
         match message {
-            WireMessage::SessionStart if connection.peer.controller => {
-                state = state.start()?;
-                write_frame(&mut connection.stream, &WireMessage::SessionAccept).await?;
+            requested_message @ (WireMessage::SessionStart | WireMessage::RemoteSessionStart)
+                if connection.peer.controller =>
+            {
+                let requested = if requested_message == WireMessage::SessionStart {
+                    SinkKind::Debug
+                } else {
+                    SinkKind::RemoteInput
+                };
+                if requested != sink.kind() {
+                    break Err("session type does not match receiver sink".into());
+                }
+                if let Err(err) = state
+                    .request()
+                    .and_then(|()| sink.begin_session())
+                    .and_then(|()| state.accept())
+                {
+                    break Err(err);
+                }
+                let accepted = if requested == SinkKind::Debug {
+                    WireMessage::SessionAccept
+                } else {
+                    WireMessage::RemoteSessionAccept
+                };
+                if let Err(err) = write_frame(&mut connection.stream, &accepted).await {
+                    break Err(err);
+                }
                 notice(ReceiverNotice::SessionStarted);
             }
-            WireMessage::Input(event) if state == DebugState::Active => {
+            WireMessage::Input(event) => {
+                if let Err(err) = state.event() {
+                    break Err(err);
+                }
                 if rate_window.elapsed() >= Duration::from_secs(1) {
                     rate_window = Instant::now();
                     rate_count = 0;
                 }
                 rate_count += 1;
                 if rate_count > 20_000 {
-                    return Err("input event rate limit exceeded".into());
+                    break Err("input event rate limit exceeded".into());
+                }
+                if let Err(err) = sink.handle_event(&event) {
+                    break Err(err);
                 }
                 counts.add(&event);
                 if counts.total() == 1 || counts.total() % 100 == 0 {
@@ -198,16 +316,24 @@ pub async fn receive_debug<F: FnMut(ReceiverNotice)>(
                 }
             }
             WireMessage::Heartbeat(nonce) => {
-                write_frame(&mut connection.stream, &WireMessage::HeartbeatAck(nonce)).await?;
+                if let Err(err) =
+                    write_frame(&mut connection.stream, &WireMessage::HeartbeatAck(nonce)).await
+                {
+                    break Err(err);
+                }
             }
-            WireMessage::SessionEnd if state == DebugState::Active => {
+            WireMessage::SessionEnd if state == ControlledState::ReceivingInput => {
                 notice(ReceiverNotice::SessionEnded(counts.clone()));
-                return Ok(counts);
+                break Ok(());
             }
-            WireMessage::SessionEnd => return Ok(counts),
-            _ => return Err("unexpected message for debug receiver state".into()),
+            WireMessage::SessionEnd => break Ok(()),
+            _ => break Err("unexpected message for receiver state".into()),
         }
-    }
+    };
+    state.release();
+    let cleanup = sink.end_session();
+    state.finish();
+    result.and(cleanup.map(|()| counts))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -242,14 +368,38 @@ impl Sender {
     }
 }
 
-pub async fn start_sender(mut connection: Connection) -> Result<Sender, String> {
-    require_debug_sink(&connection.peer)?;
-    write_frame(&mut connection.stream, &WireMessage::SessionStart).await?;
+pub async fn start_sender(connection: Connection) -> Result<Sender, String> {
+    start_sender_for(connection, SinkKind::Debug).await
+}
+
+/// Only callers that explicitly choose remote control can send this request.
+/// No CLI command selects it until local authorization and an injector exist.
+pub async fn start_remote_sender(connection: Connection) -> Result<Sender, String> {
+    start_sender_for(connection, SinkKind::RemoteInput).await
+}
+
+async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<Sender, String> {
+    let (request, accepted) = match kind {
+        SinkKind::Debug => {
+            require_debug_sink(&connection.peer)?;
+            (WireMessage::SessionStart, WireMessage::SessionAccept)
+        }
+        SinkKind::RemoteInput => {
+            if !connection.peer.remote_input {
+                return Err("peer did not advertise remote_input".into());
+            }
+            (
+                WireMessage::RemoteSessionStart,
+                WireMessage::RemoteSessionAccept,
+            )
+        }
+    };
+    write_frame(&mut connection.stream, &request).await?;
     let (response, _) = tokio::time::timeout(HANDSHAKE_TIMEOUT, read_frame(&mut connection.stream))
         .await
         .map_err(|_| "debug session acceptance timed out".to_string())??;
-    if response != WireMessage::SessionAccept {
-        return Err("peer rejected debug session".into());
+    if response != accepted {
+        return Err("peer rejected requested session".into());
     }
     let (mut read, mut write) = split(connection.stream);
     let (queue, mut rx) = mpsc::channel::<InputEvent>(EVENT_QUEUE);
@@ -348,6 +498,143 @@ pub async fn bind(addr: &str) -> Result<TcpListener, String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    struct FailingRemoteSink {
+        ended: Arc<AtomicBool>,
+    }
+
+    impl InputSink for FailingRemoteSink {
+        fn kind(&self) -> SinkKind {
+            SinkKind::RemoteInput
+        }
+        fn begin_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn handle_event(&mut self, _event: &InputEvent) -> Result<(), String> {
+            Err("injector disconnected".into())
+        }
+        fn end_session(&mut self) -> Result<(), String> {
+            self.ended.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn debug_request_cannot_enter_remote_sink() {
+        let base = std::env::temp_dir().join(format!("ukvm-remote-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = Identity::load_or_create(&base.join("a")).unwrap();
+        let b = Identity::load_or_create(&base.join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ended = Arc::new(AtomicBool::new(false));
+        let ended_copy = Arc::clone(&ended);
+        let a_cert = a.cert_path.clone();
+        let receiver = tokio::spawn(async move {
+            let mut sink = FailingRemoteSink { ended: ended_copy };
+            let (tcp, _) = listener.accept().await.unwrap();
+            let connection = accept_remote(tcp, &b, &a_cert, "node-b", &sink)
+                .await
+                .unwrap();
+            receive_session(connection, &mut sink, |_| {})
+                .await
+                .unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &base.join("b/node.der"), "node-a")
+            .await
+            .unwrap();
+        assert!(connection.peer.remote_input);
+        assert!(!connection.peer.debug_sink);
+        write_frame(&mut connection.stream, &WireMessage::SessionStart)
+            .await
+            .unwrap();
+        drop(connection);
+        assert!(receiver.await.unwrap().contains("session type"));
+        assert!(ended.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn remote_injector_failure_ends_session() {
+        let base =
+            std::env::temp_dir().join(format!("ukvm-failing-injector-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = Identity::load_or_create(&base.join("a")).unwrap();
+        let b = Identity::load_or_create(&base.join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ended = Arc::new(AtomicBool::new(false));
+        let ended_copy = Arc::clone(&ended);
+        let a_cert = a.cert_path.clone();
+        let receiver = tokio::spawn(async move {
+            let mut sink = FailingRemoteSink { ended: ended_copy };
+            let (tcp, _) = listener.accept().await.unwrap();
+            let connection = accept_remote(tcp, &b, &a_cert, "node-b", &sink)
+                .await
+                .unwrap();
+            receive_session(connection, &mut sink, |_| {})
+                .await
+                .unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &base.join("b/node.der"), "node-a")
+            .await
+            .unwrap();
+        write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut connection.stream).await.unwrap().0,
+            WireMessage::RemoteSessionAccept
+        );
+        write_frame(
+            &mut connection.stream,
+            &WireMessage::Input(InputEvent::PointerMotion { dx: 1.0, dy: 0.0 }),
+        )
+        .await
+        .unwrap();
+        assert!(receiver.await.unwrap().contains("injector disconnected"));
+        assert!(ended.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn local_override_releases_remote_sink() {
+        let base = std::env::temp_dir().join(format!("ukvm-override-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = Identity::load_or_create(&base.join("a")).unwrap();
+        let b = Identity::load_or_create(&base.join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ended = Arc::new(AtomicBool::new(false));
+        let ended_copy = Arc::clone(&ended);
+        let a_cert = a.cert_path.clone();
+        let receiver = tokio::spawn(async move {
+            let mut sink = FailingRemoteSink { ended: ended_copy };
+            let (tcp, _) = listener.accept().await.unwrap();
+            let connection = accept_remote(tcp, &b, &a_cert, "node-b", &sink)
+                .await
+                .unwrap();
+            receive_session_until(connection, &mut sink, |_| {}, async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            })
+            .await
+            .unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &base.join("b/node.der"), "node-a")
+            .await
+            .unwrap();
+        write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut connection.stream).await.unwrap().0,
+            WireMessage::RemoteSessionAccept
+        );
+        assert!(receiver.await.unwrap().contains("local control override"));
+        assert!(ended.load(Ordering::SeqCst));
+        let _ = fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn capability_and_queue_bounds() {
@@ -357,6 +644,7 @@ mod tests {
             platform: "linux".into(),
             controller: true,
             debug_sink: false,
+            remote_input: false,
         };
         assert!(require_debug_sink(&peer).is_err());
         assert!(require_debug_sink(&PeerInfo {

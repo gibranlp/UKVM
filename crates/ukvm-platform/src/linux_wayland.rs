@@ -1,6 +1,7 @@
 //! Portal-based Wayland probing and experimental input capture.
 //! D-Bus and EI details stay in this module.
 
+use crate::{CapabilityEvidence, PlatformError};
 use ashpd::desktop::input_capture::{
     ActivatedBarrier, Barrier, BarrierID, BarrierPosition, Capabilities as CaptureFlags,
     CreateSession2Options, CreateSessionOptions, InputCapture, StartOptions,
@@ -87,6 +88,55 @@ impl InjectionPortalCapability {
             pointer_advertised: probe.pointer_advertised,
             keyboard_advertised: probe.keyboard_advertised,
         }
+    }
+}
+
+/// Portal presence is only detection. UKVM has no EI sender implementation yet.
+pub struct WaylandInputInjector {
+    _private: (),
+}
+
+impl WaylandInputInjector {
+    pub async fn open() -> Result<Self, PlatformError> {
+        let report = probe().await;
+        if report.remote.version.is_none() {
+            return Err(PlatformError::Unsupported(
+                "RemoteDesktop portal interface not provided by active backend",
+            ));
+        }
+        if report.remote.version.is_some_and(|version| version < 2) {
+            return Err(PlatformError::Unsupported(
+                "RemoteDesktop portal does not provide ConnectToEIS",
+            ));
+        }
+        Err(PlatformError::Unsupported(
+            "Wayland EI sender and portal authorization are not implemented",
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WaylandInjectionEvidence {
+    pub pointer: CapabilityEvidence,
+    pub button: CapabilityEvidence,
+    pub scroll: CapabilityEvidence,
+    pub keyboard: CapabilityEvidence,
+}
+
+pub fn injection_evidence(probe: &InterfaceProbe) -> WaylandInjectionEvidence {
+    let eis = probe.version.is_some_and(|version| version >= 2);
+    let pointer = CapabilityEvidence {
+        detected: eis && probe.pointer_advertised,
+        ..CapabilityEvidence::default()
+    };
+    WaylandInjectionEvidence {
+        pointer,
+        button: CapabilityEvidence::default(),
+        scroll: CapabilityEvidence::default(),
+        keyboard: CapabilityEvidence {
+            detected: eis && probe.keyboard_advertised,
+            ..CapabilityEvidence::default()
+        },
     }
 }
 

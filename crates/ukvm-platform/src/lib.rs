@@ -1,5 +1,6 @@
 //! OS input boundary. Implementations must live under platform-specific modules.
 
+use ukvm_core::controlled::{InputSink, SinkKind};
 use ukvm_protocol::InputEvent;
 
 #[cfg(target_os = "linux")]
@@ -34,6 +35,16 @@ pub struct InjectionCapabilities {
     pub pointer_button: bool,
     pub pointer_scroll: bool,
     pub keyboard: bool,
+}
+
+/// Evidence levels are independent: detection of an API does not mean UKVM
+/// implemented, received permission for, or physically proved injection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CapabilityEvidence {
+    pub detected: bool,
+    pub implemented: bool,
+    pub authorized: bool,
+    pub physically_proven: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,10 +111,69 @@ pub trait InputSource: Send {
 
 /// A session granted permission to inject input. Creating this session is a
 /// platform operation and must fail when permission or the backend is absent.
-pub trait InputSink: Send {
+pub trait PlatformInputInjector: Send {
     fn capabilities(&self) -> InjectionCapabilities;
+    /// Must clean up partial native state before returning an error.
+    fn begin(&mut self) -> Result<(), PlatformError>;
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError>;
     fn release_all(&mut self) -> Result<(), PlatformError>;
+    fn end(&mut self) -> Result<(), PlatformError>;
+}
+
+/// Binds a locally authorized platform injector to the network-facing sink.
+/// The receiver must still explicitly select RemoteInput and authorize each session.
+pub struct RemoteInputSink<I: PlatformInputInjector> {
+    injector: I,
+    active: bool,
+}
+
+impl<I: PlatformInputInjector> RemoteInputSink<I> {
+    pub fn new(injector: I) -> Self {
+        Self {
+            injector,
+            active: false,
+        }
+    }
+}
+
+impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
+    fn kind(&self) -> SinkKind {
+        SinkKind::RemoteInput
+    }
+
+    fn begin_session(&mut self) -> Result<(), String> {
+        self.injector.begin().map_err(|e| e.to_string())?;
+        self.active = true;
+        Ok(())
+    }
+
+    fn handle_event(&mut self, event: &InputEvent) -> Result<(), String> {
+        if !self.active {
+            return Err("injector session is not active".into());
+        }
+        ukvm_protocol::validate_event(event)?;
+        let caps = self.injector.capabilities();
+        let supported = match event {
+            InputEvent::PointerMotion { .. } => caps.pointer_relative,
+            InputEvent::PointerButton { .. } => caps.pointer_button,
+            InputEvent::Scroll { .. } => caps.pointer_scroll,
+            InputEvent::Key { .. } => caps.keyboard,
+        };
+        if !supported {
+            return Err("injector capability mismatch".into());
+        }
+        self.injector.inject(event).map_err(|e| e.to_string())
+    }
+
+    fn end_session(&mut self) -> Result<(), String> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        let released = self.injector.release_all();
+        let ended = self.injector.end();
+        released.and(ended).map_err(|e| e.to_string())
+    }
 }
 
 pub trait DisplayService: Send {
@@ -128,4 +198,71 @@ pub fn backend_status(kind: BackendKind) -> Result<Capabilities, PlatformError> 
         BackendKind::Windows => "Windows backend is not implemented",
     };
     Err(PlatformError::Unsupported(name))
+}
+
+#[cfg(test)]
+mod injector_tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct PointerOnly {
+        releases: Arc<AtomicUsize>,
+        ends: Arc<AtomicUsize>,
+    }
+    impl PlatformInputInjector for PointerOnly {
+        fn capabilities(&self) -> InjectionCapabilities {
+            InjectionCapabilities {
+                pointer_relative: true,
+                ..InjectionCapabilities::default()
+            }
+        }
+        fn begin(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn inject(&mut self, _: &InputEvent) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            self.releases.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), PlatformError> {
+            self.ends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn remote_sink_rejects_unsupported_event_and_releases() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(AtomicUsize::new(0));
+        let mut sink = RemoteInputSink::new(PointerOnly {
+            releases: releases.clone(),
+            ends: ends.clone(),
+        });
+        assert!(sink
+            .handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
+            .is_err());
+        sink.begin_session().unwrap();
+        sink.handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
+            .unwrap();
+        assert!(sink
+            .handle_event(&InputEvent::PointerButton {
+                button: 1,
+                pressed: true
+            })
+            .is_err());
+        assert!(sink
+            .handle_event(&InputEvent::PointerMotion {
+                dx: f64::NAN,
+                dy: 0.0
+            })
+            .is_err());
+        sink.end_session().unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert_eq!(ends.load(Ordering::SeqCst), 1);
+    }
 }

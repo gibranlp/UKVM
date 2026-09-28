@@ -15,3 +15,4 @@ sha2 = "0.10"
 tokio = { version = "1", features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
 ukvm-protocol.workspace = true
+ukvm-core.workspace = true
