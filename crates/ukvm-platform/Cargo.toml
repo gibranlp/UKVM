@@ -1,0 +1,16 @@
+[package]
+name = "ukvm-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ukvm-protocol.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "input_capture", "remote_desktop", "screencast"] }
+futures-util = "0.3"
+reis = { version = "0.7.1", features = ["tokio"] }
+tokio = { version = "1", features = ["rt", "time", "signal", "net", "macros"] }
+zbus = "5.18"

@@ -1,0 +1,61 @@
+# Development network transport (Milestone 5)
+
+This is a two-node **DebugSink** transport. The receiver validates and counts normalized events; it does not inject input. No pairing, discovery, reconnect loop or service runtime exists. The same `ukvm` binary can listen or connect. The listener currently serves one connection at a time.
+
+## Transport choice
+
+UKVM currently uses persistent TCP with mutual TLS 1.3 through `tokio-rustls`/`rustls`. TCP gives ordered, reliable delivery for the first control channel; `TCP_NODELAY` avoids delayed small writes. This works across LAN and private routed networks without subnet assumptions. QUIC through `quinn` is a valid later candidate for multiple independent streams and datagrams, but adds connection and stream policy before UKVM needs them. This choice does not freeze the eventual production transport. There is no plaintext mode or custom cryptography. `rcgen` generates per-node development certificates; SHA-256 of the public DER certificate is the node ID. `bincode` gives compact provisional framing; this format is **not frozen** for cross-version interoperability.
+
+`Cargo.lock` pins the transitive `time` dependency to a release compatible with the workspace's Rust 1.87 MSRV. `dirs` supplies an OS user-state location. Tokio drives asynchronous sockets and bounded channels. These dependencies have concrete responsibilities; the transport crate does not depend on Wayland or any platform input API.
+
+## Identity and manual trust
+
+`ukvm identity` creates `node.der` (public) and `node.key` (private) under the local user data directory's `ukvm` subdirectory. `--state-dir PATH` overrides it for tests. On Unix, the directory is mode 0700 and the key is mode 0600; loading rejects a key readable by other users or a non-regular key file. Exchange **only** `node.der` using a separately authenticated channel, verify its fingerprint/node ID with the other operator, and supply the peer's certificate with `--peer-cert`. Both sides require the other certificate. A peer name or IP address never grants trust. No automatic pairing, certificate rotation/revocation UI, OS keychain integration or multi-peer trust store exists. A compromised/exchanged-wrong certificate defeats this manual trust step. Do not share `node.key`.
+
+The TLS handshake validates the pinned peer certificate, including possession of its private key. The protocol `Hello.node_id` must equal the SHA-256 fingerprint of the authenticated TLS certificate. Version and capability claims are then validated. The listener advertises `debug_input_sink`, not controlled-node injection. Capture starts only after `SessionAccept`.
+
+## Wire and session lifecycle
+
+Each TLS application frame is a four-byte unsigned big-endian payload length followed by a `bincode` fixed-integer message. The maximum payload is 512 bytes; the limit is checked before reading or allocating the body. Decoder limits and validation cover message variants, trailing data, IDs, names, platform strings, finite bounded deltas and key/button ranges. The current version is `1.0`; unknown major versions and higher minor versions are rejected. Changes to this provisional format require coordinated builds on both machines.
+
+The development sequence is `Hello` in both directions, then `SessionStart`/`SessionAccept`, `Input` events and heartbeat/ack, then `SessionEnd`. Session state rejects input before acceptance and unexpected message types. A debug listener reports counts and event rate without printing key values. A synthetic test sends two relative motions and a Shift press/release to this sink only. The receiver limits events to 20,000 per second. No input message can execute a command.
+
+The sender holds at most 256 queued input events. Wayland's event callback uses non-blocking `try_send`: it may drop pointer motion when full, counting drops; failure to queue a key, button or scroll event aborts capture so stateful input is not silently lost. A send/read stall or missing heartbeat for four seconds marks the connection unhealthy. The Wayland capture loop checks health about every 100 ms, calls portal `Release` if active, and then disables/closes the session. That is the safety path for a peer crash or network loss. This is not yet a validated end-to-end peer-loss live test. RTT comes from heartbeat/ack on one connection; it is not a one-way latency measurement. Reported input frame bytes exclude TLS/TCP overhead, Hello and heartbeats. Reconnection requires starting a new command and reauthenticating.
+
+`KeyCode::LinuxEvdev` explicitly labels the source code domain. It is adequate for the DebugSink's counts, not a portable injection mapping. The protocol currently has no session ID, cross-platform key translation, motion coalescing, replay across reconnect or multiple logical streams. These need design before real injection.
+
+## Commands
+
+For a fresh **Arch Linux** receiver, copy the repository or just [`setup-arch-test-node.sh`](../scripts/setup-arch-test-node.sh) to that machine first. Run the script as a normal user; it uses `sudo pacman -Syu --needed` for a full system update and build packages, then installs stable Rust with rustfmt/Clippy. It builds and runs headless tests if the repository is present. `--dry-run` prints the commands without installing anything. The DebugSink does not require a Wayland compositor or portal backend; this setup does not install or configure one. If you copied only the script, transfer the matching UKVM source afterward and run `cargo build --locked --workspace` in that checkout. Never transfer `node.key` with the source.
+
+For two machines, build the same revision on both. On **each** machine, run `ukvm identity` and exchange the printed public `node.der` files after checking fingerprints. Put the other machine's public certificate at a local path such as `./peer.der`.
+
+On receiver B:
+
+```sh
+ukvm listen --bind 0.0.0.0:24800 --peer-cert ./machine-a.der
+```
+
+On controller A, check authentication first:
+
+```sh
+ukvm connect MACHINE_B_IP:24800 --peer-cert ./machine-b.der
+```
+
+Send harmless synthetic events if desired:
+
+```sh
+ukvm debug send-test-events MACHINE_B_IP:24800 --peer-cert ./machine-b.der
+```
+
+For a Wayland controller capture on A:
+
+```sh
+ukvm platform wayland capture right --send MACHINE_B_IP:24800 --peer-cert ./machine-b.der --verbose
+```
+
+Move the pointer through the **outer right edge of the large monitor** after the command reports that the remote DebugSink accepted the session and the portal accepted the barrier. UKVM releases after five seconds of capture; Esc/Ctrl-C also stops it. Specify a zone when edge selection is ambiguous. The listener defaults to `127.0.0.1:24800`, so `--bind 0.0.0.0:24800` is required for LAN listening. Restrict that port to intended peers with ordinary host firewall policy. There is no Internet/cloud requirement.
+
+## Validation evidence
+
+On one Arch Linux/Hyprland machine, two identities authenticated over localhost mutual TLS. `connect` completed Hello and a heartbeat RTT check. The synthetic test sent and received exactly two pointer and two keyboard events. A physical right-edge capture then activated InputCapture, delivered 611 normalized pointer events to the sender, and the DebugSink counted exactly 611 pointer events and zero keyboard events. The portal accepted barrier 1 on zone 0 from `(0, 0)` to `(0, 2159)`. Release succeeded and the user confirmed local mouse/keyboard control returned normally. This proves the local capture-to-TLS-to-DebugSink path; **a two-computer run and live network-loss release remain untested**. No receiver injection occurred.

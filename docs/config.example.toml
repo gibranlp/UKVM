@@ -1,0 +1,4 @@
+# Preferences only. Pairing keys and trusted-peer records never belong in this file.
+[node]
+name = "desktop"
+role = "both" # controller, controlled, or both

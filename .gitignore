@@ -1,0 +1,29 @@
+# Cargo build output. Commit Cargo.lock for reproducible application builds.
+target/
+
+# Local UKVM node identity and runtime state. Never publish private keys.
+node.key
+node.der
+*.pem
+*.p12
+*.pfx
+*.key
+*.log
+*.pid
+*.sock
+
+# Local environment and editor settings.
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local Codex/agent session data.
+/.agents/
+/.codex/

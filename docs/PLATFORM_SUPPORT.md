@@ -1,0 +1,78 @@
+# Platform support plan
+
+**Current status:** Linux Wayland capture is proven locally on Hyprland. Controlled-node injection is unavailable through this machine's active portal; no platform has end-to-end UKVM control yet. A green build on one OS does not claim runtime support on another.
+
+In Milestone 5, a physical right-edge capture on this Hyprland machine sent 611 normalized pointer events through a localhost mutual-TLS connection to UKVM's DebugSink. The receiver counted exactly 611 pointer events, no keyboard events, and injected nothing. InputCapture `Release` succeeded; the user confirmed local mouse and keyboard control returned normally. This proves capture-to-network-to-debug-sink on one machine. Two physical computers, live disconnect during capture, and all other compositors remain untested. See [network transport](NETWORK.md).
+
+| Environment | InputCapture | Controlled-node injection |
+| --- | --- | --- |
+| Arch Linux / Hyprland 0.56.2 | Pointer and keyboard proven by physical tests | Unavailable: active portal has no RemoteDesktop |
+| GNOME Wayland | Untested | Untested |
+| KDE Plasma Wayland | Untested | Untested |
+| Other wlroots/COSMIC | Untested | Untested |
+
+| Target | Candidate sanctioned mechanisms | Main open questions |
+| --- | --- | --- |
+| Linux Wayland | InputCapture portal and EI pointer/keyboard capture verified locally on Hyprland; RemoteDesktop/EI injection remains planned | A compatible RemoteDesktop backend, other compositors, zone-change recovery, button/scroll events and cross-platform key mapping need testing |
+| Linux X11 | XInput2/X11 event capture and XTEST injection | Grabs, multiple displays, X server security, injected-event loops |
+| macOS | Quartz event taps, Core Graphics event posting, display APIs | Accessibility and Input Monitoring grants, event tap lifecycle, secure input, multi-display coordinates |
+| Windows | Raw input or low-level hooks, `SendInput`, monitor APIs | Hook behavior, integrity levels, secure desktop and session boundaries |
+
+Wayland is a first-class target. The [InputCapture portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html) defines session creation, approval, screen zones, pointer barriers and EIS connection. The [RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html) defines a user-approved injection session and EIS connection. [libei](https://libinput.pages.freedesktop.org/libei/api/index.html) provides the client-side emulated-input protocol. These interfaces are candidates, not a promise that every compositor implements every capability. Check portal version and supported capabilities at runtime; document missing features per compositor during implementation. Avoid XWayland fallback for native Wayland sessions and avoid privileged input-device tricks.
+
+## Wayland milestone evidence (Arch Linux / Hyprland)
+
+On the development machine, `ukvm doctor` reached the session portal and found InputCapture version 1 with keyboard and pointer advertised. The RemoteDesktop interface was absent, so controlled-node injection is unavailable through that portal here. `ukvm platform wayland zones` created a real portal session and returned two zones: `(-3840, 0) 3840x2160` and `(-5760, 0) 1920x1080`, zone set 1. The earlier `capture left 1` test ran for 30 seconds with zero activations. With the new outer-edge selection, `capture right --verbose` requested zone 0 barrier 1 from `(0, 0)` to `(0, 2159)`; the portal accepted it. The first physical test produced `Activated` with activation ID 5 and barrier ID 1, two EI start-emulating notices with sequence 5, and 591 normalized pointer motion events. `Release` with suggested cursor position `(-0.5, 1079.5)` succeeded, the session closed, and the user confirmed local control returned normally. A second physical test repeated activation and Release, delivering 614 pointer motion events and two keyboard events from a harmless modifier key. Button and scroll delivery were not exercised. Neither test observed `Deactivated`, consistent with explicit Release. Other compositors remain untested.
+
+`doctor` reads the portal service and interface properties without creating a capture session, so it reports advertised capabilities separately from runtime verification. `zones` and `capture` may ask the user for permission. Version 1 uses `CreateSession` (immediately started); version 2 uses `CreateSession2` and `Start`. Both paths then use `ConnectToEIS`, `GetZones`, `SetPointerBarriers` and `Enable`. Capture observes `Activated`, `Deactivated` and `ZonesChanged`, then calls `Release`, `Disable` and session `Close` when stopping. A zone change stops the experimental command so stale barriers cannot remain active; automatic barrier rebuilding is future work.
+
+## Milestone 3 audit and geometry
+
+The [portal contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html) says `ConnectToEIS` must happen before `Enable`. After session start, the documented sequence is `ConnectToEIS`, `GetZones`, `SetPointerBarriers` with the returned `zone_set`, then `Enable`. Setting barriers suspends capture until another `Enable`. The earlier code fetched zones before EIS; that was not shown to be invalid, but this implementation now follows the documented order. It subscribes to `Activated`, `Deactivated`, and `ZonesChanged` before enabling. `Activated` is compositor driven; successful `Enable` does not mean capture is active. `failed_barriers` is a list of denied IDs. UKVM reports accepted IDs as the requested IDs absent from that list. A zone change stops the test; it does not leave a stale barrier armed.
+
+Portal zones are logical rectangles and may have negative origins. The previous edge check rejected any edge with an adjacent monitor, even if only part of that edge was shared. UKVM now subtracts adjacent or overlapping zone intervals and returns maximal outer segments. For the last measured layout, the calculated segments are:
+
+| Zone | Edge | Portal barrier endpoints (inclusive) |
+| --- | --- | --- |
+| 0 | left | `(-3840,1080)` to `(-3840,2159)` |
+| 0 | right | `(0,0)` to `(0,2159)` |
+| 0 | top | `(-3840,0)` to `(-1,0)` |
+| 0 | bottom | `(-3840,2160)` to `(-1,2160)` |
+| 1 | left | `(-5760,0)` to `(-5760,1079)` |
+| 1 | top | `(-5760,0)` to `(-3841,0)` |
+| 1 | bottom | `(-5760,1080)` to `(-3841,1080)` |
+
+Zone 1 right is shared with zone 0 and has no outer segment. With no zone argument, `capture right` is unambiguous and selects zone 0. `capture top` is ambiguous and asks for an explicit zone index. The portal may still reject a proposed segment; that decision is shown before `Enable`.
+
+On this machine, `/usr/share/xdg-desktop-portal/hyprland-portals.conf` chooses the Hyprland backend, and its installed `.portal` file advertises InputCapture. The running displays match the two portal zones at scale 1; Hyprland IPC was used only to investigate this machine, not by UKVM. Upstream tracks an [open InputCapture session cleanup issue](https://github.com/hyprwm/xdg-desktop-portal-hyprland/issues/419) affecting versions close to the installed Hyprland 0.56.2 and portal backend 1.4.1. Two EI lock files existed after the earlier two earlier live sessions; their cause was not established. Avoid unnecessary repeated live sessions until cleanup behavior is verified. No user configuration was changed.
+
+`Release` accepts the current `activation_id` and optionally a cursor position in the available zones. UKVM suggests a position half a logical pixel inside the source edge. The [specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html) says the compositor may ignore that position. A successful Release D-Bus call confirms that the portal accepted the request; it does not by itself prove the local cursor returned. The test prints the Release result and then disables and closes the session.
+
+## Milestone 4 controlled-node investigation (2026-09-27)
+
+The [RemoteDesktop portal contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html) defines `CreateSession` → `SelectDevices` → user-approved `Start` → `ConnectToEIS` (version 2) → an EI **sender** context. The compositor/backend supplies devices, regions and capabilities; UKVM must bind them, start emulating, send framed events and stop emulating before closing. EI is a protocol, not a permission grant or a standalone injection service. `ConnectToEIS` can be called once after `Start`; after it connects, the portal's D-Bus `Notify*` input methods cannot be mixed into that session. The portal also specifies a legacy D-Bus `Notify*` path, but EIS is the preferred low-latency path. No screen stream is intrinsically required for relative pointer and keyboard input.
+
+The running machine has Hyprland `0.56.2-3`, xdg-desktop-portal `1.22.1-2`, xdg-desktop-portal-hyprland `1.4.1-2`, xdg-desktop-portal-gtk `1.15.3-1`, xdg-desktop-portal-gnome `50.0-1`, and libei `1.6.0-1`. Its `hyprland-portals.conf` selects `default=hyprland;gtk`. The installed `hyprland.portal` lists Screenshot, ScreenCast, GlobalShortcuts and InputCapture, **not RemoteDesktop**. The GTK backend also does not list RemoteDesktop. The live frontend probe reports `A portal frontend implementing org.freedesktop.portal.RemoteDesktop was not found`. Thus the missing interface comes from backend coverage and selection, not a UKVM property-detection bug or missing libei. GNOME's installed backend declares RemoteDesktop but has `UseIn=gnome` and depends on GNOME/Mutter integration; installing it does not make it a Hyprland injection backend.
+
+[Hyprland portal pull request #402](https://github.com/hyprwm/xdg-desktop-portal-hyprland/pull/402) proposes RemoteDesktop with ConnectToEIS and compositor virtual pointer/keyboard protocols, but remains open as of this investigation and is absent from the installed package. A separate [generic portal backend](https://github.com/lamco-admin/xdg-desktop-portal-generic) advertises RemoteDesktop v2 and an EI bridge using ext/wlr compositor protocols. It is **not installed** and `pacman -Ss xdg-desktop-portal-generic` found no matching package in this machine's configured repositories. Its project documents source installation and XDG portal routing. A possible selective configuration, only after installing and testing that backend, is:
+
+```ini
+[preferred]
+default=hyprland;gtk
+org.freedesktop.impl.portal.RemoteDesktop=generic
+```
+
+This would leave Hyprland's InputCapture route in place. The [portal backend selection specification](https://github.com/flatpak/xdg-desktop-portal/blob/main/doc/portals.conf.rst.in) permits per-interface routing. **This candidate has not been tested on this Hyprland session**; the backend's claims alone cannot establish pointer or keyboard injection. No package, service, permissions or configuration were changed in this milestone. Direct use of virtual-pointer/virtual-keyboard protocols is compositor-specific and would bypass the standard portal approval flow, so it is not UKVM's normal controlled-node architecture.
+
+`ukvm doctor` is intentionally read-only. It reports portal properties and whether version 2 exposes the ConnectToEIS API, but cannot claim a permission grant, live EI sender connection or visible injection. UKVM's `InputSink` is the platform boundary for a future granted injection session; its operation capabilities are explicit. Current `InputEvent::PointerMotion` means **relative** motion. Absolute motion needs a destination display/region mapping and a separate semantic type later. `KeyCode::LinuxEvdev` records a source code domain; it is not a universal keyboard mapping. No key translation or synthetic input was introduced here.
+
+RemoteDesktop permission behavior is backend-dependent. The portal specification says `Start` normally prompts; version 2 `persist_mode` may retain permission for the running application or until revoked, with a single-use `restore_token`. A session handle and EI socket are process/session resources and must be recreated after process exit; a token does not preserve a live session. A future injector must watch portal session closure and EI disconnection, stop sending immediately, release held buttons/keys, and return to an unavailable state. Since this backend is absent, UKVM has not experimentally verified prompting, persistence, revocation or crash cleanup here. An `inject-test` command that claimed to move the pointer on this machine would be misleading, so the command is deferred until a compatible portal can actually be tested.
+
+## Dependency decisions
+
+- [`ashpd`](https://docs.rs/ashpd/latest/ashpd/) is a maintained Rust wrapper for portal requests, response signals and sessions. It avoids hand-rolled D-Bus request path and token handling. `remote_desktop` currently requires its `screencast` feature to compile, even though UKVM does not stream screens.
+- [`zbus`](https://docs.rs/zbus/latest/zbus/) probes the session bus service directly from Rust. No portal interaction uses shell commands.
+- [`reis`](https://docs.rs/reis/latest/reis/) is a pure Rust EI implementation for the portal-provided file descriptor. It avoids mandatory system `libei` headers/linking and unsafe FFI in UKVM. Its API describes itself as incomplete, so EI event handling needs interoperability testing.
+- `tokio` drives portal and EI streams; `futures-util` provides stream iteration. These are Linux-only dependencies in the platform crate. `ashpd` 0.13 requires Rust 1.87, so the workspace MSRV was raised from 1.78 to 1.87.
+
+Windows [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) synthesizes input and is subject to Windows integrity restrictions. Microsoft documents [low-level mouse hooks](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc) and points to raw input for some monitoring use cases. Apple documents [Quartz event services](https://developer.apple.com/documentation/coregraphics/quartz-event-services?changes=_11&language=objc) for event taps. X.Org documents [XTEST](https://www.x.org/releases/current/doc/xextproto/xtest.pdf) for synthetic X11 input. Each backend needs real platform testing before support can be advertised.

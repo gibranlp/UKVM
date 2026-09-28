@@ -1,0 +1,36 @@
+# Architecture
+
+## Scope and terminology
+
+A **node** is one installed `ukvm` process with both controller and controlled capabilities available subject to its configuration and platform permissions. A **controller** captures local input after a boundary transition; a **controlled** node injects authenticated input into its own session. A node may do both. A **peer** is another node. **Discovery** locates candidate peers and never grants trust. **Pairing** establishes trust with explicit user authorization. **Focus** is the node currently receiving the user's input. A **session** is one authorized control relationship, not a remote desktop stream.
+
+The eventual runtime flow is: local edge activation -> validate layout and peer trust -> establish an authenticated encrypted session -> send control-enter -> capture local input -> forward ordered input -> inject on the active peer -> control-leave or disconnect -> release held keys/buttons and return local control. The active controller must not swallow input until the destination confirms entry. On disconnect, injection stops and all held remote inputs are released. The full state machine is future work.
+
+## Workspace
+
+| Crate | Responsibility |
+| --- | --- |
+| `ukvm` (`crates/ukvm-cli`) | CLI and eventual process entry point |
+| `ukvm-core` | Platform and transport independent roles, focus and layout concepts |
+| `ukvm-config` | User config location and TOML parsing; no secrets |
+| `ukvm-protocol` | Semantic input events and provisional versioned debug-session messages |
+| `ukvm-platform` | Input and display traits; eventual OS backends |
+| `ukvm-network` | Mutual TLS transport, bounded framing, development identity and DebugSink |
+
+Discovery, pairing, and service integration will become modules or crates when implementation makes their boundaries concrete. Avoid empty crates. A future daemon can reuse the core, platform and network crates, while the CLI talks to it through a local authenticated control interface. The CLI should never contain OS input logic.
+
+## Platform boundary
+
+`ukvm-platform` exposes separate `InputSource`, `InputSink`, `DisplayService`, and `BoundaryDetector` traits, plus an optional `ClipboardService` interface. Backends must report capabilities and errors at runtime because a platform name alone does not imply permission or compositor support. Display coordinates and pointer deltas are explicit; backend code maps native key codes and display spaces to protocol semantics. The `linux_wayland` module is behind a Linux compilation gate; future `linux_x11`, `macos`, and `windows` modules should follow the same boundary. On Linux, choose Wayland or X11 based on the active session and validate availability; never silently use XWayland to bypass Wayland limits.
+
+The experimental `ukvm-platform::linux_wayland` module probes the live session, creates a permissioned InputCapture portal session, retrieves zones, calculates external edge segments, sets barriers and reads EI events through `reis`. It has an explicit capture state transition model and reports portal and EI stages through structured notices to the CLI. It is a local diagnostic vertical slice, not the generic `InputSource` trait adapter or a network controller. The generic trait adapter, compositor-tested key mapping, controlled-node injection and service runtime remain future work. `ukvm doctor` separates portal-advertised capabilities from permission and event verification. `InputSink` represents an already authorized injection session and reports per-operation `InjectionCapabilities`; creating such a session must fail if no compatible portal is active. The preferred Wayland controlled-node path is RemoteDesktop authorization followed by EI sender events, conditional on the active portal/compositor providing it. The current Hyprland portal does not expose RemoteDesktop, so no injection adapter is constructed.
+
+## Runtime and background operation
+
+The current CLI offers separate `listen`, `connect`, synthetic debug send and Wayland capture-send development commands. Both directions use the same binary. The listener counts normalized events and cannot inject them. The Wayland capture callback forwards events into a bounded queue only after an authenticated DebugSink accepts the session; it polls transport health and releases capture on loss. See [network transport](NETWORK.md). This is a CLI vertical slice, not the eventual always-running node.
+
+The future long-running node owns both listening and outgoing connections and can become controller, controlled, or both without changing binary. A local IPC endpoint will let `ukvm status`, `stop`, `pair`, and `devices` manage it. OS service packaging (systemd user service, macOS LaunchAgent, Windows user-session background process or suitable service companion) comes later. Input APIs often require the logged-in graphical session, so service design must preserve that context.
+
+## Configuration
+
+`ukvm-config` uses TOML and OS-appropriate user paths: XDG config directory on Linux, Application Support on macOS, and AppData Roaming on Windows. The initial schema contains a node name and configured role. It is not a trust store. Endpoint/layout schema and migration policy must be designed before adding them. An address may identify a connection target, but never prove peer identity. Command line and local IPC decisions may temporarily narrow configured roles at runtime.

@@ -1,0 +1,17 @@
+[package]
+name = "ukvm-network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bincode = "1.3"
+dirs = "6"
+rcgen = "0.13.2"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["io-util", "net", "sync", "time", "rt", "macros"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
+ukvm-protocol.workspace = true
