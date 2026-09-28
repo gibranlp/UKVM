@@ -159,6 +159,13 @@ pub fn layout(args: &[String]) -> ExitCode {
                 if peer.address.is_none() {
                     return Err("peer needs an address before being placed in layout".into());
                 }
+                let local_cert = default_state_dir()?.join("node.der");
+                if local_cert.exists()
+                    && certificate_id(&std::fs::read(local_cert).map_err(|e| e.to_string())?)
+                        == peer.id
+                {
+                    return Err("cannot link this node to itself".into());
+                }
                 config.set_link(edge, peer.id.clone());
                 ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
                 println!("{}: {}", edge.as_str(), peer.alias);
