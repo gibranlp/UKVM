@@ -301,7 +301,7 @@ pub async fn receive_debug<F: FnMut(ReceiverNotice)>(
 
 /// Runs one explicitly selected controlled-node session. The caller must create
 /// a locally authorized remote sink before using `accept_remote`.
-pub async fn receive_session<S: InputSink, F: FnMut(ReceiverNotice)>(
+pub async fn receive_session<S: InputSink + Send, F: FnMut(ReceiverNotice)>(
     connection: Connection,
     sink: &mut S,
     notice: F,
@@ -318,7 +318,7 @@ pub async fn receive_session_until<S, F, Shutdown>(
     shutdown: Shutdown,
 ) -> Result<EventCounts, String>
 where
-    S: InputSink,
+    S: InputSink + Send,
     F: FnMut(ReceiverNotice),
     Shutdown: Future<Output = ()>,
 {
@@ -374,11 +374,14 @@ where
                 {
                     break Err("peer lacks permission for requested session type".into());
                 }
-                if let Err(err) = state
-                    .request()
-                    .and_then(|()| sink.begin_session())
-                    .and_then(|()| state.accept())
-                {
+                if let Err(err) = state.request() {
+                    break Err(err);
+                }
+                let authorized = tokio::select! {
+                    _ = &mut shutdown => Err("local control override during authorization".into()),
+                    result = sink.begin_session_async() => result,
+                };
+                if let Err(err) = authorized.and_then(|()| state.accept()) {
                     break Err(err);
                 }
                 let accepted = if requested == SinkKind::Debug {
@@ -672,6 +675,75 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::AtomicBool;
+    use tokio::sync::Notify;
+
+    struct PendingAuthorizationSink {
+        started: Arc<Notify>,
+        ended: Arc<AtomicBool>,
+    }
+
+    impl InputSink for PendingAuthorizationSink {
+        fn kind(&self) -> SinkKind {
+            SinkKind::RemoteInput
+        }
+        fn begin_session(&mut self) -> Result<(), String> {
+            panic!("receiver must await portal authorization")
+        }
+        fn begin_session_async(&mut self) -> ukvm_core::controlled::SinkFuture<'_> {
+            Box::pin(async {
+                self.started.notify_one();
+                std::future::pending().await
+            })
+        }
+        fn handle_event(&mut self, _: &InputEvent) -> Result<SinkAction, String> {
+            Err("not authorized".into())
+        }
+        fn end_session(&mut self) -> Result<(), String> {
+            self.ended.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_shutdown_interrupts_pending_remote_authorization() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let started = Arc::new(Notify::new());
+        let ended = Arc::new(AtomicBool::new(false));
+        let started_copy = Arc::clone(&started);
+        let ended_copy = Arc::clone(&ended);
+        let a_cert = a.cert_path.clone();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let receiver = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut sink = PendingAuthorizationSink {
+                started: started_copy,
+                ended: ended_copy,
+            };
+            let connection = accept_remote(tcp, &b, &a_cert, "b", &sink).await.unwrap();
+            receive_session_until(connection, &mut sink, |_| {}, async {
+                let _ = stopped.await;
+            })
+            .await
+        });
+        let mut connection = connect(&addr.to_string(), &a, &temp.path().join("b/node.der"), "a")
+            .await
+            .unwrap();
+        write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
+            .await
+            .unwrap();
+        started.notified().await;
+        stop.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), receiver)
+            .await
+            .expect("shutdown must interrupt authorization")
+            .unwrap();
+        assert!(result.unwrap_err().contains("local control override"));
+        assert!(ended.load(Ordering::SeqCst));
+    }
 
     #[derive(Default)]
     struct ReturnState {

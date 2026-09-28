@@ -27,7 +27,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
 const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -37,6 +37,7 @@ const COMMAND_QUEUE: usize = 256;
 
 enum Command {
     Begin(reply::SyncSender<Result<(), PlatformError>>),
+    BeginAsync(oneshot::Sender<Result<(), PlatformError>>),
     Event(InputEvent, reply::SyncSender<Result<(), PlatformError>>),
     Enter(EdgePosition, reply::SyncSender<Result<(), PlatformError>>),
     RemoteEvent(
@@ -168,6 +169,26 @@ impl PlatformInputInjector for WaylandInputInjector {
         self.request(Command::Begin, AUTHORIZE_TIMEOUT)
     }
 
+    fn begin_async(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PlatformError>> + Send + '_>>
+    {
+        Box::pin(async {
+            let (reply, result) = oneshot::channel();
+            self.commands
+                .try_send(Command::BeginAsync(reply))
+                .map_err(|err| {
+                    PlatformError::Backend(format!("injector command unavailable: {err}"))
+                })?;
+            tokio::time::timeout(AUTHORIZE_TIMEOUT, result)
+                .await
+                .map_err(|_| {
+                    PlatformError::Backend("RemoteDesktop authorization timed out".into())
+                })?
+                .map_err(|_| PlatformError::Backend("injector authorization stopped".into()))?
+        })
+    }
+
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError> {
         self.request(
             |reply| Command::Event(event.clone(), reply),
@@ -209,6 +230,22 @@ struct PortalEisSession {
     clock: Instant,
 }
 
+/// A cancelled portal Start still owns a live session. Close it even when the
+/// authorization future is dropped by Ctrl+C or a timeout.
+struct PendingPortalSession(Option<Session<RemoteDesktop>>);
+
+impl Drop for PendingPortalSession {
+    fn drop(&mut self) {
+        if let Some(session) = self.0.take() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = session.close().await;
+                });
+            }
+        }
+    }
+}
+
 impl PortalEisSession {
     async fn open(request_keyboard: bool, verbose: bool) -> Result<Self, PlatformError> {
         if verbose {
@@ -239,6 +276,7 @@ impl PortalEisSession {
         request_keyboard: bool,
         verbose: bool,
     ) -> Result<Self, PlatformError> {
+        let mut pending = PendingPortalSession(Some(session));
         let result = async {
             let requested = if request_keyboard {
                 DeviceType::Pointer | DeviceType::Keyboard
@@ -250,7 +288,7 @@ impl PortalEisSession {
             }
             portal
                 .select_devices(
-                    &session,
+                    pending.0.as_ref().expect("pending portal session"),
                     SelectDevicesOptions::default().set_devices(requested),
                 )
                 .await
@@ -260,7 +298,11 @@ impl PortalEisSession {
                 eprintln!("[wayland] RemoteDesktop: Start pending; consent picker may appear");
             }
             let selected = portal
-                .start(&session, None, StartOptions::default())
+                .start(
+                    pending.0.as_ref().expect("pending portal session"),
+                    None,
+                    StartOptions::default(),
+                )
                 .await
                 .and_then(|request| request.response())
                 .map_err(|err| {
@@ -280,7 +322,10 @@ impl PortalEisSession {
                 eprintln!("[wayland] RemoteDesktop: consent granted; ConnectToEIS");
             }
             let fd = portal
-                .connect_to_eis(&session, ConnectToEISOptions::default())
+                .connect_to_eis(
+                    pending.0.as_ref().expect("pending portal session"),
+                    ConnectToEISOptions::default(),
+                )
                 .await
                 .map_err(|err| PlatformError::Backend(format!("ConnectToEIS failed: {err}")))?;
             let stream = UnixStream::from(fd);
@@ -390,7 +435,7 @@ impl PortalEisSession {
         match result {
             Ok((connection, events, pointer, keyboard)) => Ok(Self {
                 _portal: portal,
-                portal_session: session,
+                portal_session: pending.0.take().expect("pending portal session"),
                 connection,
                 events,
                 pointer,
@@ -400,10 +445,7 @@ impl PortalEisSession {
                 remote_pointer: None,
                 clock: Instant::now(),
             }),
-            Err(err) => {
-                let _ = session.close().await;
-                Err(err)
-            }
+            Err(err) => Err(err),
         }
     }
 
@@ -643,6 +685,9 @@ async fn run_actor(
                     Some(Command::Begin(reply)) => {
                         let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
                     }
+                    Some(Command::BeginAsync(reply)) => {
+                        let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
+                    }
                     None => break,
                 },
                 event = active.events.next() => {
@@ -656,7 +701,16 @@ async fn run_actor(
         } else {
             match commands.recv().await {
                 Some(Command::Begin(reply)) => {
-                    match PortalEisSession::open(request_keyboard, verbose).await {
+                    match tokio::time::timeout(
+                        AUTHORIZE_TIMEOUT,
+                        PortalEisSession::open(request_keyboard, verbose),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(PlatformError::Backend(
+                            "RemoteDesktop authorization timed out".into(),
+                        ))
+                    }) {
                         Ok(opened) => {
                             if let Ok(mut value) = capabilities.lock() {
                                 *value = opened.capabilities();
@@ -664,6 +718,29 @@ async fn run_actor(
                             healthy.store(true, Ordering::Release);
                             session = Some(opened);
                             let _ = reply.send(Ok(()));
+                        }
+                        Err(err) => {
+                            let _ = reply.send(Err(err));
+                        }
+                    }
+                }
+                Some(Command::BeginAsync(mut reply)) => {
+                    let opened = tokio::select! {
+                        _ = reply.closed() => continue,
+                        result = tokio::time::timeout(AUTHORIZE_TIMEOUT, PortalEisSession::open(request_keyboard, verbose)) => result.unwrap_or_else(|_| Err(PlatformError::Backend("RemoteDesktop authorization timed out".into()))),
+                    };
+                    match opened {
+                        Ok(opened) => {
+                            if let Ok(mut value) = capabilities.lock() {
+                                *value = opened.capabilities();
+                            }
+                            healthy.store(true, Ordering::Release);
+                            if reply.send(Ok(())).is_err() {
+                                healthy.store(false, Ordering::Release);
+                                let _ = opened.close().await;
+                            } else {
+                                session = Some(opened);
+                            }
                         }
                         Err(err) => {
                             let _ = reply.send(Err(err));

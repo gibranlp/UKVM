@@ -1,6 +1,9 @@
 //! Controlled-node session policy, independent of transport and OS input APIs.
 
+use std::{future::Future, pin::Pin};
 use ukvm_protocol::{EdgePosition, InputEvent};
+
+pub type SinkFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SinkAction {
@@ -19,6 +22,14 @@ pub enum SinkKind {
 pub trait InputSink {
     fn kind(&self) -> SinkKind;
     fn begin_session(&mut self) -> Result<(), String>;
+    /// Authorization may wait for a desktop consent dialog. Receivers await
+    /// this separately so local shutdown remains responsive during that wait.
+    fn begin_session_async(&mut self) -> SinkFuture<'_>
+    where
+        Self: Send,
+    {
+        Box::pin(async { self.begin_session() })
+    }
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), String> {
         Err("sink does not support remote entry".into())
     }

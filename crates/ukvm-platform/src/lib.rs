@@ -115,6 +115,12 @@ pub trait PlatformInputInjector: Send {
     fn capabilities(&self) -> InjectionCapabilities;
     /// Must clean up partial native state before returning an error.
     fn begin(&mut self) -> Result<(), PlatformError>;
+    fn begin_async(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PlatformError>> + Send + '_>>
+    {
+        Box::pin(async { self.begin() })
+    }
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError>;
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported(
@@ -160,6 +166,18 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
         self.active = true;
         self.entered = false;
         Ok(())
+    }
+
+    fn begin_session_async(&mut self) -> ukvm_core::controlled::SinkFuture<'_> {
+        Box::pin(async {
+            self.injector
+                .begin_async()
+                .await
+                .map_err(|e| e.to_string())?;
+            self.active = true;
+            self.entered = false;
+            Ok(())
+        })
     }
 
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
