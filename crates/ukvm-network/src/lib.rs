@@ -118,6 +118,9 @@ pub fn validate(message: &WireMessage) -> Result<(), String> {
             }
         }
         WireMessage::Input(event) => validate_event(event)?,
+        WireMessage::RemoteEntry(position) | WireMessage::ReturnControl(position) => {
+            position.validate()?;
+        }
         WireMessage::Error(message) if message.len() > 120 => {
             return Err("error text too long".into())
         }
@@ -151,7 +154,7 @@ impl EventCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ukvm_protocol::KeyCode;
+    use ukvm_protocol::{Edge, EdgePosition, KeyCode};
     #[test]
     fn frame_rejects_untrusted_lengths_and_invalid_payload() {
         let message = WireMessage::Input(InputEvent::PointerMotion { dx: 1.0, dy: -2.0 });
@@ -176,6 +179,34 @@ mod tests {
             remote_input: false,
         };
         assert!(encode(&hello).is_err());
+        let old_minor = WireMessage::Hello {
+            version: ProtocolVersion { major: 1, minor: 1 },
+            node_id: "a".repeat(64),
+            name: "node".into(),
+            platform: "linux".into(),
+            controller: true,
+            debug_sink: false,
+            remote_input: true,
+        };
+        assert!(encode(&old_minor).is_err());
+    }
+    #[test]
+    fn return_edge_message_roundtrip_and_position_validation() {
+        let message = WireMessage::ReturnControl(EdgePosition {
+            edge: Edge::Left,
+            fraction: 0.61,
+        });
+        assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        assert!(encode(&WireMessage::RemoteEntry(EdgePosition {
+            edge: Edge::Right,
+            fraction: f32::NAN
+        }))
+        .is_err());
+        assert!(encode(&WireMessage::ReturnControl(EdgePosition {
+            edge: Edge::Left,
+            fraction: 1.1
+        }))
+        .is_err());
     }
     #[tokio::test]
     async fn oversized_length_rejected_before_body_read() {

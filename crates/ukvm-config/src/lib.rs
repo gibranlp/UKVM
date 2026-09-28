@@ -308,6 +308,19 @@ mod tests {
         assert!(!c.remove_link(Edge::Right));
     }
     #[test]
+    fn layout_entry_edges_are_inverse_in_all_directions() {
+        for (outbound, inbound) in [
+            (Edge::Right, Edge::Left),
+            (Edge::Left, Edge::Right),
+            (Edge::Top, Edge::Bottom),
+            (Edge::Bottom, Edge::Top),
+        ] {
+            let mut config = Config::default();
+            config.set_link(outbound, "a".repeat(64));
+            assert_eq!(config.layout.links[0].entry_edge, inbound);
+        }
+    }
+    #[test]
     fn invalid_layout() {
         let mut c = Config::default();
         c.set_link(Edge::Left, "bad".into());

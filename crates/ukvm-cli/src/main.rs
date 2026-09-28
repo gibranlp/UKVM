@@ -23,7 +23,7 @@ Commands:\n\
   platform wayland inject-test         Opt-in local pointer motion through RemoteDesktop/EIS\n\
   identity [--state-dir DIR]  Show or create persistent node identity\n\
   listen [--peer-cert PATH] [--bind ADDR] [--state-dir DIR]  Authenticated DebugSink\n\
-  listen --remote [--bind ADDR]  Authorized RemoteDesktop/EIS input receiver\n\
+  listen --remote [--bind ADDR] [--verbose]  Authorized RemoteDesktop/EIS input receiver\n\
   connect PEER [--peer-cert PATH] [--state-dir DIR]  Check peer connection\n\
   debug send-test-events HOST --peer-cert PATH  Send safe synthetic debug events\n\
   status    Show node, peers, layout, and capabilities\n\
@@ -547,7 +547,7 @@ fn print_capture_notice(
         CaptureNotice::Enabled => {
             println!("InputCapture enabled. Move the pointer THROUGH the printed outer edge.");
             if remote {
-                println!("Waiting for activation (60-second safety timeout; Ctrl+C exits). When active, Ctrl+Alt+Shift+Escape releases capture, or it ends after 30 seconds.");
+                println!("Waiting for activation (60-second safety timeout; Ctrl+C exits). When active, cross the peer's return edge or press Ctrl+Alt+Shift+Escape to release.");
             } else {
                 println!("Waiting for activation (60-second safety timeout; Esc or Ctrl+C exits). When active, capture releases after 5 seconds.");
             }
@@ -555,15 +555,25 @@ fn print_capture_notice(
         CaptureNotice::Activated {
             activation_id,
             barrier_id,
+            edge_fraction,
         } => {
             println!(
                 "CAPTURE ACTIVATED: activation_id={activation_id:?}, barrier_id={barrier_id:?}"
             );
             if remote {
-                println!("Receiving EI events for up to 30 seconds...");
+                println!(
+                    "Remote entry position: {:.2}; receiving EI events until return or release...",
+                    edge_fraction
+                );
             } else {
                 println!("Receiving EI events for up to 5 seconds...");
             }
+        }
+        CaptureNotice::RemoteReturn(position) => {
+            println!(
+                "Remote return requested from {:?} at {:.2}; releasing local capture",
+                position.edge, position.fraction
+            );
         }
         CaptureNotice::Deactivated { activation_id } => {
             if verbose {

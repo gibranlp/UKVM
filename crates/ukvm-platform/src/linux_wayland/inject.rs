@@ -2,6 +2,10 @@
 //! A dedicated user thread owns the async portal session so the existing
 //! synchronous platform trait never blocks the receiver's Tokio executor.
 
+use super::{
+    geometry::Zone,
+    return_edge::{MotionResult, RemotePointer},
+};
 use crate::{InjectionCapabilities, PlatformError, PlatformInputInjector};
 use ashpd::desktop::{
     remote_desktop::{
@@ -24,7 +28,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
-use ukvm_protocol::{InputEvent, KeyCode};
+use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
 const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
@@ -34,6 +38,11 @@ const COMMAND_QUEUE: usize = 256;
 enum Command {
     Begin(reply::SyncSender<Result<(), PlatformError>>),
     Event(InputEvent, reply::SyncSender<Result<(), PlatformError>>),
+    Enter(EdgePosition, reply::SyncSender<Result<(), PlatformError>>),
+    RemoteEvent(
+        InputEvent,
+        reply::SyncSender<Result<Option<EdgePosition>, PlatformError>>,
+    ),
     Release(reply::SyncSender<Result<(), PlatformError>>),
     End(reply::SyncSender<Result<(), PlatformError>>),
 }
@@ -48,15 +57,22 @@ pub struct WaylandInputInjector {
 
 impl WaylandInputInjector {
     pub async fn open() -> Result<Self, PlatformError> {
-        Self::open_with_devices(true).await
+        Self::open_with_devices(true, false).await
+    }
+
+    pub async fn open_verbose(verbose: bool) -> Result<Self, PlatformError> {
+        Self::open_with_devices(true, verbose).await
     }
 
     /// The first physical proof requests pointer consent only.
     pub async fn open_pointer_only() -> Result<Self, PlatformError> {
-        Self::open_with_devices(false).await
+        Self::open_with_devices(false, false).await
     }
 
-    async fn open_with_devices(request_keyboard: bool) -> Result<Self, PlatformError> {
+    async fn open_with_devices(
+        request_keyboard: bool,
+        verbose: bool,
+    ) -> Result<Self, PlatformError> {
         let report = super::probe().await;
         if report.remote.version.is_none() {
             return Err(PlatformError::Unsupported(
@@ -88,7 +104,13 @@ impl WaylandInputInjector {
                 {
                     Ok(runtime) => {
                         let _ = ready_tx.send(Ok(()));
-                        runtime.block_on(run_actor(rx, actor_caps, actor_health, request_keyboard));
+                        runtime.block_on(run_actor(
+                            rx,
+                            actor_caps,
+                            actor_health,
+                            request_keyboard,
+                            verbose,
+                        ));
                     }
                     Err(err) => {
                         let _ = ready_tx.send(Err(PlatformError::Backend(err.to_string())));
@@ -118,6 +140,20 @@ impl WaylandInputInjector {
         rx.recv_timeout(timeout)
             .map_err(|err| PlatformError::Backend(format!("injector command timed out: {err}")))?
     }
+
+    fn request_remote_event(
+        &self,
+        event: &InputEvent,
+    ) -> Result<Option<EdgePosition>, PlatformError> {
+        let (tx, rx) = reply::sync_channel(1);
+        self.commands
+            .try_send(Command::RemoteEvent(event.clone(), tx))
+            .map_err(|err| {
+                PlatformError::Backend(format!("injector command unavailable: {err}"))
+            })?;
+        rx.recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|err| PlatformError::Backend(format!("injector command timed out: {err}")))?
+    }
 }
 
 impl PlatformInputInjector for WaylandInputInjector {
@@ -137,6 +173,14 @@ impl PlatformInputInjector for WaylandInputInjector {
             |reply| Command::Event(event.clone(), reply),
             COMMAND_TIMEOUT,
         )
+    }
+
+    fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
+        self.request(|reply| Command::Enter(entry, reply), COMMAND_TIMEOUT)
+    }
+
+    fn inject_remote(&mut self, event: &InputEvent) -> Result<Option<EdgePosition>, PlatformError> {
+        self.request_remote_event(event)
     }
 
     fn is_healthy(&self) -> bool {
@@ -161,11 +205,15 @@ struct PortalEisSession {
     keyboard: Option<Device>,
     held_keys: HashSet<u32>,
     held_buttons: HashSet<u32>,
+    remote_pointer: Option<RemotePointer>,
     clock: Instant,
 }
 
 impl PortalEisSession {
-    async fn open(request_keyboard: bool) -> Result<Self, PlatformError> {
+    async fn open(request_keyboard: bool, verbose: bool) -> Result<Self, PlatformError> {
+        if verbose {
+            eprintln!("[wayland] RemoteDesktop: opening portal interface");
+        }
         let portal = RemoteDesktop::new()
             .await
             .map_err(|err| PlatformError::Backend(format!("RemoteDesktop unavailable: {err}")))?;
@@ -174,11 +222,14 @@ impl PortalEisSession {
                 "RemoteDesktop portal does not provide ConnectToEIS",
             ));
         }
+        if verbose {
+            eprintln!("[wayland] RemoteDesktop: CreateSession");
+        }
         let session = portal
             .create_session(CreateSessionOptions::default())
             .await
             .map_err(|err| PlatformError::Backend(format!("CreateSession failed: {err}")))?;
-        let result = Self::open_session(portal, session, request_keyboard).await;
+        let result = Self::open_session(portal, session, request_keyboard, verbose).await;
         result
     }
 
@@ -186,6 +237,7 @@ impl PortalEisSession {
         portal: RemoteDesktop,
         session: Session<RemoteDesktop>,
         request_keyboard: bool,
+        verbose: bool,
     ) -> Result<Self, PlatformError> {
         let result = async {
             let requested = if request_keyboard {
@@ -193,6 +245,9 @@ impl PortalEisSession {
             } else {
                 DeviceType::Pointer.into()
             };
+            if verbose {
+                eprintln!("[wayland] RemoteDesktop: SelectDevices");
+            }
             portal
                 .select_devices(
                     &session,
@@ -201,6 +256,9 @@ impl PortalEisSession {
                 .await
                 .and_then(|request| request.response().map(|_| ()))
                 .map_err(|err| PlatformError::Backend(format!("SelectDevices failed: {err}")))?;
+            if verbose {
+                eprintln!("[wayland] RemoteDesktop: Start pending; consent picker may appear");
+            }
             let selected = portal
                 .start(&session, None, StartOptions::default())
                 .await
@@ -218,6 +276,9 @@ impl PortalEisSession {
                     "RemoteDesktop did not grant keyboard control",
                 ));
             }
+            if verbose {
+                eprintln!("[wayland] RemoteDesktop: consent granted; ConnectToEIS");
+            }
             let fd = portal
                 .connect_to_eis(&session, ConnectToEISOptions::default())
                 .await
@@ -228,10 +289,16 @@ impl PortalEisSession {
                 .map_err(|err| PlatformError::Backend(err.to_string()))?;
             let context = ei::Context::new(stream)
                 .map_err(|err| PlatformError::Backend(format!("EI socket failed: {err}")))?;
+            if verbose {
+                eprintln!("[wayland] EI: socket acquired; handshaking");
+            }
             let (connection, mut events) = context
                 .handshake_tokio("ukvm", ei::handshake::ContextType::Sender)
                 .await
                 .map_err(|err| PlatformError::Backend(format!("EI handshake failed: {err}")))?;
+            if verbose {
+                eprintln!("[wayland] EI: handshake complete; waiting for devices");
+            }
             let (pointer, keyboard) = tokio::time::timeout(EI_DEVICE_TIMEOUT, async {
                 let mut pointer = None;
                 let mut keyboard = None;
@@ -258,6 +325,7 @@ impl PortalEisSession {
                         EiEvent::SeatAdded(seat) => {
                             seat.seat.bind_capabilities(
                                 DeviceCapability::Pointer
+                                    | DeviceCapability::PointerAbsolute
                                     | DeviceCapability::Button
                                     | DeviceCapability::Scroll
                                     | DeviceCapability::Keyboard,
@@ -303,6 +371,19 @@ impl PortalEisSession {
             })
             .await
             .map_err(|_| PlatformError::Backend("EIS devices did not become available".into()))??;
+            if verbose {
+                eprintln!(
+                    "[wayland] EI: pointer ready (absolute={}); keyboard={}",
+                    pointer.has_capability(DeviceCapability::PointerAbsolute),
+                    keyboard.is_some()
+                );
+                for (index, region) in pointer.regions().iter().enumerate() {
+                    eprintln!(
+                        "[wayland] EI region {index}: {}x{} @ {},{} scale={}",
+                        region.width, region.height, region.x, region.y, region.scale
+                    );
+                }
+            }
             Ok((connection, events, pointer, keyboard))
         }
         .await;
@@ -316,6 +397,7 @@ impl PortalEisSession {
                 keyboard,
                 held_keys: HashSet::new(),
                 held_buttons: HashSet::new(),
+                remote_pointer: None,
                 clock: Instant::now(),
             }),
             Err(err) => {
@@ -328,7 +410,9 @@ impl PortalEisSession {
     fn capabilities(&self) -> InjectionCapabilities {
         InjectionCapabilities {
             pointer_relative: true,
-            pointer_absolute: false,
+            pointer_absolute: self
+                .pointer
+                .has_capability(DeviceCapability::PointerAbsolute),
             pointer_button: true,
             pointer_scroll: true,
             keyboard: self.keyboard.is_some(),
@@ -343,6 +427,67 @@ impl PortalEisSession {
         self.connection
             .flush()
             .map_err(|err| PlatformError::Backend(format!("EI flush failed: {err}")))
+    }
+
+    fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
+        if !self
+            .pointer
+            .has_capability(DeviceCapability::PointerAbsolute)
+        {
+            return Err(PlatformError::Unsupported(
+                "EI absolute pointer is required for edge return",
+            ));
+        }
+        let zones = self
+            .pointer
+            .regions()
+            .iter()
+            .map(|region| {
+                Ok(Zone {
+                    x: i32::try_from(region.x).map_err(|_| {
+                        PlatformError::Backend("EI region x exceeds portal range".into())
+                    })?,
+                    y: i32::try_from(region.y).map_err(|_| {
+                        PlatformError::Backend("EI region y exceeds portal range".into())
+                    })?,
+                    width: region.width,
+                    height: region.height,
+                })
+            })
+            .collect::<Result<Vec<_>, PlatformError>>()?;
+        let pointer = RemotePointer::new(zones, entry).map_err(PlatformError::Backend)?;
+        let (x, y) = pointer.position();
+        self.absolute_motion(x, y)?;
+        self.remote_pointer = Some(pointer);
+        Ok(())
+    }
+
+    fn absolute_motion(&self, x: f32, y: f32) -> Result<(), PlatformError> {
+        let pointer =
+            self.pointer
+                .interface::<ei::PointerAbsolute>()
+                .ok_or(PlatformError::Unsupported(
+                    "EI absolute pointer interface unavailable",
+                ))?;
+        pointer.motion_absolute(x, y);
+        self.frame(&self.pointer)
+    }
+
+    fn inject_remote(&mut self, event: &InputEvent) -> Result<Option<EdgePosition>, PlatformError> {
+        if let InputEvent::PointerMotion { dx, dy } = event {
+            let pointer = self.remote_pointer.as_mut().ok_or(PlatformError::Backend(
+                "remote entry not initialized".into(),
+            ))?;
+            return match pointer.motion(*dx, *dy) {
+                MotionResult::Position(x, y) => {
+                    self.absolute_motion(x, y)?;
+                    Ok(None)
+                }
+                MotionResult::Return(position) => Ok(Some(position)),
+            };
+        }
+        self.inject(event)?;
+        Ok(None)
     }
 
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError> {
@@ -464,6 +609,7 @@ async fn run_actor(
     capabilities: Arc<Mutex<InjectionCapabilities>>,
     healthy: Arc<AtomicBool>,
     request_keyboard: bool,
+    verbose: bool,
 ) {
     let mut session: Option<PortalEisSession> = None;
     loop {
@@ -472,6 +618,16 @@ async fn run_actor(
                 command = commands.recv() => match command {
                     Some(Command::Event(event, reply)) => {
                         let result = active.inject(&event);
+                        if result.is_err() { healthy.store(false, Ordering::Release); }
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::Enter(entry, reply)) => {
+                        let result = active.enter_remote(entry);
+                        if result.is_err() { healthy.store(false, Ordering::Release); }
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::RemoteEvent(event, reply)) => {
+                        let result = active.inject_remote(&event);
                         if result.is_err() { healthy.store(false, Ordering::Release); }
                         let _ = reply.send(result);
                     }
@@ -500,7 +656,7 @@ async fn run_actor(
         } else {
             match commands.recv().await {
                 Some(Command::Begin(reply)) => {
-                    match PortalEisSession::open(request_keyboard).await {
+                    match PortalEisSession::open(request_keyboard, verbose).await {
                         Ok(opened) => {
                             if let Ok(mut value) = capabilities.lock() {
                                 *value = opened.capabilities();
@@ -515,6 +671,12 @@ async fn run_actor(
                     }
                 }
                 Some(Command::Event(_, reply) | Command::Release(reply) | Command::End(reply)) => {
+                    let _ = reply.send(Err(PlatformError::SessionClosed));
+                }
+                Some(Command::Enter(_, reply)) => {
+                    let _ = reply.send(Err(PlatformError::SessionClosed));
+                }
+                Some(Command::RemoteEvent(_, reply)) => {
                     let _ = reply.send(Err(PlatformError::SessionClosed));
                 }
                 None => break,

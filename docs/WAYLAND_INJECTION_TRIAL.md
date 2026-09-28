@@ -1,6 +1,6 @@
 # Milestone 12 Wayland injection trial
 
-This is an **experimental, user-session-only** trial for io. Local pointer injection and two-node pointer, button, and keyboard input have been physically observed on io. Scroll and receiver-disconnect cleanup remain unproven. Keep the packaged portal available for rollback. Do not use the older generic portal revision: its inspected RemoteDesktop `Start` did not mediate user consent.
+This is an **experimental, user-session-only** trial for io. Local pointer injection and two-node pointer, button, and keyboard input have been physically observed on io. A later user report also confirms scroll and controller-side recovery when the receiver disappears. Natural edge return and receiver-side held-input cleanup are now implemented for an opt-in physical test but are **not yet physically proven**. Keep the packaged portal available for rollback. Do not use the older generic portal revision: its inspected RemoteDesktop `Start` did not mediate user consent.
 
 ## Current evidence and dependency
 
@@ -71,7 +71,7 @@ Only after visible local movement, on io explicitly grant spectrum control and r
 
 ```sh
 target/debug/ukvm peer allow spectrum control-this-node
-target/debug/ukvm listen --remote --bind 0.0.0.0:24800
+target/debug/ukvm listen --remote --bind 0.0.0.0:24800 --verbose
 ```
 
 On spectrum, verify the configured right-edge peer is io, then run:
@@ -81,7 +81,11 @@ target/debug/ukvm layout
 target/debug/ukvm control right
 ```
 
-The receiver requests local RemoteDesktop consent for the session before the controller captures input. Cross the right edge, observe pointer motion on io, then test buttons, scroll, and keyboard in a harmless field. Ctrl+Alt+Shift+Escape on spectrum releases capture; the active session also ends after 30 seconds. On a rejected/unavailable receiver, controller capture never starts. Any network or injector loss releases capture and ends the receiver session. The trial does **not** implement seamless edge return.
+The receiver requests local RemoteDesktop consent for the session before the controller captures input. Both computers must use the same Input Protocol 1.2 revision. Run the receiver with `--verbose` to show CreateSession, SelectDevices, Start/consent, ConnectToEIS, EI readiness, and advertised EI regions; this will help locate any recurrence of the earlier pre-acceptance stall. Cross spectrum's right edge, observe pointer motion on io, then test buttons, scroll, and keyboard in a harmless field. Move inward on io, then intentionally cross io's left edge to request return. Spectrum should Release InputCapture near its right edge and restore local control. The remote control session has no 30-second active limit. Ctrl+Alt+Shift+Escape and Ctrl+C remain safety exits. On a rejected/unavailable receiver, controller capture never starts. Any network or injector loss releases capture and ends the receiver session. Natural return is implemented but awaits physical acceptance.
+
+io's diagnostic `hyprctl monitors` reported one logical `1366x768` eDP-1 display at `(0,0)` with scale 1. UKVM uses the EI pointer device's runtime regions, not this fixed diagnostic geometry. A zones-only portal query on io previously failed during cleanup because UKVM sent Disable before any EIS connection; the zones command now closes that unarmed session directly. Repeat it on the published build to verify the repair.
+
+The entry/return model uses an EI absolute pointer when the controlled portal advertises that capability. The receiver places the pointer 24 logical pixels inside the selected outer edge, maps the controller's portal activation fraction along the edge, and drives later motion with EI absolute requests. Return is armed only after at least 64 logical pixels of inward movement and requires outward motion across the same external boundary. This avoids immediate bounce. The XDG RemoteDesktop portal exposes EI regions but no authoritative compositor cursor position; pointer constraints or compositor transforms could make the visible cursor diverge from UKVM's requested position. UKVM does not use Hyprland IPC, XWayland or privileged devices for this mechanism. If the EI device lacks absolute pointer support, the remote-entry session fails safely.
 
 The EI keyboard events currently carry Linux evdev physical codes. This first Linux-to-Linux proof assumes compatible keyboard layouts; cross-layout translation is not implemented.
 

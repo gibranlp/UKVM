@@ -14,9 +14,10 @@ use reis::{
     event::{DeviceCapability, EiEvent},
 };
 use std::{collections::HashSet, os::unix::net::UnixStream, path::PathBuf, time::Duration};
-use ukvm_protocol::{InputEvent, KeyCode};
+use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
 mod geometry;
+mod return_edge;
 pub use geometry::{all_outer_segments, outer_segments, Edge, OuterSegment, Zone, ZoneSet};
 
 #[derive(Clone, Debug)]
@@ -288,7 +289,9 @@ impl CaptureSession {
 pub async fn zones() -> Result<ZoneSet, String> {
     let session = CaptureSession::open().await?;
     let result = session.zones().await;
-    let close = session.close().await;
+    // A zones-only session was never connected to EIS or enabled. Some
+    // backends reject Disable in that state, but Session.Close is valid.
+    let close = session.session.close().await.map_err(|e| e.to_string());
     match (result, close) {
         (Ok(zones), Ok(())) => Ok(zones),
         (Err(err), _) | (_, Err(err)) => Err(err),
@@ -418,7 +421,9 @@ pub enum CaptureNotice {
     Activated {
         activation_id: Option<u32>,
         barrier_id: Option<u32>,
+        edge_fraction: f32,
     },
+    RemoteReturn(EdgePosition),
     Deactivated {
         activation_id: Option<u32>,
     },
@@ -489,12 +494,13 @@ where
         zone_index,
         CaptureTiming {
             duration,
-            active_duration: Duration::from_secs(5),
+            active_duration: Some(Duration::from_secs(5)),
             release_mode: ReleaseMode::Escape,
         },
         on_notice,
         on_event,
         is_healthy,
+        &mut || None,
     )
     .await
 }
@@ -508,24 +514,26 @@ pub enum ReleaseMode {
 #[derive(Clone, Copy, Debug)]
 pub struct CaptureTiming {
     pub duration: Duration,
-    pub active_duration: Duration,
+    pub active_duration: Option<Duration>,
     pub release_mode: ReleaseMode,
 }
 
 /// Remote sessions reserve Ctrl+Alt+Shift+Escape for local release. Escape
 /// remains an ordinary forwarded key unless all three modifiers are held.
-pub async fn capture_with_events_mode<F, G, H>(
+pub async fn capture_with_events_mode<F, G, H, R>(
     edge: Edge,
     zone_index: Option<usize>,
     timing: CaptureTiming,
     on_notice: &mut F,
     on_event: &mut G,
     is_healthy: &mut H,
+    return_request: &mut R,
 ) -> Result<CaptureSummary, String>
 where
     F: FnMut(CaptureNotice),
     G: FnMut(InputEvent) -> Result<(), String>,
     H: FnMut() -> bool,
+    R: FnMut() -> Option<EdgePosition>,
 {
     let session = CaptureSession::open().await?;
     if timing.release_mode == ReleaseMode::EmergencyChord && !session.keyboard_granted {
@@ -542,6 +550,7 @@ where
     let mut hooks = CaptureHooks {
         on_event,
         is_healthy,
+        return_request,
     };
     let result = capture_inner(
         &session, edge, zone_index, timing, on_notice, &mut hooks, &mut phase,
@@ -559,24 +568,26 @@ where
     }
 }
 
-struct CaptureHooks<'a, G, H> {
+struct CaptureHooks<'a, G, H, R> {
     on_event: &'a mut G,
     is_healthy: &'a mut H,
+    return_request: &'a mut R,
 }
 
-async fn capture_inner<F, G, H>(
+async fn capture_inner<F, G, H, R>(
     session: &CaptureSession,
     edge: Edge,
     zone_index: Option<usize>,
     timing: CaptureTiming,
     on_notice: &mut F,
-    hooks: &mut CaptureHooks<'_, G, H>,
+    hooks: &mut CaptureHooks<'_, G, H, R>,
     phase: &mut CapturePhase,
 ) -> Result<CaptureSummary, String>
 where
     F: FnMut(CaptureNotice),
     G: FnMut(InputEvent) -> Result<(), String>,
     H: FnMut() -> bool,
+    R: FnMut() -> Option<EdgePosition>,
 {
     let mut activated = session
         .portal
@@ -666,14 +677,20 @@ where
     let mut triggered_barrier = None;
     let mut active_until = None;
     let mut abort_reason = None;
+    let mut returned = None;
     let mut health_tick = tokio::time::interval(Duration::from_millis(100));
     let mut held_keys = HashSet::new();
     loop {
         tokio::select! {
             _ = health_tick.tick() => {
+                if let Some(position) = (hooks.return_request)() {
+                    returned = Some(position);
+                    on_notice(CaptureNotice::RemoteReturn(position));
+                    break;
+                }
                 if !(hooks.is_healthy)() { abort_reason = Some("peer connection lost; releasing local InputCapture".into()); break; }
             },
-            _ = &mut deadline => { summary.timed_out = true; break; },
+            _ = &mut deadline, if !portal_active => { summary.timed_out = true; break; },
             _ = async {
                 if let Some(until) = active_until {
                     tokio::time::sleep_until(until).await;
@@ -693,8 +710,12 @@ where
                 summary.activations += 1;
                 if *phase == CapturePhase::Captured { abort_reason = Some("duplicate InputCapture activation".into()); break; }
                 *phase = phase.advance(CapturePhase::Captured)?;
-                active_until = Some(tokio::time::Instant::now() + timing.active_duration);
-                on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier });
+                active_until = timing.active_duration.map(|duration| tokio::time::Instant::now() + duration);
+                let edge_fraction = signal.cursor_position().and_then(|position| {
+                    triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id))
+                        .map(|item| item.segment.fraction_for_cursor(position))
+                }).unwrap_or(0.5);
+                on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier, edge_fraction });
             }
             signal = deactivated.next() => {
                 let Some(signal) = signal else { abort_reason = Some("InputCapture Deactivated signal stream closed".into()); break; };
@@ -705,6 +726,10 @@ where
                     active_until = None;
                     if *phase == CapturePhase::Captured {
                         *phase = phase.advance(CapturePhase::WaitingForBarrier)?;
+                    }
+                    if timing.release_mode == ReleaseMode::EmergencyChord {
+                        abort_reason = Some("InputCapture deactivated during remote control; stopping session".into());
+                        break;
                     }
                 }
             }
@@ -738,8 +763,20 @@ where
                         summary.eis_starts += 1;
                         on_notice(CaptureNotice::EisStarted { sequence: start.sequence });
                     }
-                    EiEvent::DeviceStopEmulating(_) => { eis_active = false; on_notice(CaptureNotice::EisStopped); },
-                    other if portal_active || eis_active => {
+                    EiEvent::DeviceStopEmulating(_) => {
+                        eis_active = false;
+                        on_notice(CaptureNotice::EisStopped);
+                        if timing.release_mode == ReleaseMode::EmergencyChord && portal_active {
+                            abort_reason = Some("EI stopped emulating during remote control".into());
+                            break;
+                        }
+                    },
+                    other if portal_active || (eis_active && timing.release_mode == ReleaseMode::Escape) => {
+                        if let Some(position) = (hooks.return_request)() {
+                            returned = Some(position);
+                            on_notice(CaptureNotice::RemoteReturn(position));
+                            break;
+                        }
                         if let Some(input) = normalize_event(&other) {
                             if !(hooks.is_healthy)() { abort_reason = Some("peer connection lost; releasing local InputCapture".into()); break; }
                             if let InputEvent::Key { code: KeyCode::LinuxEvdev(code), pressed } = &input {
@@ -774,7 +811,10 @@ where
         let cursor_position = triggered_barrier
             .and_then(|id| requested.iter().find(|item| item.id == id))
             .or_else(|| (requested.len() == 1).then(|| &requested[0]))
-            .map(|item| item.segment.release_position());
+            .map(|item| {
+                item.segment
+                    .release_position_at(returned.map_or(0.5, |position| position.fraction))
+            });
         on_notice(CaptureNotice::ReleaseRequested {
             activation_id,
             cursor_position,

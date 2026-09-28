@@ -18,6 +18,7 @@ struct Options {
     peer_cert: Option<PathBuf>,
     bind: String,
     name: String,
+    verbose: bool,
 }
 
 fn options(args: &[String]) -> Result<Options, String> {
@@ -35,9 +36,14 @@ fn options(args: &[String]) -> Result<Options, String> {
         name: configured
             .map(|c| c.node.name)
             .unwrap_or_else(ukvm_config::default_name),
+        verbose: false,
     };
     let mut iter = args.iter();
     while let Some(option) = iter.next() {
+        if option == "--verbose" {
+            options.verbose = true;
+            continue;
+        }
         let value = iter
             .next()
             .ok_or_else(|| format!("missing value for {option}"))?;
@@ -155,6 +161,9 @@ pub fn listen(args: &[String]) -> ExitCode {
                         ReceiverNotice::SessionStarted => {
                             println!("Debug session started. No input will be injected.")
                         }
+                        ReceiverNotice::RemoteEntered(_) | ReceiverNotice::RemoteReturned(_) => {
+                            eprintln!("unexpected remote transition in DebugSink session")
+                        }
                         ReceiverNotice::Counts(c) => {
                             if began.is_none() {
                                 began = Some(Instant::now());
@@ -245,7 +254,7 @@ fn listen_remote(args: &[String]) -> ExitCode {
                     continue;
                 }
             };
-            let injector = match WaylandInputInjector::open().await {
+            let injector = match WaylandInputInjector::open_verbose(options.verbose).await {
                 Ok(injector) => injector,
                 Err(err) => {
                     eprintln!("Injector unavailable: {err}");
@@ -300,10 +309,22 @@ fn listen_remote(args: &[String]) -> ExitCode {
                 &mut sink,
                 |notice| match notice {
                     ReceiverNotice::SessionStarted => println!("Remote input session active."),
-                    ReceiverNotice::Counts(c) => println!(
-                        "Received: pointer={} buttons={} scroll={} keyboard={}",
-                        c.pointer, c.buttons, c.scroll, c.keyboard
+                    ReceiverNotice::RemoteEntered(position) => println!(
+                        "Remote pointer entered at {:?} edge, position {:.2}",
+                        position.edge, position.fraction
                     ),
+                    ReceiverNotice::RemoteReturned(position) => println!(
+                        "Return edge {:?} crossed at {:.2}; held input released",
+                        position.edge, position.fraction
+                    ),
+                    ReceiverNotice::Counts(c) => {
+                        if options.verbose {
+                            println!(
+                                "Received: pointer={} buttons={} scroll={} keyboard={}",
+                                c.pointer, c.buttons, c.scroll, c.keyboard
+                            );
+                        }
+                    }
                     ReceiverNotice::SessionEnded(c) => println!(
                         "Remote input released: pointer={} buttons={} scroll={} keyboard={}",
                         c.pointer, c.buttons, c.scroll, c.keyboard
@@ -433,7 +454,7 @@ pub fn capture_send(
     args: &[String],
     verbose: bool,
 ) -> ExitCode {
-    capture_send_for(edge, zone, target, args, verbose, false)
+    capture_send_for(edge, zone, target, args, verbose, None)
 }
 
 #[cfg(target_os = "linux")]
@@ -443,8 +464,9 @@ fn capture_send_for(
     target: &str,
     args: &[String],
     verbose: bool,
-    remote: bool,
+    entry_edge: Option<ukvm_protocol::Edge>,
 ) -> ExitCode {
+    let remote = entry_edge.is_some();
     let result = options(args).and_then(|options| {
         let (target, cert) = resolve_target(target, &options)?;
         let identity = Identity::load_or_create(&options.state_dir)?;
@@ -467,7 +489,7 @@ fn capture_send_for(
             if remote { "remote input" } else { "debug" }
         );
         let sender = match if remote {
-            transport::start_remote_sender(connection).await
+            transport::start_remote_sender(connection, entry_edge.expect("remote entry edge")).await
         } else {
             transport::start_sender(connection).await
         } {
@@ -475,30 +497,59 @@ fn capture_send_for(
             Err(err) => return super::fail(&err),
         };
         if remote {
-            println!("Remote input authorized. Cross the selected {edge:?} edge. Release: Ctrl+Alt+Shift+Escape or Ctrl+C; active capture ends after 30 seconds.");
+            println!("Remote input authorized. Cross the selected {edge:?} edge. Return by crossing the peer's {:?} edge. Emergency release: Ctrl+Alt+Shift+Escape or Ctrl+C.", entry_edge.expect("remote entry edge"));
         } else {
             println!("Remote DebugSink accepted. Cross the selected {edge:?} edge to send event counts. Press Esc to release.");
         }
         let dropped = AtomicU64::new(0);
+        let entry_sent = std::sync::atomic::AtomicBool::new(false);
+        let entry_failed = std::sync::atomic::AtomicBool::new(false);
         let queue = sender.queue.clone();
+        let control = sender.control.clone();
         let mut health = sender.alive.clone();
-        let mut on_event = |event: InputEvent| match queue.try_send(event) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(InputEvent::PointerMotion {
-                ..
-            })) => {
-                dropped.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+        let mut returned = sender.returned.clone();
+        let mut on_event = |event: InputEvent| {
+            if remote && !entry_sent.load(Ordering::Acquire) {
+                return Err("remote entry was not sent before input".into());
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                Err("bounded queue filled on key/button/scroll; releasing capture".into())
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                Err("peer sender closed; releasing capture".into())
+            match queue.try_send(event) {
+                Ok(()) => Ok(()),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(InputEvent::PointerMotion {
+                    ..
+                })) => {
+                    dropped.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    Err("bounded queue filled on key/button/scroll; releasing capture".into())
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    Err("peer sender closed; releasing capture".into())
+                }
             }
         };
-        let mut healthy = || *health.borrow_and_update();
-        let mut notice = |event| super::print_capture_notice(event, verbose, remote);
+        let mut healthy = || *health.borrow_and_update() && !entry_failed.load(Ordering::Acquire);
+        let mut notice = |event| {
+            if let ukvm_platform::linux_wayland::CaptureNotice::Activated {
+                edge_fraction, ..
+            } = &event
+            {
+                if let Some(edge) = entry_edge {
+                    let message = WireMessage::RemoteEntry(ukvm_protocol::EdgePosition {
+                        edge,
+                        fraction: *edge_fraction,
+                    });
+                    if control.try_send(message).is_ok() {
+                        entry_sent.store(true, Ordering::Release);
+                    } else {
+                        entry_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+            super::print_capture_notice(event, verbose, remote);
+        };
+        let mut return_request =
+            || (*returned.borrow_and_update()).filter(|position| Some(position.edge) == entry_edge);
         let capture = ukvm_platform::linux_wayland::capture_with_events_mode(
             edge,
             zone,
@@ -510,14 +561,15 @@ fn capture_send_for(
                     ukvm_platform::linux_wayland::ReleaseMode::Escape
                 },
                 active_duration: if remote {
-                    Duration::from_secs(30)
+                    None
                 } else {
-                    Duration::from_secs(5)
+                    Some(Duration::from_secs(5))
                 },
             },
             &mut notice,
             &mut on_event,
             &mut healthy,
+            &mut return_request,
         )
         .await;
         drop(queue);
@@ -593,9 +645,10 @@ pub fn control(edge: &str, args: &[String]) -> ExitCode {
                 ukvm_config::Edge::Top => ukvm_platform::linux_wayland::Edge::Top,
                 ukvm_config::Edge::Bottom => ukvm_platform::linux_wayland::Edge::Bottom,
             },
+            link.entry_edge,
         ))
     })();
-    let (alias, platform_edge) = match result {
+    let (alias, platform_edge, configured_entry_edge) = match result {
         Ok(v) => v,
         Err(e) => return super::fail(&e),
     };
@@ -609,5 +662,15 @@ pub fn control(edge: &str, args: &[String]) -> ExitCode {
             "Remote input; receiver must authorize and provide an injector"
         }
     );
-    capture_send_for(platform_edge, zone, &alias, &[], false, !debug)
+    let entry_edge = if debug {
+        None
+    } else {
+        Some(match configured_entry_edge {
+            ukvm_config::Edge::Left => ukvm_protocol::Edge::Left,
+            ukvm_config::Edge::Right => ukvm_protocol::Edge::Right,
+            ukvm_config::Edge::Top => ukvm_protocol::Edge::Top,
+            ukvm_config::Edge::Bottom => ukvm_protocol::Edge::Bottom,
+        })
+    };
+    capture_send_for(platform_edge, zone, &alias, &[], false, entry_edge)
 }

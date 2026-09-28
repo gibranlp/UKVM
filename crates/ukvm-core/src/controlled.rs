@@ -1,6 +1,12 @@
 //! Controlled-node session policy, independent of transport and OS input APIs.
 
-use ukvm_protocol::InputEvent;
+use ukvm_protocol::{EdgePosition, InputEvent};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SinkAction {
+    Continue,
+    Return(EdgePosition),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SinkKind {
@@ -13,7 +19,10 @@ pub enum SinkKind {
 pub trait InputSink {
     fn kind(&self) -> SinkKind;
     fn begin_session(&mut self) -> Result<(), String>;
-    fn handle_event(&mut self, event: &InputEvent) -> Result<(), String>;
+    fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), String> {
+        Err("sink does not support remote entry".into())
+    }
+    fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String>;
     /// The receiver polls this while idle so backend loss ends the network
     /// session even when no further input arrives.
     fn is_healthy(&self) -> bool {

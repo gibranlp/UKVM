@@ -4,7 +4,43 @@ use serde::{Deserialize, Serialize};
 
 /// First protocol major version. Incompatible peers must fail closed.
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 2;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Edge {
+    pub const fn opposite(self) -> Self {
+        match self {
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+            Self::Top => Self::Bottom,
+            Self::Bottom => Self::Top,
+        }
+    }
+}
+
+/// A position along an edge, measured from top or left, in [0, 1].
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct EdgePosition {
+    pub edge: Edge,
+    pub fraction: f32,
+}
+
+impl EdgePosition {
+    pub fn validate(self) -> Result<Self, String> {
+        if self.fraction.is_finite() && (0.0..=1.0).contains(&self.fraction) {
+            Ok(self)
+        } else {
+            Err("invalid edge position".into())
+        }
+    }
+}
 
 /// Stable identity reference; actual identity and trust storage belong to security code.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -99,6 +135,10 @@ pub enum WireMessage {
     /// Separate from SessionStart, which always selects the non-injecting DebugSink.
     RemoteSessionStart,
     RemoteSessionAccept,
+    /// Sent after InputCapture activation and before any remote input.
+    RemoteEntry(EdgePosition),
+    /// Sent by the controlled node after it releases held input state.
+    ReturnControl(EdgePosition),
 }
 
 /// Candidate messages for a future authenticated transport. This is not a wire API.
@@ -139,8 +179,8 @@ mod tests {
 
     #[test]
     fn major_version_must_match() {
-        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 1 }));
-        assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 0 }));
+        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 2 }));
+        assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 1 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 2, minor: 0 }));
     }
 }

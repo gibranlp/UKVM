@@ -49,25 +49,40 @@ impl OuterSegment {
     /// A suggested return position at the center of a boundary pixel inside the source zone.
     /// The compositor may ignore this suggestion.
     pub fn release_position(self) -> (f64, f64) {
-        let midpoint = |a: i32, b: i32| (f64::from(a) + f64::from(b)) / 2.0;
+        self.release_position_at(0.5)
+    }
+
+    pub fn release_position_at(self, fraction: f32) -> (f64, f64) {
+        let along = |a: i32, b: i32| {
+            f64::from(a) + f64::from(fraction.clamp(0.0, 1.0)) * (f64::from(b) - f64::from(a))
+        };
         match self.edge {
             Edge::Left => (
                 f64::from(self.start.0) + 0.5,
-                midpoint(self.start.1, self.end.1),
+                along(self.start.1, self.end.1),
             ),
             Edge::Right => (
                 f64::from(self.start.0) - 0.5,
-                midpoint(self.start.1, self.end.1),
+                along(self.start.1, self.end.1),
             ),
             Edge::Top => (
-                midpoint(self.start.0, self.end.0),
+                along(self.start.0, self.end.0),
                 f64::from(self.start.1) + 0.5,
             ),
             Edge::Bottom => (
-                midpoint(self.start.0, self.end.0),
+                along(self.start.0, self.end.0),
                 f64::from(self.start.1) - 0.5,
             ),
         }
+    }
+
+    pub fn fraction_for_cursor(self, cursor: (f32, f32)) -> f32 {
+        let (value, start, end) = match self.edge {
+            Edge::Left | Edge::Right => (cursor.1, self.start.1, self.end.1),
+            Edge::Top | Edge::Bottom => (cursor.0, self.start.0, self.end.0),
+        };
+        ((value - start as f32) / (f64::from(end) - f64::from(start)).max(1.0) as f32)
+            .clamp(0.0, 1.0)
     }
 }
 
@@ -213,6 +228,16 @@ mod tests {
             endpoints(&outer_segments(&zones, 0, Edge::Bottom).unwrap()),
             vec![((0, 1080), (1919, 1080))]
         );
+    }
+
+    #[test]
+    fn release_position_preserves_normalized_orthogonal_coordinate() {
+        let zones = [zone(-3840, 0, 3840, 2160)];
+        let segment = outer_segments(&zones, 0, Edge::Right).unwrap()[0];
+        let cursor = segment.release_position_at(0.6);
+        assert!((cursor.0 + 0.5).abs() < 0.01);
+        assert!((cursor.1 / 2159.0 - 0.6).abs() < 0.001);
+        assert!((segment.fraction_for_cursor((0.0, cursor.1 as f32)) - 0.6).abs() < 0.001);
     }
 
     #[test]

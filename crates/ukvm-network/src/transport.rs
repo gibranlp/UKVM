@@ -25,8 +25,9 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
+use ukvm_core::controlled::SinkAction;
 use ukvm_core::controlled::{ControlledState, InputSink, SinkKind};
-use ukvm_protocol::{InputEvent, ProtocolVersion, WireMessage};
+use ukvm_protocol::{EdgePosition, InputEvent, ProtocolVersion, WireMessage};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(4);
@@ -267,6 +268,8 @@ pub async fn accept_remote<S: InputSink>(
 #[derive(Clone, Debug)]
 pub enum ReceiverNotice {
     SessionStarted,
+    RemoteEntered(EdgePosition),
+    RemoteReturned(EdgePosition),
     Counts(EventCounts),
     SessionEnded(EventCounts),
 }
@@ -281,8 +284,8 @@ impl InputSink for DebugSink {
     fn begin_session(&mut self) -> Result<(), String> {
         Ok(())
     }
-    fn handle_event(&mut self, _event: &InputEvent) -> Result<(), String> {
-        Ok(())
+    fn handle_event(&mut self, _event: &InputEvent) -> Result<SinkAction, String> {
+        Ok(SinkAction::Continue)
     }
     fn end_session(&mut self) -> Result<(), String> {
         Ok(())
@@ -326,6 +329,7 @@ where
     let mut counts = EventCounts::default();
     let mut rate_window = Instant::now();
     let mut rate_count = 0u32;
+    let mut remote_entry_seen = false;
     let mut health_tick = tokio::time::interval(Duration::from_millis(100));
     tokio::pin!(shutdown);
     let result = loop {
@@ -391,6 +395,9 @@ where
                 if let Err(err) = state.event() {
                     break Err(err);
                 }
+                if sink.kind() == SinkKind::RemoteInput && !remote_entry_seen {
+                    break Err("remote input arrived before entry position".into());
+                }
                 if rate_window.elapsed() >= Duration::from_secs(1) {
                     rate_window = Instant::now();
                     rate_count = 0;
@@ -399,13 +406,43 @@ where
                 if rate_count > 20_000 {
                     break Err("input event rate limit exceeded".into());
                 }
-                if let Err(err) = sink.handle_event(&event) {
-                    break Err(err);
+                let action = match sink.handle_event(&event) {
+                    Ok(action) => action,
+                    Err(err) => break Err(err),
+                };
+                if let SinkAction::Return(position) = action {
+                    if sink.kind() != SinkKind::RemoteInput {
+                        break Err("debug sink requested remote return".into());
+                    }
+                    state.release();
+                    if let Err(err) = sink.end_session() {
+                        break Err(err);
+                    }
+                    state.finish();
+                    write_frame(
+                        &mut connection.stream,
+                        &WireMessage::ReturnControl(position),
+                    )
+                    .await?;
+                    notice(ReceiverNotice::RemoteReturned(position));
+                    notice(ReceiverNotice::SessionEnded(counts.clone()));
+                    return Ok(counts);
                 }
                 counts.add(&event);
                 if counts.total() == 1 || counts.total() % 100 == 0 {
                     notice(ReceiverNotice::Counts(counts.clone()));
                 }
+            }
+            WireMessage::RemoteEntry(position)
+                if state == ControlledState::ReceivingInput
+                    && sink.kind() == SinkKind::RemoteInput
+                    && !remote_entry_seen =>
+            {
+                if let Err(err) = sink.enter_remote(position) {
+                    break Err(err);
+                }
+                remote_entry_seen = true;
+                notice(ReceiverNotice::RemoteEntered(position));
             }
             WireMessage::Heartbeat(nonce) => {
                 if let Err(err) =
@@ -437,7 +474,9 @@ pub struct SenderStats {
 
 pub struct Sender {
     pub queue: mpsc::Sender<InputEvent>,
+    pub control: mpsc::Sender<WireMessage>,
     pub alive: watch::Receiver<bool>,
+    pub returned: watch::Receiver<Option<EdgePosition>>,
     pub rtt_micros: Arc<AtomicU64>,
     writer: JoinHandle<Result<SenderStats, String>>,
     reader: JoinHandle<()>,
@@ -446,6 +485,7 @@ pub struct Sender {
 impl Sender {
     pub async fn finish(self) -> Result<SenderStats, String> {
         drop(self.queue);
+        drop(self.control);
         let mut writer = self.writer;
         let result = match tokio::time::timeout(HEALTH_TIMEOUT + HEALTH_TIMEOUT, &mut writer).await
         {
@@ -461,16 +501,23 @@ impl Sender {
 }
 
 pub async fn start_sender(connection: Connection) -> Result<Sender, String> {
-    start_sender_for(connection, SinkKind::Debug).await
+    start_sender_for(connection, SinkKind::Debug, None).await
 }
 
 /// Only callers that explicitly choose remote control can send this request.
 /// No CLI command selects it until local authorization and an injector exist.
-pub async fn start_remote_sender(connection: Connection) -> Result<Sender, String> {
-    start_sender_for(connection, SinkKind::RemoteInput).await
+pub async fn start_remote_sender(
+    connection: Connection,
+    entry_edge: ukvm_protocol::Edge,
+) -> Result<Sender, String> {
+    start_sender_for(connection, SinkKind::RemoteInput, Some(entry_edge)).await
 }
 
-async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<Sender, String> {
+async fn start_sender_for(
+    mut connection: Connection,
+    kind: SinkKind,
+    expected_return_edge: Option<ukvm_protocol::Edge>,
+) -> Result<Sender, String> {
     let (request, accepted) = match kind {
         SinkKind::Debug => {
             require_debug_sink(&connection.peer)?;
@@ -500,7 +547,9 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
     }
     let (mut read, mut write) = split(connection.stream);
     let (queue, mut rx) = mpsc::channel::<InputEvent>(EVENT_QUEUE);
+    let (control, mut controls) = mpsc::channel::<WireMessage>(4);
     let (alive_tx, alive) = watch::channel(true);
+    let (return_tx, returned) = watch::channel(None);
     let rtt_micros = Arc::new(AtomicU64::new(0));
     let pending_ping = Arc::new(std::sync::Mutex::new(None::<(u64, Instant)>));
     let reader = {
@@ -522,6 +571,16 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
                             break;
                         }
                     }
+                    Ok(Ok((WireMessage::ReturnControl(position), _)))
+                        if kind == SinkKind::RemoteInput =>
+                    {
+                        if Some(position.edge) != expected_return_edge {
+                            let _ = alive_tx.send(false);
+                        } else {
+                            let _ = return_tx.send(Some(position));
+                        }
+                        break;
+                    }
                     _ => {
                         let _ = alive_tx.send(false);
                         break;
@@ -533,6 +592,7 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
     let writer = {
         let alive_tx = alive_tx.clone();
         let rtt = Arc::clone(&rtt_micros);
+        let mut returned = returned.clone();
         tokio::spawn(async move {
             let mut stats = SenderStats::default();
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
@@ -540,6 +600,18 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
             let mut nonce = 0u64;
             loop {
                 tokio::select! {
+                    biased;
+                    changed = returned.changed() => {
+                        if changed.is_ok() && returned.borrow().is_some() { break; }
+                    },
+                    message = controls.recv(), if !controls.is_closed() => match message {
+                        Some(message) => {
+                            if let Err(err) = send_with_timeout(&mut write, &message).await {
+                                let _ = alive_tx.send(false); return Err(err);
+                            }
+                        },
+                        None => controls.close(),
+                    },
                     event = rx.recv() => match event {
                         Some(event) => {
                             match send_with_timeout(&mut write, &WireMessage::Input(event.clone())).await {
@@ -565,14 +637,18 @@ async fn start_sender_for(mut connection: Connection, kind: SinkKind) -> Result<
                     },
                 }
             }
-            let _ = send_with_timeout(&mut write, &WireMessage::SessionEnd).await;
+            if returned.borrow().is_none() {
+                let _ = send_with_timeout(&mut write, &WireMessage::SessionEnd).await;
+            }
             stats.rtt_micros = rtt.load(Ordering::Relaxed);
             Ok(stats)
         })
     };
     Ok(Sender {
         queue,
+        control,
         alive,
+        returned,
         rtt_micros,
         writer,
         reader,
@@ -597,6 +673,185 @@ mod tests {
     use std::fs;
     use std::sync::atomic::AtomicBool;
 
+    #[derive(Default)]
+    struct ReturnState {
+        held_keys: usize,
+        held_buttons: usize,
+        ended: usize,
+        handled: usize,
+    }
+
+    struct ReturningSink(Arc<std::sync::Mutex<ReturnState>>);
+
+    impl InputSink for ReturningSink {
+        fn kind(&self) -> SinkKind {
+            SinkKind::RemoteInput
+        }
+        fn begin_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
+            if entry.edge != ukvm_protocol::Edge::Left {
+                return Err("wrong entry edge".into());
+            }
+            Ok(())
+        }
+        fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {
+            let mut state = self.0.lock().unwrap();
+            state.handled += 1;
+            match event {
+                InputEvent::Key { pressed: true, .. } => state.held_keys += 1,
+                InputEvent::PointerButton { pressed: true, .. } => state.held_buttons += 1,
+                InputEvent::PointerMotion { dx, .. } if *dx < 0.0 => {
+                    return Ok(SinkAction::Return(EdgePosition {
+                        edge: ukvm_protocol::Edge::Left,
+                        fraction: 0.6,
+                    }));
+                }
+                _ => {}
+            }
+            Ok(SinkAction::Continue)
+        }
+        fn end_session(&mut self) -> Result<(), String> {
+            let mut state = self.0.lock().unwrap();
+            state.held_keys = 0;
+            state.held_buttons = 0;
+            state.ended += 1;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_return_releases_held_input_and_ignores_late_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = Arc::new(std::sync::Mutex::new(ReturnState::default()));
+        let receiver_state = Arc::clone(&shared);
+        let a_cert = a.cert_path.clone();
+        let receiver = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut sink = ReturningSink(Arc::clone(&receiver_state));
+                let connection = accept_remote(tcp, &b, &a_cert, "b", &sink).await.unwrap();
+                let counts = receive_session(connection, &mut sink, |_| {})
+                    .await
+                    .unwrap();
+                assert_eq!(counts.keyboard, 1);
+                assert_eq!(counts.buttons, 1);
+            }
+        });
+        for _ in 0..3 {
+            let mut connection =
+                connect(&addr.to_string(), &a, &temp.path().join("b/node.der"), "a")
+                    .await
+                    .unwrap();
+            write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut connection.stream).await.unwrap().0,
+                WireMessage::RemoteSessionAccept
+            );
+            write_frame(
+                &mut connection.stream,
+                &WireMessage::RemoteEntry(EdgePosition {
+                    edge: ukvm_protocol::Edge::Left,
+                    fraction: 0.6,
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut connection.stream,
+                &WireMessage::Input(InputEvent::Key {
+                    code: ukvm_protocol::KeyCode::LinuxEvdev(42),
+                    pressed: true,
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut connection.stream,
+                &WireMessage::Input(InputEvent::PointerButton {
+                    button: 272,
+                    pressed: true,
+                }),
+            )
+            .await
+            .unwrap();
+            write_frame(
+                &mut connection.stream,
+                &WireMessage::Input(InputEvent::PointerMotion { dx: -10.0, dy: 0.0 }),
+            )
+            .await
+            .unwrap();
+            let _ = write_frame(
+                &mut connection.stream,
+                &WireMessage::Input(InputEvent::Key {
+                    code: ukvm_protocol::KeyCode::LinuxEvdev(30),
+                    pressed: true,
+                }),
+            )
+            .await;
+            assert_eq!(
+                read_frame(&mut connection.stream).await.unwrap().0,
+                WireMessage::ReturnControl(EdgePosition {
+                    edge: ukvm_protocol::Edge::Left,
+                    fraction: 0.6
+                })
+            );
+        }
+        receiver.await.unwrap();
+        let state = shared.lock().unwrap();
+        assert_eq!(state.ended, 3);
+        assert_eq!(state.held_keys, 0);
+        assert_eq!(state.held_buttons, 0);
+        assert_eq!(state.handled, 9);
+    }
+
+    #[tokio::test]
+    async fn remote_input_before_entry_is_rejected_and_cleaned_up() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b")).unwrap();
+        let listener = bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shared = Arc::new(std::sync::Mutex::new(ReturnState::default()));
+        let receiver_state = Arc::clone(&shared);
+        let a_cert = a.cert_path.clone();
+        let receiver = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut sink = ReturningSink(receiver_state);
+            let connection = accept_remote(tcp, &b, &a_cert, "b", &sink).await.unwrap();
+            receive_session(connection, &mut sink, |_| {})
+                .await
+                .unwrap_err()
+        });
+        let mut connection = connect(&addr.to_string(), &a, &temp.path().join("b/node.der"), "a")
+            .await
+            .unwrap();
+        write_frame(&mut connection.stream, &WireMessage::RemoteSessionStart)
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut connection.stream).await.unwrap().0,
+            WireMessage::RemoteSessionAccept
+        );
+        write_frame(
+            &mut connection.stream,
+            &WireMessage::Input(InputEvent::PointerMotion { dx: 1.0, dy: 0.0 }),
+        )
+        .await
+        .unwrap();
+        assert!(receiver.await.unwrap().contains("before entry"));
+        let state = shared.lock().unwrap();
+        assert_eq!(state.handled, 0);
+        assert_eq!(state.ended, 1);
+    }
+
     struct FailingRemoteSink {
         ended: Arc<AtomicBool>,
     }
@@ -608,7 +863,10 @@ mod tests {
         fn begin_session(&mut self) -> Result<(), String> {
             Ok(())
         }
-        fn handle_event(&mut self, _event: &InputEvent) -> Result<(), String> {
+        fn enter_remote(&mut self, _: EdgePosition) -> Result<(), String> {
+            Ok(())
+        }
+        fn handle_event(&mut self, _event: &InputEvent) -> Result<SinkAction, String> {
             Err("injector disconnected".into())
         }
         fn end_session(&mut self) -> Result<(), String> {
@@ -684,6 +942,15 @@ mod tests {
             read_frame(&mut connection.stream).await.unwrap().0,
             WireMessage::RemoteSessionAccept
         );
+        write_frame(
+            &mut connection.stream,
+            &WireMessage::RemoteEntry(EdgePosition {
+                edge: ukvm_protocol::Edge::Left,
+                fraction: 0.5,
+            }),
+        )
+        .await
+        .unwrap();
         write_frame(
             &mut connection.stream,
             &WireMessage::Input(InputEvent::PointerMotion { dx: 1.0, dy: 0.0 }),

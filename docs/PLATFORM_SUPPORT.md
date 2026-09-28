@@ -1,25 +1,27 @@
 # Platform support plan
 
-**Current status:** Linux Wayland capture and authenticated forwarding to DebugSink are proven across two physical computers. An experimental, consent-capable Hyprland portal draft on io also physically delivered cross-PC pointer movement, clicks and keyboard input. The packaged portal on spectrum and io does not expose RemoteDesktop; scroll and receiver-disconnect cleanup remain unproven. A green build on one OS does not claim runtime support on another.
+**Current status:** Linux Wayland capture, authenticated DebugSink forwarding and remote input injection are proven between spectrum and io. The user confirmed pointer movement, clicks, scroll, keyboard, modifiers, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 implements inverse-edge return using permissioned EI absolute motion, but that round trip and receiver-side held-input cleanup on disconnect still need physical acceptance. The packaged portal on spectrum and io lacks RemoteDesktop; io uses a reversible consent-capable draft. A green build on one OS does not claim runtime support on another.
 
 In Milestone 5, a physical right-edge capture on this Hyprland machine sent 611 normalized pointer events through a localhost mutual-TLS connection to UKVM's DebugSink. The receiver counted exactly 611 pointer events, no keyboard events, and injected nothing. InputCapture `Release` succeeded; the user confirmed local mouse and keyboard control returned normally. Later two-computer tests sent 528 and 621 pointer events with none dropped. A receiver-kill test during capture released local control. Other compositors remain untested. See [network transport](NETWORK.md).
 
 | Environment | InputCapture | Controlled-node injection |
 | --- | --- | --- |
 | Arch Linux / Hyprland 0.56.2, packaged portal | Pointer and keyboard proven by physical tests | Unavailable: packaged portal has no RemoteDesktop |
-| Arch Linux / Hyprland 0.56.2, consent-capable draft portal on io | Pointer and keyboard proven | Relative pointer, clicks and keyboard physically proven across two PCs; scroll unproven |
+| Arch Linux / Hyprland 0.56.2, consent-capable draft portal on io | Pointer and keyboard proven | Pointer, clicks, scroll and keyboard physically proven across two PCs; natural edge return unproven |
 | GNOME Wayland | Untested | Untested |
 | KDE Plasma Wayland | Untested | Untested |
 | Other wlroots/COSMIC | Untested | Untested |
 
 | Target | Candidate sanctioned mechanisms | Main open questions |
 | --- | --- | --- |
-| Linux Wayland | InputCapture/EI capture and experimental RemoteDesktop/EI injection verified on Hyprland with a draft portal | A released consent-capable RemoteDesktop backend, other compositors, zone-change recovery, scroll, disconnect cleanup and cross-platform key mapping need testing |
+| Linux Wayland | InputCapture/EI capture and experimental RemoteDesktop/EI injection verified on Hyprland with a draft portal | A released consent-capable RemoteDesktop backend, natural return, receiver disconnect cleanup, other compositors, zone-change recovery and cross-platform key mapping need testing |
 | Linux X11 | XInput2/X11 event capture and XTEST injection | Grabs, multiple displays, X server security, injected-event loops |
 | macOS | Quartz event taps, Core Graphics event posting, display APIs | Accessibility and Input Monitoring grants, event tap lifecycle, secure input, multi-display coordinates |
 | Windows | Raw input or low-level hooks, `SendInput`, monitor APIs | Hook behavior, integrity levels, secure desktop and session boundaries |
 
 Wayland is a first-class target. The [InputCapture portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html) defines session creation, approval, screen zones, pointer barriers and EIS connection. The [RemoteDesktop portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html) defines a user-approved injection session and EIS connection. [libei](https://libinput.pages.freedesktop.org/libei/api/index.html) provides the client-side emulated-input protocol. These interfaces are candidates, not a promise that every compositor implements every capability. Check portal version and supported capabilities at runtime; document missing features per compositor during implementation. Avoid XWayland fallback for native Wayland sessions and avoid privileged input-device tricks.
+
+RemoteDesktop/ConnectToEIS supplies a sender socket and EI device regions, but its documented interface does not supply a readback of the compositor's global cursor position. The experimental return path requires an EI absolute pointer. It positions the remote cursor at entry and sends absolute motion for each captured delta, maintaining the requested virtual position for boundary detection. This is compositor-independent portal/EI code, not Hyprland IPC. Pointer constraints, transforms or compositor rejection could make the visible cursor diverge from the virtual state; the physical round trip must verify this before support is claimed.
 
 ## Wayland milestone evidence (Arch Linux / Hyprland)
 

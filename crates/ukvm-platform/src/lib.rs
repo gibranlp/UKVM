@@ -1,7 +1,7 @@
 //! OS input boundary. Implementations must live under platform-specific modules.
 
-use ukvm_core::controlled::{InputSink, SinkKind};
-use ukvm_protocol::InputEvent;
+use ukvm_core::controlled::{InputSink, SinkAction, SinkKind};
+use ukvm_protocol::{EdgePosition, InputEvent};
 
 #[cfg(target_os = "linux")]
 pub mod linux_wayland;
@@ -116,6 +116,15 @@ pub trait PlatformInputInjector: Send {
     /// Must clean up partial native state before returning an error.
     fn begin(&mut self) -> Result<(), PlatformError>;
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError>;
+    fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported(
+            "remote edge entry is unavailable",
+        ))
+    }
+    fn inject_remote(&mut self, event: &InputEvent) -> Result<Option<EdgePosition>, PlatformError> {
+        self.inject(event)?;
+        Ok(None)
+    }
     fn is_healthy(&self) -> bool {
         true
     }
@@ -128,6 +137,7 @@ pub trait PlatformInputInjector: Send {
 pub struct RemoteInputSink<I: PlatformInputInjector> {
     injector: I,
     active: bool,
+    entered: bool,
 }
 
 impl<I: PlatformInputInjector> RemoteInputSink<I> {
@@ -135,6 +145,7 @@ impl<I: PlatformInputInjector> RemoteInputSink<I> {
         Self {
             injector,
             active: false,
+            entered: false,
         }
     }
 }
@@ -147,17 +158,33 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
     fn begin_session(&mut self) -> Result<(), String> {
         self.injector.begin().map_err(|e| e.to_string())?;
         self.active = true;
+        self.entered = false;
         Ok(())
     }
 
-    fn handle_event(&mut self, event: &InputEvent) -> Result<(), String> {
-        if !self.active {
-            return Err("injector session is not active".into());
+    fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
+        if !self.active || self.entered {
+            return Err("remote entry is out of order".into());
+        }
+        entry.validate()?;
+        if !self.injector.capabilities().pointer_absolute {
+            return Err("remote edge return requires absolute pointer injection".into());
+        }
+        self.injector
+            .enter_remote(entry)
+            .map_err(|e| e.to_string())?;
+        self.entered = true;
+        Ok(())
+    }
+
+    fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {
+        if !self.active || !self.entered {
+            return Err("injector session has not entered remote control".into());
         }
         ukvm_protocol::validate_event(event)?;
         let caps = self.injector.capabilities();
         let supported = match event {
-            InputEvent::PointerMotion { .. } => caps.pointer_relative,
+            InputEvent::PointerMotion { .. } => caps.pointer_absolute,
             InputEvent::PointerButton { .. } => caps.pointer_button,
             InputEvent::Scroll { .. } => caps.pointer_scroll,
             InputEvent::Key { .. } => caps.keyboard,
@@ -165,7 +192,10 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
         if !supported {
             return Err("injector capability mismatch".into());
         }
-        self.injector.inject(event).map_err(|e| e.to_string())
+        self.injector
+            .inject_remote(event)
+            .map(|returned| returned.map_or(SinkAction::Continue, SinkAction::Return))
+            .map_err(|e| e.to_string())
     }
 
     fn is_healthy(&self) -> bool {
@@ -177,6 +207,7 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
             return Ok(());
         }
         self.active = false;
+        self.entered = false;
         let released = self.injector.release_all();
         let ended = self.injector.end();
         released.and(ended).map_err(|e| e.to_string())
@@ -212,7 +243,7 @@ mod injector_tests {
     use super::*;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     struct PointerOnly {
@@ -223,6 +254,7 @@ mod injector_tests {
         fn capabilities(&self) -> InjectionCapabilities {
             InjectionCapabilities {
                 pointer_relative: true,
+                pointer_absolute: true,
                 ..InjectionCapabilities::default()
             }
         }
@@ -230,6 +262,9 @@ mod injector_tests {
             Ok(())
         }
         fn inject(&mut self, _: &InputEvent) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn enter_remote(&mut self, _: EdgePosition) -> Result<(), PlatformError> {
             Ok(())
         }
         fn release_all(&mut self) -> Result<(), PlatformError> {
@@ -254,6 +289,11 @@ mod injector_tests {
             .handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
             .is_err());
         sink.begin_session().unwrap();
+        sink.enter_remote(EdgePosition {
+            edge: ukvm_protocol::Edge::Left,
+            fraction: 0.5,
+        })
+        .unwrap();
         sink.handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
             .unwrap();
         assert!(sink
@@ -271,5 +311,87 @@ mod injector_tests {
         sink.end_session().unwrap();
         assert_eq!(releases.load(Ordering::SeqCst), 1);
         assert_eq!(ends.load(Ordering::SeqCst), 1);
+    }
+
+    struct HeldInjector(Arc<Mutex<(bool, bool)>>);
+
+    impl PlatformInputInjector for HeldInjector {
+        fn capabilities(&self) -> InjectionCapabilities {
+            InjectionCapabilities {
+                pointer_relative: true,
+                pointer_absolute: true,
+                pointer_button: true,
+                keyboard: true,
+                ..InjectionCapabilities::default()
+            }
+        }
+        fn begin(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn enter_remote(&mut self, _: EdgePosition) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError> {
+            let mut held = self.0.lock().unwrap();
+            match event {
+                InputEvent::Key { pressed, .. } => held.0 = *pressed,
+                InputEvent::PointerButton { pressed, .. } => held.1 = *pressed,
+                _ => {}
+            }
+            Ok(())
+        }
+        fn inject_remote(
+            &mut self,
+            event: &InputEvent,
+        ) -> Result<Option<EdgePosition>, PlatformError> {
+            if matches!(event, InputEvent::PointerMotion { dx, .. } if *dx < 0.0) {
+                return Ok(Some(EdgePosition {
+                    edge: ukvm_protocol::Edge::Left,
+                    fraction: 0.5,
+                }));
+            }
+            self.inject(event)?;
+            Ok(None)
+        }
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            *self.0.lock().unwrap() = (false, false);
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn return_release_clears_held_key_and_button() {
+        let held = Arc::new(Mutex::new((false, false)));
+        let mut sink = RemoteInputSink::new(HeldInjector(Arc::clone(&held)));
+        sink.begin_session().unwrap();
+        sink.enter_remote(EdgePosition {
+            edge: ukvm_protocol::Edge::Left,
+            fraction: 0.5,
+        })
+        .unwrap();
+        sink.handle_event(&InputEvent::Key {
+            code: ukvm_protocol::KeyCode::LinuxEvdev(42),
+            pressed: true,
+        })
+        .unwrap();
+        sink.handle_event(&InputEvent::PointerButton {
+            button: 272,
+            pressed: true,
+        })
+        .unwrap();
+        assert_eq!(*held.lock().unwrap(), (true, true));
+        assert!(matches!(
+            sink.handle_event(&InputEvent::PointerMotion { dx: -1.0, dy: 0.0 })
+                .unwrap(),
+            SinkAction::Return(_)
+        ));
+        sink.end_session().unwrap();
+        assert_eq!(*held.lock().unwrap(), (false, false));
+        assert!(sink
+            .handle_event(&InputEvent::PointerMotion { dx: 1.0, dy: 0.0 })
+            .is_err());
     }
 }
