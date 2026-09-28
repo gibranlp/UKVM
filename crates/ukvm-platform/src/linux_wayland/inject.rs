@@ -33,6 +33,7 @@ use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 const AUTHORIZE_TIMEOUT: Duration = Duration::from_secs(120);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const EI_DEVICE_TIMEOUT: Duration = Duration::from_secs(8);
+const PORTAL_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_QUEUE: usize = 256;
 
 enum Command {
@@ -104,14 +105,30 @@ impl WaylandInputInjector {
                     .build()
                 {
                     Ok(runtime) => {
-                        let _ = ready_tx.send(Ok(()));
-                        runtime.block_on(run_actor(
-                            rx,
-                            actor_caps,
-                            actor_health,
-                            request_keyboard,
-                            verbose,
+                        let portal = runtime.block_on(tokio::time::timeout(
+                            PORTAL_SETUP_TIMEOUT,
+                            PortalEisSession::open_portal(verbose),
                         ));
+                        match portal.unwrap_or_else(|_| {
+                            Err(PlatformError::Backend(
+                                "RemoteDesktop portal proxy setup timed out".into(),
+                            ))
+                        }) {
+                            Ok(portal) => {
+                                let _ = ready_tx.send(Ok(()));
+                                runtime.block_on(run_actor(
+                                    rx,
+                                    actor_caps,
+                                    actor_health,
+                                    request_keyboard,
+                                    verbose,
+                                    portal,
+                                ));
+                            }
+                            Err(err) => {
+                                let _ = ready_tx.send(Err(err));
+                            }
+                        }
                     }
                     Err(err) => {
                         let _ = ready_tx.send(Err(PlatformError::Backend(err.to_string())));
@@ -119,9 +136,11 @@ impl WaylandInputInjector {
                 }
             })
             .map_err(|err| PlatformError::Backend(err.to_string()))?;
-        ready_rx.recv_timeout(COMMAND_TIMEOUT).map_err(|err| {
-            PlatformError::Backend(format!("injector actor did not start: {err}"))
-        })??;
+        ready_rx
+            .recv_timeout(PORTAL_SETUP_TIMEOUT + COMMAND_TIMEOUT)
+            .map_err(|err| {
+                PlatformError::Backend(format!("injector actor did not start: {err}"))
+            })??;
         Ok(Self {
             commands,
             capabilities,
@@ -218,7 +237,6 @@ impl PlatformInputInjector for WaylandInputInjector {
 }
 
 struct PortalEisSession {
-    _portal: RemoteDesktop,
     portal_session: Session<RemoteDesktop>,
     connection: Connection,
     events: reis::tokio::EiConvertEventStream,
@@ -247,7 +265,7 @@ impl Drop for PendingPortalSession {
 }
 
 impl PortalEisSession {
-    async fn open(request_keyboard: bool, verbose: bool) -> Result<Self, PlatformError> {
+    async fn open_portal(verbose: bool) -> Result<RemoteDesktop, PlatformError> {
         if verbose {
             eprintln!("[wayland] RemoteDesktop: opening dedicated session-bus connection");
         }
@@ -269,6 +287,14 @@ impl PortalEisSession {
                 "RemoteDesktop portal does not provide ConnectToEIS",
             ));
         }
+        Ok(portal)
+    }
+
+    async fn open(
+        portal: &RemoteDesktop,
+        request_keyboard: bool,
+        verbose: bool,
+    ) -> Result<Self, PlatformError> {
         if verbose {
             eprintln!("[wayland] RemoteDesktop: CreateSession");
         }
@@ -281,7 +307,7 @@ impl PortalEisSession {
     }
 
     async fn open_session(
-        portal: RemoteDesktop,
+        portal: &RemoteDesktop,
         session: Session<RemoteDesktop>,
         request_keyboard: bool,
         verbose: bool,
@@ -444,7 +470,6 @@ impl PortalEisSession {
         .await;
         match result {
             Ok((connection, events, pointer, keyboard)) => Ok(Self {
-                _portal: portal,
                 portal_session: pending.0.take().expect("pending portal session"),
                 connection,
                 events,
@@ -662,6 +687,7 @@ async fn run_actor(
     healthy: Arc<AtomicBool>,
     request_keyboard: bool,
     verbose: bool,
+    portal: RemoteDesktop,
 ) {
     let mut session: Option<PortalEisSession> = None;
     loop {
@@ -714,7 +740,7 @@ async fn run_actor(
                 Some(Command::Begin(reply)) => {
                     match tokio::time::timeout(
                         AUTHORIZE_TIMEOUT,
-                        PortalEisSession::open(request_keyboard, verbose),
+                        PortalEisSession::open(&portal, request_keyboard, verbose),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -738,7 +764,7 @@ async fn run_actor(
                 Some(Command::BeginAsync(mut reply)) => {
                     let opened = tokio::select! {
                         _ = reply.closed() => continue,
-                        result = tokio::time::timeout(AUTHORIZE_TIMEOUT, PortalEisSession::open(request_keyboard, verbose)) => result.unwrap_or_else(|_| Err(PlatformError::Backend("RemoteDesktop authorization timed out".into()))),
+                        result = tokio::time::timeout(AUTHORIZE_TIMEOUT, PortalEisSession::open(&portal, request_keyboard, verbose)) => result.unwrap_or_else(|_| Err(PlatformError::Backend("RemoteDesktop authorization timed out".into()))),
                     };
                     match opened {
                         Ok(opened) => {
