@@ -3,6 +3,7 @@ members = [
     "crates/ukvm-cli",
     "crates/ukvm-core",
     "crates/ukvm-config",
+    "crates/ukvm-discovery",
     "crates/ukvm-network",
     "crates/ukvm-platform",
     "crates/ukvm-protocol",
@@ -18,6 +19,7 @@ rust-version = "1.87"
 [workspace.dependencies]
 ukvm-core = { path = "crates/ukvm-core" }
 ukvm-config = { path = "crates/ukvm-config" }
+ukvm-discovery = { path = "crates/ukvm-discovery" }
 ukvm-network = { path = "crates/ukvm-network" }
 ukvm-platform = { path = "crates/ukvm-platform" }
 ukvm-protocol = { path = "crates/ukvm-protocol" }

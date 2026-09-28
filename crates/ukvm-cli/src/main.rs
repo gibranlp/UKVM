@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+mod discovery;
 mod network;
 mod pairing;
 mod settings;
@@ -24,10 +25,13 @@ Commands:\n\
   start     Start UKVM (not implemented yet)\n\
   stop      Stop UKVM (not implemented yet)\n\
   pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
+  pair --discover [--interface NAME]  Find and select a pairing node\n\
+  pair --interface NAME  Advertise pairing on one interface\n\
   pair --bind ADDR:PORT  Test with an explicit temporary pairing listener\n\
   pair status  Inspect pairing recovery records\n\
   pair recover [HOST[:PORT] [TRANSACTION_ID]]  Reconcile confirmed pairing\n\
   pair cleanup  Remove expired recovery records\n\
+  discover [--interface NAME]  Browse nearby pairing nodes for four seconds\n\
   devices   List peers (not implemented yet)\n\
   help      Show this help";
 
@@ -55,6 +59,7 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "peer" => settings::peer(rest),
         [command, rest @ ..] if command == "layout" => settings::layout(rest),
         [command, rest @ ..] if command == "pair" => pairing::pair(rest),
+        [command, rest @ ..] if command == "discover" => discovery::discover(rest),
         [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
         [command] if command == "status" => settings::status(),
         [command] if command == "doctor" => doctor(),
@@ -370,6 +375,7 @@ fn doctor() -> ExitCode {
     }
     #[cfg(not(target_os = "linux"))]
     println!("Platform diagnostics are not implemented for this OS yet.");
+    println!("\nDiscovery\n  Backend: mDNS/DNS-SD (_ukvm._tcp.local.)\n  Publish/browse: implemented\n  Live multicast: not tested by doctor; run 'ukvm discover'\n  Active advertisement: no (only while 'ukvm pair' listens)");
     ExitCode::SUCCESS
 }
 

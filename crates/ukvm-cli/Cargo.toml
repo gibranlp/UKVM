@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 ukvm-config.workspace = true
+ukvm-discovery.workspace = true
 ukvm-network.workspace = true
 ukvm-platform.workspace = true
 ukvm-protocol.workspace = true
@@ -18,4 +19,7 @@ toml = "0.8"
 
 [dependencies.tokio]
 version = "1"
-features = ["rt", "time", "signal", "net", "io-util", "sync"]
+features = ["rt", "time", "signal", "net", "io-util", "sync", "macros"]
+
+[dev-dependencies]
+tempfile = "3"

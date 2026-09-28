@@ -233,6 +233,7 @@ pub fn status() -> ExitCode {
             let probe = super::with_runtime(ukvm_platform::linux_wayland::probe());
             println!("Capabilities\n  Controller pointer: {}\n  Controller keyboard: {}\n  Controlled pointer: false\n  Reason: {}",probe.capture.pointer_advertised,probe.capture.keyboard_advertised,if probe.remote.version.is_some() { "UKVM Wayland injector not implemented" } else { "RemoteDesktop portal unavailable" });
         }
+        println!("Discovery\n  Backend: mDNS/DNS-SD\n  Supported: yes\n  Active: no (only while ukvm pair listens)");
         println!("Configuration: valid");
         Ok(())
     })();

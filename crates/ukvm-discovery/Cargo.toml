@@ -1,0 +1,13 @@
+[package]
+name = "ukvm-discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mdns-sd = { version = "=0.21.4", default-features = false, features = ["async"] }
+tokio = { version = "1", features = ["time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "time"] }

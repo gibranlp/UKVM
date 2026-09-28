@@ -1,6 +1,6 @@
 # Development network transport
 
-This is a two-node **DebugSink** transport. The receiver validates and counts normalized events; it does not inject input. Pairing can now populate the same trust store without manual certificate transfer. No discovery, reconnect loop or service runtime exists. The same `ukvm` binary can listen or connect. The listener currently serves one connection at a time.
+This is a two-node **DebugSink** transport. The receiver validates and counts normalized events; it does not inject input. Pairing can now populate the same trust store without manual certificate transfer. Temporary DNS-SD discovery exists for pairing; no reconnect loop or service runtime exists. The same `ukvm` binary can listen or connect. The listener currently serves one connection at a time.
 
 ## Transport choice
 
@@ -58,7 +58,7 @@ Move the pointer through the **outer right edge of the large monitor** after the
 
 ## Validation evidence
 
-The configured Milestone 8 physical workflow was subsequently tested between PC A (`192.168.1.21`) and PC B (`192.168.1.40`); the user reported right-edge capture through alias, pinned mTLS and B's DebugSink worked flawlessly. This is physical proof of the configured DebugSink path, not input injection. First-contact pairing was also physically proven between these nodes: matching short codes, two human confirmations, reciprocal certificate pins, default-deny input permissions, and no `.der` transfer. Pairing protocol 2 now retains nonsecret recovery receipts for interrupted commits; the recovery path has local automated coverage and awaits physical regression. See [pairing](PAIRING.md).
+The configured Milestone 8 physical workflow was subsequently tested between PC A (`192.168.1.21`) and PC B (`192.168.1.40`); the user reported right-edge capture through alias, pinned mTLS and B's DebugSink worked flawlessly. This is physical proof of the configured DebugSink path, not input injection. First-contact pairing was also physically proven between these nodes: matching short codes, two human confirmations, reciprocal certificate pins, default-deny input permissions, and no `.der` transfer. Pairing protocol 2 retains nonsecret recovery receipts for interrupted commits; a physical idempotent recovery completed while preserving permissions and layout. DNS-SD now provides untrusted pairing address hints; its two-PC test remains pending. See [discovery](DISCOVERY.md). See [pairing](PAIRING.md).
 
 ### Configured workflow (Milestone 8)
 

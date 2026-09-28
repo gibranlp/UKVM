@@ -3,6 +3,7 @@ use std::{
     process::ExitCode,
     time::Duration,
 };
+use ukvm_discovery::{Advertisement, DiscoveryResult, DiscoveryService};
 use ukvm_network::{
     identity::{default_state_dir, Identity},
     pairing::{
@@ -73,11 +74,23 @@ pub fn pair(args: &[String]) -> ExitCode {
     if args.first().is_some_and(|v| v == "cleanup") {
         return pair_cleanup(&args[1..]);
     }
-    let (target, bind) = match args {
-        [] => (None, format!("0.0.0.0:{PAIRING_PORT}")),
-        [target] if !target.starts_with('-') => (Some(target.as_str()), String::new()),
-        [flag, address] if flag == "--bind" => (None, address.clone()),
-        _ => return super::fail("usage: ukvm pair [HOST[:PORT]] or ukvm pair --bind ADDR"),
+    enum Target<'a> {
+        Listen {
+            bind: String,
+            interface: Option<&'a str>,
+            advertise: bool,
+        },
+        Direct(&'a str),
+        Discover(Option<&'a str>),
+    }
+    let target = match args {
+        [] => Target::Listen { bind: format!("0.0.0.0:{PAIRING_PORT}"), interface: None, advertise: true },
+        [flag] if flag == "--discover" => Target::Discover(None),
+        [flag, option, name] if flag == "--discover" && option == "--interface" => Target::Discover(Some(name)),
+        [flag, name] if flag == "--interface" => Target::Listen { bind: format!("0.0.0.0:{PAIRING_PORT}"), interface: Some(name), advertise: true },
+        [flag, address] if flag == "--bind" => Target::Listen { bind: address.clone(), interface: None, advertise: false },
+        [host] if !host.starts_with('-') => Target::Direct(host),
+        _ => return super::fail("usage: ukvm pair [HOST[:PORT]|--discover [--interface NAME]|--interface NAME|--bind ADDR]"),
     };
     let config = match ukvm_config::default_path()
         .map_err(|e| e.to_string())
@@ -94,31 +107,84 @@ pub fn pair(args: &[String]) -> ExitCode {
         Ok(p) => p,
         Err(e) => return super::fail(&e),
     };
+    let control_port = match config.network.listen.parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr.port(),
+        Err(e) => return super::fail(&format!("configured network listen address: {e}")),
+    };
     let local_name = config.node.name;
     super::with_runtime(async move {
         println!("UniversalKVM Pairing\nNode: {local_name}\nPairing protocol: {PAIRING_VERSION}\nExpires after {PAIRING_TIMEOUT_SECS} seconds.");
         let task = async {
-            let (stream, role) = if let Some(target) = target {
-                let address = target_address(target)?;
-                println!("Connecting to: {address}");
-                let stream = tokio::net::TcpStream::connect(&address)
-                    .await
-                    .map_err(|e| format!("pairing connection: {e}"))?;
-                (stream, PairRole::Initiator)
-            } else {
-                let listener = tokio::net::TcpListener::bind(&bind)
-                    .await
-                    .map_err(|e| format!("pairing listener: {e}"))?;
-                println!(
-                    "Waiting for one pairing attempt on {}...",
-                    listener.local_addr().map_err(|e| e.to_string())?
-                );
-                let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
-                (stream, PairRole::Responder)
+            let mut discovery_service = None::<DiscoveryService>;
+            let mut advertised = None;
+            let (stream, role) = match target {
+                Target::Direct(host) => {
+                    let address = target_address(host)?;
+                    println!("Connecting to: {address}");
+                    (
+                        tokio::net::TcpStream::connect(&address)
+                            .await
+                            .map_err(|e| format!("pairing connection: {e}"))?,
+                        PairRole::Initiator,
+                    )
+                }
+                Target::Discover(interface) => {
+                    let candidate = super::discovery::select_candidate(interface).await?;
+                    let stream = connect_discovered(&candidate).await?;
+                    (stream, PairRole::Initiator)
+                }
+                Target::Listen {
+                    bind,
+                    interface,
+                    advertise,
+                } => {
+                    let listener = tokio::net::TcpListener::bind(&bind)
+                        .await
+                        .map_err(|e| format!("pairing listener: {e}"))?;
+                    let local_addr = listener.local_addr().map_err(|e| e.to_string())?;
+                    if advertise {
+                        let announcement = Advertisement {
+                            node_name: local_name.clone(),
+                            node_id: identity.id.clone(),
+                            pairing_port: local_addr.port(),
+                            control_port,
+                            pairing_version: PAIRING_VERSION,
+                            input_version: (
+                                ukvm_protocol::PROTOCOL_MAJOR,
+                                ukvm_protocol::PROTOCOL_MINOR,
+                            ),
+                        };
+                        match DiscoveryService::new(interface) {
+                            Ok(service) => match service.advertise(&announcement) {
+                                Ok(guard) => { advertised = Some(guard); discovery_service = Some(service);
+                                    println!("Discoverable by mDNS while pairing is active."); },
+                                Err(e) => eprintln!("Discovery advertisement unavailable: {e}; direct pairing still works."),
+                            },
+                            Err(e) => eprintln!("Discovery advertisement unavailable: {e}; direct pairing still works."),
+                        }
+                    }
+                    println!("Waiting for one pairing attempt on {local_addr}...");
+                    let stream = loop {
+                        tokio::select! {
+                            accepted = listener.accept() => break accepted.map_err(|e| e.to_string())?.0,
+                            _ = tokio::time::sleep(Duration::from_millis(250)), if discovery_service.is_some() => {
+                                if let Some(error) = discovery_service.as_ref().and_then(DiscoveryService::take_error) {
+                                    eprintln!("Discovery advertisement stopped: {error}; direct pairing remains available.");
+                                    advertised.take();
+                                    discovery_service.take();
+                                }
+                            }
+                        }
+                    };
+                    (stream, PairRole::Responder)
+                }
             };
-            pair_stream(stream, role, &identity, &local_name, &trust_dir, confirm)
+            let result = pair_stream(stream, role, &identity, &local_name, &trust_dir, confirm)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string());
+            drop(advertised);
+            drop(discovery_service);
+            result
         };
         let result = tokio::select! {
             result=tokio::time::timeout(Duration::from_secs(PAIRING_TIMEOUT_SECS),task)=>result.map_err(|_|"pairing expired".to_string()).and_then(|r|r),
@@ -139,6 +205,27 @@ pub fn pair(args: &[String]) -> ExitCode {
             Err(e) => super::fail(&e),
         }
     })
+}
+
+async fn connect_discovered(candidate: &DiscoveryResult) -> Result<tokio::net::TcpStream, String> {
+    let mut last_error = String::from("no usable address");
+    for address in candidate.pairing_addresses().iter().take(8) {
+        println!("Connecting to discovered address: {address}");
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect(address),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => last_error = "connection timed out".into(),
+        }
+    }
+    Err(format!(
+        "could not reach discovered node '{}': {last_error}; discovery is only an address hint",
+        candidate.display_name
+    ))
 }
 
 fn pair_status(args: &[String]) -> ExitCode {
@@ -297,4 +384,87 @@ fn pair_recover(args: &[String]) -> ExitCode {
             Err(e) => super::fail(&e),
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ukvm_network::{identity::Identity, trust::TrustStore};
+
+    #[test]
+    fn direct_address_still_uses_pairing_port() {
+        assert_eq!(
+            target_address("192.168.1.40").unwrap(),
+            "192.168.1.40:24801"
+        );
+        assert_eq!(target_address("[::1]").unwrap(), "[::1]:24801");
+        assert_eq!(
+            target_address("192.168.1.40:1234").unwrap(),
+            "192.168.1.40:1234"
+        );
+    }
+
+    #[tokio::test]
+    async fn discovered_address_hands_off_to_existing_protocol_two() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a-id")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b-id")).unwrap();
+        let a_dir = temp.path().join("a-trust");
+        let b_dir = temp.path().join("b-trust");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let candidate = DiscoveryResult {
+            service_instance: "untrusted.local.".into(),
+            display_name: "claimed-io".into(),
+            advertised_node_id: Some("0".repeat(64)),
+            pairing_version: PAIRING_VERSION,
+            input_version: Some((1, 1)),
+            control_port: Some(24800),
+            addresses: vec!["127.0.0.1:1".parse().unwrap(), address],
+        };
+        let responder = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            pair_stream(stream, PairRole::Responder, &b, "io", &b_dir, |_| async {
+                Ok(true)
+            })
+            .await
+            .unwrap()
+        };
+        let initiator = async {
+            let stream = connect_discovered(&candidate).await.unwrap();
+            pair_stream(
+                stream,
+                PairRole::Initiator,
+                &a,
+                "spectrum",
+                &a_dir,
+                |offer| async move {
+                    // The advertisement is a hint: the authenticated identity and
+                    // name come from the existing Protocol 2 exchange.
+                    assert_eq!(offer.remote_name, "io");
+                    Ok(true)
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let (a_result, b_result) = tokio::join!(initiator, responder);
+        assert!(a_result.created && b_result.created);
+        let a_peer = TrustStore::load(&a_dir)
+            .unwrap()
+            .find_id(&b.id)
+            .unwrap()
+            .clone();
+        let b_peer = TrustStore::load(&b_dir)
+            .unwrap()
+            .find_id(&a.id)
+            .unwrap()
+            .clone();
+        assert!(!a_peer.permissions.debug_input && !a_peer.permissions.control_this_node);
+        assert!(!b_peer.permissions.debug_input && !b_peer.permissions.control_this_node);
+        assert!(TrustStore::load(&a_dir)
+            .unwrap()
+            .find_id(&"0".repeat(64))
+            .is_none());
+    }
 }

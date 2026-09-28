@@ -16,7 +16,7 @@ use ring::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use snow::{Builder, TransportState};
-use std::{future::Future, net::IpAddr, path::Path};
+use std::{future::Future, net::SocketAddr, path::Path};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -352,10 +352,18 @@ fn verify_proof(cert_der: &[u8], context: &[u8], signature: &[u8]) -> Result<(),
         .map_err(|_| "remote node failed private-key proof".into())
 }
 
-fn address_hint(ip: IpAddr) -> Result<String, String> {
-    let host = match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
+fn address_hint(address: SocketAddr) -> Result<String, String> {
+    // Preserve IPv6 interface scopes from link-local discovery results.
+    // Address is a connection hint; the certificate remains authoritative.
+    let host = match address {
+        SocketAddr::V4(addr) => addr.ip().to_string(),
+        SocketAddr::V6(addr) => {
+            if addr.scope_id() == 0 {
+                format!("[{}]", addr.ip())
+            } else {
+                format!("[{}%{}]", addr.ip(), addr.scope_id())
+            }
+        }
     };
     resolve_address(&format!("{host}:{DEFAULT_PORT}"))
 }
@@ -406,7 +414,7 @@ async fn authenticate(
         return Err("local node name is invalid".into());
     }
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
-    let address = address_hint(stream.peer_addr().map_err(|e| e.to_string())?.ip())?;
+    let address = address_hint(stream.peer_addr().map_err(|e| e.to_string())?)?;
     let (noise, hash) = handshake(&mut stream, role).await?;
     let mut channel = SecureChannel { stream, noise };
     let mode = match role {
@@ -770,6 +778,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use tokio::net::TcpListener;
+
+    #[test]
+    fn address_hint_preserves_ipv6_scope() {
+        assert_eq!(
+            address_hint("[fe80::1%3]:24801".parse().unwrap()).unwrap(),
+            "[fe80::1%3]:24800"
+        );
+    }
 
     #[tokio::test]
     async fn two_fresh_nodes_pair_with_same_code_and_default_deny_then_use_mtls() {
