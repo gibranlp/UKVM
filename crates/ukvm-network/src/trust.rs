@@ -193,6 +193,10 @@ impl TrustStore {
             .iter()
             .position(|p| p.alias == name || p.id == name)
             .ok_or("unknown peer")?;
+        let peer = self.peers[index].clone();
+        // An explicit removal revokes any still-retained pairing receipt, so
+        // recovery cannot silently recreate this trust decision.
+        crate::pairing_state::revoke_for_peer(dir, &peer.id)?;
         let peer = self.peers.remove(index);
         if let Err(e) = self.save(dir) {
             self.peers.insert(index, peer);
@@ -282,7 +286,7 @@ fn private_dir(dir: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("path has no parent")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = parent.join(format!(

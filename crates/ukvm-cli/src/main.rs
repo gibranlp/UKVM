@@ -25,6 +25,9 @@ Commands:\n\
   stop      Stop UKVM (not implemented yet)\n\
   pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
   pair --bind ADDR:PORT  Test with an explicit temporary pairing listener\n\
+  pair status  Inspect pairing recovery records\n\
+  pair recover [HOST[:PORT] [TRANSACTION_ID]]  Reconcile confirmed pairing\n\
+  pair cleanup  Remove expired recovery records\n\
   devices   List peers (not implemented yet)\n\
   help      Show this help";
 

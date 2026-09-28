@@ -2,6 +2,7 @@
 
 pub mod identity;
 pub mod pairing;
+pub mod pairing_state;
 pub mod transport;
 pub mod trust;
 

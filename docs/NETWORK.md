@@ -58,7 +58,7 @@ Move the pointer through the **outer right edge of the large monitor** after the
 
 ## Validation evidence
 
-The configured Milestone 8 physical workflow was subsequently tested between PC A (`192.168.1.21`) and PC B (`192.168.1.40`); the user reported right-edge capture through alias, pinned mTLS and B's DebugSink worked flawlessly. This is physical proof of the configured DebugSink path, not input injection. Pairing has passed a separate two-identity localhost test; a physical pairing test remains pending.
+The configured Milestone 8 physical workflow was subsequently tested between PC A (`192.168.1.21`) and PC B (`192.168.1.40`); the user reported right-edge capture through alias, pinned mTLS and B's DebugSink worked flawlessly. This is physical proof of the configured DebugSink path, not input injection. First-contact pairing was also physically proven between these nodes: matching short codes, two human confirmations, reciprocal certificate pins, default-deny input permissions, and no `.der` transfer. Pairing protocol 2 now retains nonsecret recovery receipts for interrupted commits; the recovery path has local automated coverage and awaits physical regression. See [pairing](PAIRING.md).
 
 ### Configured workflow (Milestone 8)
 

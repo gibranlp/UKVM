@@ -2,6 +2,7 @@
 //! authenticate the exchange by comparing a transcript- and identity-bound SAS.
 use crate::{
     identity::{certificate_id, Identity},
+    pairing_state::{CommitState, PendingPairing},
     trust::{edit_lock, resolve_address, Peer, TrustStore},
     DEFAULT_PORT,
 };
@@ -15,23 +16,18 @@ use ring::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use snow::{Builder, TransportState};
-use std::{
-    fs,
-    future::Future,
-    net::IpAddr,
-    path::{Path, PathBuf},
-};
+use std::{future::Future, net::IpAddr, path::Path};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-pub const PAIRING_VERSION: u8 = 1;
+pub const PAIRING_VERSION: u8 = 2;
 pub const PAIRING_PORT: u16 = 24801;
 pub const PAIRING_TIMEOUT_SECS: u64 = 90;
-const MAGIC: &[u8] = b"UKVM-PAIR\0\x01";
+const MAGIC: &[u8] = b"UKVM-PAIR\0\x02";
 const NOISE: &str = "Noise_NN_25519_ChaChaPoly_BLAKE2s";
-const PROLOGUE: &[u8] = b"UniversalKVM pairing protocol 1";
+const PROLOGUE: &[u8] = b"UniversalKVM pairing protocol 2";
 const MAX_PAIR_FRAME: usize = 8192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,8 +51,58 @@ pub struct PairOutcome {
     pub created: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PairFailureKind {
+    Rejected,
+    Failed,
+    Uncertain,
+    Conflict,
+}
+
+#[derive(Debug)]
+pub struct PairFailure {
+    pub kind: PairFailureKind,
+    pub message: String,
+}
+
+impl PairFailure {
+    fn new(kind: PairFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for PairFailure {
+    fn from(message: String) -> Self {
+        Self::new(PairFailureKind::Failed, message)
+    }
+}
+
+impl From<&str> for PairFailure {
+    fn from(message: &str) -> Self {
+        Self::new(PairFailureKind::Failed, message)
+    }
+}
+
+impl std::fmt::Display for PairFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.kind, self.message)
+    }
+}
+
+impl std::error::Error for PairFailure {}
+
+#[derive(Clone, Debug)]
+pub enum RecoveryOutcome {
+    Completed(Peer),
+    RestartRequired,
+}
+
 #[derive(Deserialize, Serialize)]
 enum PairMessage {
+    Mode(PairMode),
     Identity {
         node_id: String,
         cert: Vec<u8>,
@@ -66,6 +112,16 @@ enum PairMessage {
     Decision(bool),
     Ready(bool),
     Commit(bool),
+    RecoveryStatus {
+        transaction_id: String,
+        committed: bool,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+enum PairMode {
+    New,
+    Recover(String),
 }
 
 fn codec() -> impl Options {
@@ -317,61 +373,32 @@ fn preflight(store: &TrustStore, id: &str, name: &str) -> Result<Option<Peer>, S
     Ok(None)
 }
 
-struct CommitGuard {
-    dir: PathBuf,
-    created_id: Option<String>,
-    _lock: fs::File,
-}
-impl Drop for CommitGuard {
-    fn drop(&mut self) {
-        if let Some(id) = self.created_id.take() {
-            match TrustStore::load(&self.dir)
-                .and_then(|mut store| store.remove(&self.dir, &id).map(|_| ()))
-            {
-                Ok(()) => {}
-                Err(e) => eprintln!("ukvm: pairing rollback failed for {id}: {e}"),
-            }
-        }
-    }
+fn transaction_id(hash: &[u8], initiator_cert: &[u8], responder_cert: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"UniversalKVM pairing transaction v1");
+    hash_field(&mut digest, hash);
+    hash_field(&mut digest, initiator_cert);
+    hash_field(&mut digest, responder_cert);
+    format!("{:x}", digest.finalize())
 }
 
-fn commit_local(
-    trust_dir: &Path,
-    node_id: &str,
-    name: String,
+struct Authenticated {
+    channel: SecureChannel,
+    hash: Vec<u8>,
+    remote_id: String,
+    remote_cert: Vec<u8>,
+    remote_name: String,
     address: String,
-    cert: &[u8],
-) -> Result<(Peer, bool, CommitGuard), String> {
-    let lock = edit_lock(trust_dir)?;
-    let mut store = TrustStore::load(trust_dir)?;
-    let existing = preflight(&store, node_id, &name)?;
-    let (peer, created) = if let Some(peer) = existing {
-        (peer, false)
-    } else {
-        (store.import(trust_dir, name, Some(address), cert)?, true)
-    };
-    let guard = CommitGuard {
-        dir: trust_dir.to_path_buf(),
-        created_id: created.then(|| node_id.to_string()),
-        _lock: lock,
-    };
-    Ok((peer, created, guard))
+    mode: PairMode,
 }
 
-/// Run a single first-contact exchange. The caller owns the overall timeout
-/// and cancellation; dropping this future rolls back any unacknowledged new trust.
-pub async fn pair_stream<F, Fut>(
+async fn authenticate(
     mut stream: TcpStream,
     role: PairRole,
     local: &Identity,
     local_name: &str,
-    trust_dir: &Path,
-    confirm: F,
-) -> Result<PairOutcome, String>
-where
-    F: FnOnce(PairOffer) -> Fut,
-    Fut: Future<Output = Result<bool, String>>,
-{
+    expected: PairMode,
+) -> Result<Authenticated, String> {
     if local_name.is_empty()
         || local_name.chars().count() > 63
         || local_name.chars().any(char::is_control)
@@ -380,20 +407,43 @@ where
     }
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
     let address = address_hint(stream.peer_addr().map_err(|e| e.to_string())?.ip())?;
-    let (noise, handshake_hash) = handshake(&mut stream, role).await?;
+    let (noise, hash) = handshake(&mut stream, role).await?;
     let mut channel = SecureChannel { stream, noise };
-    let local_cert = local.tls_cert().as_ref().to_vec();
-    let local_message = PairMessage::Identity {
-        node_id: local.id.clone(),
-        cert: local_cert.clone(),
-        name: local_name.into(),
+    let mode = match role {
+        PairRole::Initiator => {
+            channel.send(&PairMessage::Mode(expected.clone())).await?;
+            match channel.receive().await? {
+                PairMessage::Mode(mode) if mode == expected => mode,
+                _ => return Err("pairing mode mismatch".into()),
+            }
+        }
+        PairRole::Responder => {
+            let PairMessage::Mode(mode) = channel.receive().await? else {
+                return Err("expected pairing mode".into());
+            };
+            let allowed = matches!(
+                (&mode, &expected),
+                (PairMode::New, PairMode::New) | (PairMode::Recover(_), PairMode::Recover(_))
+            );
+            if !allowed {
+                return Err("pairing mode mismatch".into());
+            }
+            channel.send(&PairMessage::Mode(mode.clone())).await?;
+            mode
+        }
     };
-    let remote_message = channel.exchange(local_message).await?;
+    let local_cert = local.tls_cert().as_ref().to_vec();
     let PairMessage::Identity {
         node_id,
         cert,
         name,
-    } = remote_message
+    } = channel
+        .exchange(PairMessage::Identity {
+            node_id: local.id.clone(),
+            cert: local_cert.clone(),
+            name: local_name.into(),
+        })
+        .await?
     else {
         return Err("expected remote pairing identity".into());
     };
@@ -403,18 +453,142 @@ where
         PairRole::Responder => (&cert[..], &local_cert[..], name.as_str(), local_name),
     };
     let context = proof_context(
-        &handshake_hash,
+        &hash,
         initiator_cert,
         responder_cert,
         initiator_name,
         responder_name,
     );
-    let local_proof = sign_proof(local, &context)?;
-    let remote_proof = channel.exchange(PairMessage::Proof(local_proof)).await?;
-    let PairMessage::Proof(remote_signature) = remote_proof else {
+    let PairMessage::Proof(signature) = channel
+        .exchange(PairMessage::Proof(sign_proof(local, &context)?))
+        .await?
+    else {
         return Err("expected remote identity proof".into());
     };
-    verify_proof(&cert, &context, &remote_signature)?;
+    verify_proof(&cert, &context, &signature)?;
+    Ok(Authenticated {
+        channel,
+        hash,
+        remote_id: node_id,
+        remote_cert: cert,
+        remote_name: name,
+        address,
+        mode,
+    })
+}
+
+fn commit_local(trust_dir: &Path, pending: &mut PendingPairing) -> Result<(Peer, bool), String> {
+    let _lock = edit_lock(trust_dir)?;
+    let durable = PendingPairing::load(trust_dir, &pending.transaction_id)?;
+    if durable.local_id != pending.local_id
+        || durable.remote_id != pending.remote_id
+        || durable.remote_certificate != pending.remote_certificate
+        || durable.state != pending.state
+    {
+        return Err("pairing recovery evidence changed before trust commit".into());
+    }
+    let mut store = TrustStore::load(trust_dir)?;
+    let existing = preflight(&store, &pending.remote_id, &pending.remote_name)?;
+    let (peer, created) = if let Some(peer) = existing {
+        let saved = std::fs::read(crate::trust::cert_path(trust_dir, &peer.id))
+            .map_err(|e| e.to_string())?;
+        if saved != pending.remote_certificate {
+            return Err("trusted certificate conflicts with pairing".into());
+        }
+        (peer, false)
+    } else {
+        (
+            store.import(
+                trust_dir,
+                pending.remote_name.clone(),
+                Some(pending.remote_address.clone()),
+                &pending.remote_certificate,
+            )?,
+            true,
+        )
+    };
+    // The Prepared record was durable before this write. If this update fails or
+    // the process dies, recovery compares that record with the actual trust store.
+    pending.state = CommitState::CommittedLocally;
+    pending.save_locked(trust_dir)?;
+    Ok((peer, created))
+}
+
+fn complete_local(trust_dir: &Path, pending: &mut PendingPairing) -> Result<(), String> {
+    let _lock = edit_lock(trust_dir)?;
+    if pending.local_peer(trust_dir)?.is_none() {
+        return Err("trusted peer disappeared before completion".into());
+    }
+    pending.state = CommitState::Complete;
+    pending.save_locked(trust_dir)
+}
+
+/// Run a single first-contact exchange. Once both users confirm, interrupted
+/// commits retain durable recovery evidence instead of deleting trusted peers.
+pub async fn pair_stream<F, Fut>(
+    stream: TcpStream,
+    role: PairRole,
+    local: &Identity,
+    local_name: &str,
+    trust_dir: &Path,
+    confirm: F,
+) -> Result<PairOutcome, PairFailure>
+where
+    F: FnOnce(PairOffer) -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    pair_stream_inner(
+        stream,
+        role,
+        local,
+        local_name,
+        trust_dir,
+        confirm,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FaultPoint {
+    AfterLocalConfirmation,
+    AfterMutualConfirmation,
+    AfterPendingWrite,
+    BeforeLocalCommit,
+    AfterLocalCommit,
+    AfterCommitSend,
+}
+
+async fn pair_stream_inner<F, Fut>(
+    stream: TcpStream,
+    role: PairRole,
+    local: &Identity,
+    local_name: &str,
+    trust_dir: &Path,
+    confirm: F,
+    #[cfg(test)] fault: Option<FaultPoint>,
+) -> Result<PairOutcome, PairFailure>
+where
+    F: FnOnce(PairOffer) -> Fut,
+    Fut: Future<Output = Result<bool, String>>,
+{
+    let Authenticated {
+        mut channel,
+        hash: handshake_hash,
+        remote_id: node_id,
+        remote_cert: cert,
+        remote_name: name,
+        address,
+        ..
+    } = authenticate(stream, role, local, local_name, PairMode::New).await?;
+    let local_cert = local.tls_cert().as_ref().to_vec();
+    let (initiator_cert, responder_cert, initiator_name, responder_name) = match role {
+        PairRole::Initiator => (&local_cert[..], &cert[..], local_name, name.as_str()),
+        PairRole::Responder => (&cert[..], &local_cert[..], name.as_str(), local_name),
+    };
+    let tx = transaction_id(&handshake_hash, initiator_cert, responder_cert);
     let code = verification_code(
         &handshake_hash,
         initiator_cert,
@@ -422,7 +596,8 @@ where
         initiator_name,
         responder_name,
     );
-    let existing = preflight(&TrustStore::load(trust_dir)?, &node_id, &name)?;
+    let existing = preflight(&TrustStore::load(trust_dir)?, &node_id, &name)
+        .map_err(|e| PairFailure::new(PairFailureKind::Conflict, e))?;
     let offer = PairOffer {
         remote_name: name.clone(),
         remote_id: node_id.clone(),
@@ -431,34 +606,158 @@ where
         already_trusted_as: existing.as_ref().map(|p| p.alias.clone()),
     };
     let accepted = confirm(offer).await?;
+    #[cfg(test)]
+    if fault == Some(FaultPoint::AfterLocalConfirmation) {
+        return Err("injected interruption after local confirmation".into());
+    }
     match channel.exchange(PairMessage::Decision(accepted)).await? {
         PairMessage::Decision(true) if accepted => {}
-        PairMessage::Decision(_) => return Err("pairing rejected by a user".into()),
+        PairMessage::Decision(_) => {
+            return Err(PairFailure::new(
+                PairFailureKind::Rejected,
+                "pairing rejected by a user",
+            ))
+        }
         _ => return Err("expected pairing decision".into()),
     }
-    // Recheck after confirmation, then let the other side know this node can commit.
+    #[cfg(test)]
+    if fault == Some(FaultPoint::AfterMutualConfirmation) {
+        return Err("injected interruption after mutual confirmation".into());
+    }
+    // Mutual confirmation is durable before either side is allowed to commit.
+    let mut pending = PendingPairing::new(
+        tx.clone(),
+        local.id.clone(),
+        node_id.clone(),
+        cert,
+        name,
+        address,
+    )?;
     let ready = TrustStore::load(trust_dir)
-        .and_then(|store| preflight(&store, &node_id, &name).map(|_| ()))
+        .and_then(|store| preflight(&store, &node_id, &pending.remote_name).map(|_| ()))
+        .and_then(|_| pending.save(trust_dir))
         .is_ok();
+    #[cfg(test)]
+    if fault == Some(FaultPoint::AfterPendingWrite) {
+        return Err("injected interruption after pending write".into());
+    }
     match channel.exchange(PairMessage::Ready(ready)).await? {
         PairMessage::Ready(true) if ready => {}
-        PairMessage::Ready(_) => return Err("peer cannot commit pairing trust".into()),
+        PairMessage::Ready(_) => {
+            if ready {
+                let _ = pending.remove(trust_dir);
+            }
+            return Err("pairing failed before trust commit; retry a new ceremony".into());
+        }
         _ => return Err("expected pairing ready message".into()),
     }
-    let (peer, created, mut guard) = match commit_local(trust_dir, &node_id, name, address, &cert) {
+    #[cfg(test)]
+    if fault == Some(FaultPoint::BeforeLocalCommit) {
+        return Err("injected interruption before local commit".into());
+    }
+    let (peer, created) = match commit_local(trust_dir, &mut pending) {
         Ok(value) => value,
         Err(err) => {
             let _ = channel.send(&PairMessage::Commit(false)).await;
-            return Err(err);
+            return Err(PairFailure::new(PairFailureKind::Uncertain, format!("pairing commit failed or is uncertain (transaction {tx}): {err}; run 'ukvm pair status'")));
         }
     };
-    match channel.exchange(PairMessage::Commit(true)).await? {
-        PairMessage::Commit(true) => {
-            guard.created_id = None;
+    #[cfg(test)]
+    if fault == Some(FaultPoint::AfterLocalCommit) {
+        return Err("injected interruption after local commit".into());
+    }
+    channel.send(&PairMessage::Commit(true)).await.map_err(|err| PairFailure::new(PairFailureKind::Uncertain, format!("pairing outcome uncertain (transaction {tx}): {err}; run 'ukvm pair status' and recover")))?;
+    #[cfg(test)]
+    if fault == Some(FaultPoint::AfterCommitSend) {
+        return Err("injected interruption after commit send".into());
+    }
+    match channel.receive().await {
+        Err(err) => Err(PairFailure::new(PairFailureKind::Uncertain, format!("pairing outcome uncertain (transaction {tx}): {err}; run 'ukvm pair status' and recover"))),
+        Ok(PairMessage::Commit(true)) => {
+            complete_local(trust_dir, &mut pending).map_err(|err| PairFailure::new(PairFailureKind::Uncertain, format!("both commits observed, but local receipt update failed (transaction {tx}): {err}")))?;
             Ok(PairOutcome { peer, created })
         }
-        PairMessage::Commit(false) => Err("remote trust-store write failed".into()),
-        _ => Err("expected pairing commit acknowledgement".into()),
+        Ok(PairMessage::Commit(false)) => Err(PairFailure::new(PairFailureKind::Uncertain, format!("remote trust-store write failed; local commit may need recovery (transaction {tx}); run 'ukvm pair status'"))),
+        Ok(_) => Err(PairFailure::new(PairFailureKind::Uncertain, format!("pairing outcome uncertain (transaction {tx}): invalid final acknowledgement; run 'ukvm pair status'"))),
+    }
+}
+
+/// Reconcile only a previously confirmed, unexpired transaction. The fresh
+/// Noise channel and P-256 identity proofs authenticate both pending records.
+pub async fn recover_stream(
+    stream: TcpStream,
+    role: PairRole,
+    local: &Identity,
+    local_name: &str,
+    trust_dir: &Path,
+    transaction: Option<&str>,
+) -> Result<RecoveryOutcome, String> {
+    let expected = PairMode::Recover(transaction.unwrap_or_default().to_string());
+    if role == PairRole::Initiator && transaction.is_none() {
+        return Err("recovery initiator needs a transaction ID".into());
+    }
+    let Authenticated {
+        mut channel,
+        remote_id,
+        remote_cert,
+        mode,
+        ..
+    } = authenticate(stream, role, local, local_name, expected).await?;
+    let PairMode::Recover(tx) = mode else {
+        return Err("expected recovery mode".into());
+    };
+    let mut pending = PendingPairing::load(trust_dir, &tx)?;
+    if pending.local_id != local.id
+        || pending.remote_id != remote_id
+        || pending.remote_certificate != remote_cert
+    {
+        return Err("recovery transaction identity or certificate mismatch".into());
+    }
+    let committed = pending.local_peer(trust_dir)?.is_some();
+    if !committed && pending.state != CommitState::Prepared {
+        return Err(
+            "previously committed trust was removed; start a new human-confirmed ceremony".into(),
+        );
+    }
+    let PairMessage::RecoveryStatus {
+        transaction_id: peer_tx,
+        committed: remote_committed,
+    } = channel
+        .exchange(PairMessage::RecoveryStatus {
+            transaction_id: tx.clone(),
+            committed,
+        })
+        .await?
+    else {
+        return Err("expected recovery status".into());
+    };
+    if peer_tx != tx {
+        return Err("recovery transaction mismatch".into());
+    }
+    if !committed && !remote_committed {
+        return Ok(RecoveryOutcome::RestartRequired);
+    }
+    let peer = if committed {
+        pending
+            .local_peer(trust_dir)?
+            .ok_or("trusted peer disappeared during recovery")?
+    } else {
+        commit_local(trust_dir, &mut pending)?.0
+    };
+    match channel.exchange(PairMessage::Commit(true)).await {
+        Ok(PairMessage::Commit(true)) => {
+            complete_local(trust_dir, &mut pending)?;
+            Ok(RecoveryOutcome::Completed(peer))
+        }
+        Ok(PairMessage::Commit(false)) => Err(format!(
+            "remote recovery commit failed; transaction {tx} remains uncertain"
+        )),
+        Ok(_) => Err(format!(
+            "invalid recovery acknowledgement; transaction {tx} remains uncertain"
+        )),
+        Err(err) => Err(format!(
+            "recovery acknowledgement lost for transaction {tx}: {err}; retry recovery"
+        )),
     }
 }
 
@@ -466,7 +765,10 @@ where
 mod tests {
     use super::*;
     use crate::{transport, trust::SessionPermission};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+    };
     use tokio::net::TcpListener;
 
     #[tokio::test]
@@ -610,8 +912,8 @@ mod tests {
             .await
         };
         let (ar, br) = tokio::join!(initiator, responder);
-        assert!(ar.is_err());
-        assert!(br.is_err());
+        assert_eq!(ar.unwrap_err().kind, PairFailureKind::Rejected);
+        assert_eq!(br.unwrap_err().kind, PairFailureKind::Rejected);
         assert!(TrustStore::load(&a_dir).unwrap().peers.is_empty());
         assert!(TrustStore::load(&b_dir).unwrap().peers.is_empty());
     }
@@ -656,7 +958,7 @@ mod tests {
         };
         let initiator = async {
             let mut stream = TcpStream::connect(addr).await.unwrap();
-            write_raw(&mut stream, b"UKVM-PAIR\0\x02").await.unwrap();
+            write_raw(&mut stream, b"UKVM-PAIR\0\x01").await.unwrap();
         };
         let (error, _) = tokio::join!(responder, initiator);
         assert!(error.contains("version mismatch"));
@@ -790,7 +1092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_failure_rolls_back_other_nodes_new_trust() {
+    async fn storage_failure_leaves_detectable_one_sided_trust_for_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let a = Identity::load_or_create(&temp.path().join("a-identity")).unwrap();
         let b = Identity::load_or_create(&temp.path().join("b-identity")).unwrap();
@@ -821,8 +1123,269 @@ mod tests {
         let (ar, br) = tokio::join!(initiator, responder);
         assert!(ar.is_err());
         assert!(br.is_err());
-        assert!(TrustStore::load(&a_dir).unwrap().peers.is_empty());
+        assert!(TrustStore::load(&a_dir).unwrap().find_id(&b.id).is_some());
         assert!(TrustStore::load(&b_dir).unwrap().peers.is_empty());
+        assert_eq!(
+            crate::pairing_state::list(&a_dir).unwrap()[0].status(&a_dir),
+            crate::pairing_state::LocalStatus::CommittedUnconfirmed
+        );
+        assert_eq!(
+            crate::pairing_state::list(&b_dir).unwrap()[0].status(&b_dir),
+            crate::pairing_state::LocalStatus::Prepared
+        );
+    }
+
+    async fn recovery_trial(
+        a_committed: bool,
+        b_committed: bool,
+    ) -> (RecoveryOutcome, RecoveryOutcome, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a-identity")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b-identity")).unwrap();
+        let a_dir = temp.path().join("a-trust");
+        let b_dir = temp.path().join("b-trust");
+        let tx = transaction_id(&[7; 32], a.tls_cert().as_ref(), b.tls_cert().as_ref());
+        let a_record = PendingPairing::new(
+            tx.clone(),
+            a.id.clone(),
+            b.id.clone(),
+            b.tls_cert().as_ref().to_vec(),
+            "io".into(),
+            "127.0.0.1:24800".into(),
+        )
+        .unwrap();
+        let b_record = PendingPairing::new(
+            tx.clone(),
+            b.id.clone(),
+            a.id.clone(),
+            a.tls_cert().as_ref().to_vec(),
+            "spectrum".into(),
+            "127.0.0.1:24800".into(),
+        )
+        .unwrap();
+        a_record.save(&a_dir).unwrap();
+        b_record.save(&b_dir).unwrap();
+        if a_committed {
+            let mut store = TrustStore::default();
+            store
+                .import(
+                    &a_dir,
+                    "io".into(),
+                    Some("10.0.0.9".into()),
+                    b.tls_cert().as_ref(),
+                )
+                .unwrap();
+            store
+                .set_permission(&a_dir, "io", SessionPermission::DebugInput, true)
+                .unwrap();
+        }
+        if b_committed {
+            TrustStore::default()
+                .import(&b_dir, "spectrum".into(), None, a.tls_cert().as_ref())
+                .unwrap();
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let responder = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            recover_stream(stream, PairRole::Responder, &b, "io", &b_dir, None).await
+        };
+        let initiator = async {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            recover_stream(
+                stream,
+                PairRole::Initiator,
+                &a,
+                "spectrum",
+                &a_dir,
+                Some(&tx),
+            )
+            .await
+        };
+        let (ar, br) = tokio::join!(initiator, responder);
+        (ar.unwrap(), br.unwrap(), temp)
+    }
+
+    #[tokio::test]
+    async fn recovery_reconciles_either_one_sided_commit_and_preserves_permissions() {
+        for (a_committed, b_committed) in [(true, false), (false, true), (true, true)] {
+            let (ar, br, temp) = recovery_trial(a_committed, b_committed).await;
+            assert!(matches!(ar, RecoveryOutcome::Completed(_)));
+            assert!(matches!(br, RecoveryOutcome::Completed(_)));
+            let a_dir = temp.path().join("a-trust");
+            let b_dir = temp.path().join("b-trust");
+            let a = Identity::load_or_create(&temp.path().join("a-identity")).unwrap();
+            let b = Identity::load_or_create(&temp.path().join("b-identity")).unwrap();
+            let a_peer = TrustStore::load(&a_dir)
+                .unwrap()
+                .find_id(&b.id)
+                .unwrap()
+                .clone();
+            let b_peer = TrustStore::load(&b_dir)
+                .unwrap()
+                .find_id(&a.id)
+                .unwrap()
+                .clone();
+            assert_eq!(a_peer.permissions.debug_input, a_committed);
+            assert!(!b_peer.permissions.debug_input);
+            assert!(!a_peer.permissions.control_this_node);
+            assert!(!b_peer.permissions.control_this_node);
+            assert_eq!(
+                a_peer.address.as_deref(),
+                Some(if a_committed {
+                    "10.0.0.9"
+                } else {
+                    "127.0.0.1:24800"
+                })
+            );
+            assert_eq!(
+                crate::pairing_state::list(&a_dir).unwrap()[0].status(&a_dir),
+                crate::pairing_state::LocalStatus::Complete
+            );
+            assert_eq!(
+                crate::pairing_state::list(&b_dir).unwrap()[0].status(&b_dir),
+                crate::pairing_state::LocalStatus::Complete
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_of_neither_committed_requires_new_ceremony() {
+        let (ar, br, temp) = recovery_trial(false, false).await;
+        assert!(matches!(ar, RecoveryOutcome::RestartRequired));
+        assert!(matches!(br, RecoveryOutcome::RestartRequired));
+        for dir in [temp.path().join("a-trust"), temp.path().join("b-trust")] {
+            assert!(TrustStore::load(&dir).unwrap().peers.is_empty());
+            assert_eq!(crate::pairing_state::list(&dir).unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_unrelated_transaction_and_missing_remote_evidence() {
+        let temp = tempfile::tempdir().unwrap();
+        let a = Identity::load_or_create(&temp.path().join("a-identity")).unwrap();
+        let b = Identity::load_or_create(&temp.path().join("b-identity")).unwrap();
+        let a_dir = temp.path().join("a-trust");
+        let b_dir = temp.path().join("b-trust");
+        let tx = "a".repeat(64);
+        let record = PendingPairing::new(
+            tx.clone(),
+            a.id.clone(),
+            b.id.clone(),
+            b.tls_cert().as_ref().to_vec(),
+            "io".into(),
+            "127.0.0.1:24800".into(),
+        )
+        .unwrap();
+        record.save(&a_dir).unwrap();
+        TrustStore::default()
+            .import(&a_dir, "io".into(), None, b.tls_cert().as_ref())
+            .unwrap();
+        for claimed_tx in [tx.as_str(), &"b".repeat(64)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let responder = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                recover_stream(stream, PairRole::Responder, &b, "io", &b_dir, None).await
+            };
+            let initiator = async {
+                let stream = TcpStream::connect(addr).await.unwrap();
+                recover_stream(
+                    stream,
+                    PairRole::Initiator,
+                    &a,
+                    "spectrum",
+                    &a_dir,
+                    Some(claimed_tx),
+                )
+                .await
+            };
+            let (ar, br) = tokio::join!(initiator, responder);
+            assert!(ar.is_err());
+            assert!(br.is_err());
+            assert!(TrustStore::load(&b_dir).unwrap().peers.is_empty());
+        }
+        assert!(TrustStore::load(&a_dir).unwrap().find_id(&b.id).is_some());
+    }
+
+    #[tokio::test]
+    async fn injected_commit_boundary_interruptions_are_inspectable_and_safe() {
+        for point in [
+            FaultPoint::AfterLocalConfirmation,
+            FaultPoint::AfterMutualConfirmation,
+            FaultPoint::AfterPendingWrite,
+            FaultPoint::BeforeLocalCommit,
+            FaultPoint::AfterLocalCommit,
+            FaultPoint::AfterCommitSend,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let a = Identity::load_or_create(&temp.path().join("a-id")).unwrap();
+            let b = Identity::load_or_create(&temp.path().join("b-id")).unwrap();
+            let a_dir = temp.path().join("a-trust");
+            let b_dir = temp.path().join("b-trust");
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let responder = async {
+                let (stream, _) = listener.accept().await.unwrap();
+                pair_stream(stream, PairRole::Responder, &b, "io", &b_dir, |_| async {
+                    Ok(true)
+                })
+                .await
+            };
+            let initiator = async {
+                let stream = TcpStream::connect(addr).await.unwrap();
+                pair_stream_inner(
+                    stream,
+                    PairRole::Initiator,
+                    &a,
+                    "spectrum",
+                    &a_dir,
+                    |_| async { Ok(true) },
+                    Some(point),
+                )
+                .await
+            };
+            let (ar, _br) = tokio::join!(initiator, responder);
+            assert!(ar.is_err(), "{point:?}");
+            let a_store = TrustStore::load(&a_dir).unwrap();
+            let b_store = TrustStore::load(&b_dir).unwrap();
+            for (store, remote) in [(&a_store, &b.id), (&b_store, &a.id)] {
+                assert!(
+                    store
+                        .authorize(remote, SessionPermission::DebugInput)
+                        .is_err(),
+                    "{point:?}"
+                );
+                assert!(
+                    store
+                        .authorize(remote, SessionPermission::ControlThisNode)
+                        .is_err(),
+                    "{point:?}"
+                );
+            }
+            let a_records = crate::pairing_state::list(&a_dir).unwrap();
+            let b_records = crate::pairing_state::list(&b_dir).unwrap();
+            if a_store.find_id(&b.id).is_some() {
+                assert_eq!(a_records.len(), 1, "{point:?}");
+            }
+            if b_store.find_id(&a.id).is_some() {
+                assert_eq!(b_records.len(), 1, "{point:?}");
+            }
+            if matches!(
+                point,
+                FaultPoint::AfterLocalConfirmation
+                    | FaultPoint::AfterMutualConfirmation
+                    | FaultPoint::AfterPendingWrite
+            ) {
+                assert!(a_store.peers.is_empty(), "{point:?}");
+            }
+            if matches!(
+                point,
+                FaultPoint::AfterLocalCommit | FaultPoint::AfterCommitSend
+            ) {
+                assert!(a_store.find_id(&b.id).is_some(), "{point:?}");
+            }
+        }
     }
 
     #[tokio::test]
@@ -957,27 +1520,36 @@ mod tests {
     }
 
     #[test]
-    fn dropped_commit_guard_removes_unacknowledged_trust() {
+    fn committed_trust_survives_lost_acknowledgement() {
         let temp = tempfile::tempdir().unwrap();
         let identity = Identity::load_or_create(&temp.path().join("identity")).unwrap();
+        let local = Identity::load_or_create(&temp.path().join("local")).unwrap();
         let dir = temp.path().join("trust");
-        let lock = edit_lock(&dir).unwrap();
-        let mut store = TrustStore::default();
-        store
-            .import(
-                &dir,
-                "peer".into(),
-                None,
-                &fs::read(identity.cert_path).unwrap(),
-            )
-            .unwrap();
-        let guard = CommitGuard {
-            dir: dir.clone(),
-            created_id: Some(identity.id),
-            _lock: lock,
-        };
-        drop(guard);
-        assert!(TrustStore::load(&dir).unwrap().peers.is_empty());
+        let tx = transaction_id(
+            &[9; 32],
+            local.tls_cert().as_ref(),
+            identity.tls_cert().as_ref(),
+        );
+        let mut pending = PendingPairing::new(
+            tx.clone(),
+            local.id,
+            identity.id.clone(),
+            fs::read(identity.cert_path).unwrap(),
+            "peer".into(),
+            "127.0.0.1:24800".into(),
+        )
+        .unwrap();
+        pending.save(&dir).unwrap();
+        commit_local(&dir, &mut pending).unwrap();
+        drop(pending);
+        assert!(TrustStore::load(&dir)
+            .unwrap()
+            .find_id(&identity.id)
+            .is_some());
+        assert_eq!(
+            PendingPairing::load(&dir, &tx).unwrap().status(&dir),
+            crate::pairing_state::LocalStatus::CommittedUnconfirmed
+        );
     }
 
     #[test]
