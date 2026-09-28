@@ -4,6 +4,8 @@ mod discovery;
 mod network;
 mod pairing;
 mod settings;
+mod setup;
+mod setup_model;
 
 const HELP: &str = "UniversalKVM\n\
 Usage: ukvm <command>\n\
@@ -32,6 +34,7 @@ Commands:\n\
   pair recover [HOST[:PORT] [TRANSACTION_ID]]  Reconcile confirmed pairing\n\
   pair cleanup  Remove expired recovery records\n\
   discover [--interface NAME]  Browse nearby pairing nodes for four seconds\n\
+  setup [--interface NAME] [--host HOST] [--debug]  Guide identity, trust, permissions, and layout\n\
   devices   List peers (not implemented yet)\n\
   help      Show this help";
 
@@ -60,6 +63,7 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "layout" => settings::layout(rest),
         [command, rest @ ..] if command == "pair" => pairing::pair(rest),
         [command, rest @ ..] if command == "discover" => discovery::discover(rest),
+        [command, rest @ ..] if command == "setup" => setup::setup(rest),
         [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
         [command] if command == "status" => settings::status(),
         [command] if command == "doctor" => doctor(),

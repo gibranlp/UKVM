@@ -4,7 +4,7 @@ UKVM eventually controls a remote keyboard and pointer. Treat its network protoc
 
 ## Trust and authorization
 
-- Discovery provides endpoint candidates, never trust. A discovered name or address can be spoofed.
+- Discovery provides endpoint candidates, never trust. A discovered name, address or Node ID hint can be spoofed. Guided setup classifies these as hints, requires pinned mTLS before updating a trusted peer's address, and otherwise keeps the existing pinned record unchanged.
 - Pairing requires explicit approval on both machines and comparison of a short value bound to a fresh encrypted exchange and both public identities. It creates only the existing pinned trust records. No auto-trust, default shared secret or input-permission grant. See [pairing threat model and protocol](PAIRING.md).
 - Interrupted pairing commits keep a nonsecret, time-limited record of mutual confirmation. Recovery requires a fresh authenticated exchange with the exact original certificate and matching transaction record on both machines. An acknowledgement loss leaves an explicit uncertain state; it never silently substitutes a peer identity or resets permissions. Explicit peer removal invalidates recovery receipts for that identity.
 - Persist stable peer identities and trust decisions separately from the human-readable config. Use OS protected user storage or a strictly permissioned per-user data directory, with secret storage reviewed per OS. Never log private keys, verification secrets, or raw keystrokes.

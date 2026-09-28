@@ -36,3 +36,30 @@ fn version_identifies_discovery_build() {
         .unwrap()
         .contains("discovery mDNS/DNS-SD"));
 }
+
+#[test]
+fn setup_help_and_noninteractive_safety() {
+    let binary = env!("CARGO_BIN_EXE_ukvm");
+    let help = Command::new(binary)
+        .args(["setup", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.starts_with("Usage: ukvm setup"));
+    assert!(text.contains("--interface NAME"));
+    assert!(text.contains("--host HOST"));
+    let temp = tempfile::tempdir().unwrap();
+    let rejected = Command::new(binary)
+        .arg("setup")
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8(rejected.stderr)
+        .unwrap()
+        .contains("interactive terminal"));
+    assert!(!temp.path().join("data/ukvm/node.key").exists());
+}

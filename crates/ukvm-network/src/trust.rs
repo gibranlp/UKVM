@@ -224,6 +224,31 @@ impl TrustStore {
         }
         self.save(dir)
     }
+    /// Update an authenticated peer's connection hint without changing its
+    /// certificate, alias, permissions, or layout. Caller must verify the new
+    /// endpoint against the pinned certificate before invoking this method.
+    pub fn set_address(&mut self, dir: &Path, id: &str, address: &str) -> Result<(), String> {
+        let address = resolve_address(address)?;
+        let peer = self.find_id(id).ok_or("unknown peer")?;
+        if peer.address.as_deref() == Some(address.as_str()) {
+            return Ok(());
+        }
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|peer| peer.id == id)
+            .ok_or("unknown peer")?;
+        let old = peer.address.replace(address);
+        if let Err(error) = self.save(dir) {
+            self.peers
+                .iter_mut()
+                .find(|peer| peer.id == id)
+                .ok_or("unknown peer")?
+                .address = old;
+            return Err(error);
+        }
+        Ok(())
+    }
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         private_dir(dir)?;
@@ -354,6 +379,33 @@ mod tests {
             .is_ok());
         store.remove(&dir, "io").unwrap();
         assert!(TrustStore::load(&dir).unwrap().peers.is_empty());
+    }
+
+    #[test]
+    fn address_hint_update_preserves_identity_and_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let identity = Identity::load_or_create(&temp.path().join("identity")).unwrap();
+        let dir = temp.path().join("trust");
+        let mut store = TrustStore::default();
+        let peer = store
+            .import(
+                &dir,
+                "io".into(),
+                Some("192.168.1.40".into()),
+                identity.tls_cert().as_ref(),
+            )
+            .unwrap();
+        store
+            .set_permission(&dir, &peer.id, SessionPermission::DebugInput, true)
+            .unwrap();
+        store.set_address(&dir, &peer.id, "192.168.1.55").unwrap();
+        store.set_address(&dir, &peer.id, "192.168.1.55").unwrap();
+        let restored = TrustStore::load(&dir).unwrap();
+        let updated = restored.find_id(&peer.id).unwrap();
+        assert_eq!(updated.alias, "io");
+        assert_eq!(updated.address.as_deref(), Some("192.168.1.55:24800"));
+        assert!(updated.permissions.debug_input);
+        assert!(!updated.permissions.control_this_node);
     }
     #[test]
     fn default_port() {

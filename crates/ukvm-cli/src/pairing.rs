@@ -14,7 +14,7 @@ use ukvm_network::{
     trust::default_trust_dir,
 };
 
-fn target_address(target: &str) -> Result<String, String> {
+pub(crate) fn target_address(target: &str) -> Result<String, String> {
     if target.is_empty()
         || target
             .chars()
@@ -40,7 +40,7 @@ fn target_address(target: &str) -> Result<String, String> {
     }
 }
 
-async fn confirm(offer: PairOffer) -> Result<bool, String> {
+pub(crate) async fn confirm(offer: PairOffer) -> Result<bool, String> {
     println!("\nSecure pairing channel established.\nRemote node: {}\nNode ID: {}\nAddress hint: {}\nVerification code: {}",offer.remote_name,offer.remote_id,offer.address,offer.verification_code);
     if let Some(alias) = &offer.already_trusted_as {
         println!("This identity is already trusted as '{alias}'. Existing permissions will be preserved.");
@@ -286,7 +286,9 @@ pub fn pair(args: &[String]) -> ExitCode {
     })
 }
 
-async fn connect_discovered(candidate: &DiscoveryResult) -> Result<tokio::net::TcpStream, String> {
+pub(crate) async fn connect_discovered(
+    candidate: &DiscoveryResult,
+) -> Result<tokio::net::TcpStream, String> {
     let mut last_error = String::from("no usable address");
     for address in candidate.pairing_addresses().iter().take(8) {
         println!("Connecting to discovered address: {address}");

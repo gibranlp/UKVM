@@ -17,7 +17,7 @@ The eventual runtime flow is: local edge activation -> validate layout and peer 
 | `ukvm-platform` | Input and display traits; eventual OS backends |
 | `ukvm-network` | Mutual TLS transport, separate first-contact pairing, bounded framing, persistent identity, pinned peer store, authorization and DebugSink |
 
-`ukvm-discovery` implements short-lived DNS-SD advertisement and browsing outside transport and platform input code. Its results are untrusted pairing endpoint hints. Service integration remains future work. Pairing now lives beside transport in `ukvm-network` because it creates the same trusted-peer records consumed by mTLS. Avoid empty crates. A future daemon can reuse the core, platform and network crates, while the CLI talks to it through a local authenticated control interface. The CLI should never contain OS input logic.
+`ukvm-discovery` implements short-lived DNS-SD advertisement and browsing outside transport and platform input code. Its results are untrusted pairing endpoint hints. Service integration remains future work. Pairing now lives beside transport in `ukvm-network` because it creates the same trusted-peer records consumed by mTLS. Avoid empty crates. A future daemon can reuse the core, platform and network crates, while the CLI talks to it through a local authenticated control interface. The CLI should never contain OS input logic. `ukvm setup` orchestrates the existing identity, discovery, pairing, trust, permission and layout APIs; its decision model is separate from terminal prompts. A discovered ID is never trusted without pairing or pinned mTLS verification.
 
 ## Platform boundary
 

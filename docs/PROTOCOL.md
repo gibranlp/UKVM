@@ -12,7 +12,7 @@ This describes intended semantics and a **provisional development** wire format.
 
 The authenticated transport must bind the claimed node identity to its certificate or key. `Hello.node` alone is never proof of identity. Pairing verification uses a **separate version 2 protocol and port 24801**; it never parses input protocol 1.1 messages. Pairing protocol 2 adds an encrypted new/recovery mode and transaction-aware commit recovery; it is not wire compatible with pairing protocol 1. Authentication and encryption are required before control traffic; there is no plaintext mode.
 
-Milestone 8 adds local peer records and authorization policy without changing the version 1.1 wire format. Milestones 9 and 9.1 pairing also leave this input wire format unchanged. A certificate fingerprint is the stable node ID. Receiver policy distinguishes connection, DebugSink input and control-this-node permission. Trusting an identity never grants an input session by itself. The configured listener checks policy after TLS/Hello and again when `SessionStart` requests DebugSink input. The CLI still has no remote-input listener.
+Milestone 8 adds local peer records and authorization policy without changing the version 1.1 wire format. Milestones 9 and 9.1 pairing and Milestone 11 guided setup also leave this input wire format unchanged. A certificate fingerprint is the stable node ID. Receiver policy distinguishes connection, DebugSink input and control-this-node permission. Trusting an identity never grants an input session by itself. The configured listener checks policy after TLS/Hello and again when `SessionStart` requests DebugSink input. The CLI still has no remote-input listener.
 
 ## Initial message concepts
 
