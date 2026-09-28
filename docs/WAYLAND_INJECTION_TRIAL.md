@@ -10,7 +10,21 @@ The candidate is Hyprland's [draft xdg-desktop-portal-hyprland PR #426](https://
 
 ## Build on io, without installation
 
-In io's graphical user session, with the Milestone 12 UKVM revision pulled and built:
+On io, with its Hyprland graphical session running and the Milestone 12 UKVM
+revision pulled and built, fetch and build the draft. Fetching and building may
+be done over SSH. The later physical pointer test needs someone watching io's
+monitor and approving its portal prompt there.
+
+The draft's CMake build uses the Ninja generator and requires the
+`hyprwayland-scanner` pkg-config module. On a fresh Arch test node, install all
+three build tools before configuring it. Review the pacman transaction before
+confirming the full system upgrade:
+
+```sh
+sudo pacman -Syu --needed cmake ninja hyprwayland-scanner
+```
+
+The UKVM Arch setup script also installs these tools on future test nodes.
 
 ```sh
 cd ~/UKVM

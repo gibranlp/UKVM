@@ -6,8 +6,9 @@ usage() {
 Usage: bash scripts/setup-arch-test-node.sh [--dry-run]
 
 Set up an Arch Linux user account to build and test UKVM. Installs Arch build
-packages, the stable Rust toolchain, rustfmt and Clippy. If run from a UKVM
-checkout, also builds and runs the headless test suite.
+packages, CMake/Ninja and Hyprland's protocol scanner for the optional portal
+trial, the stable Rust toolchain, rustfmt and Clippy. In a UKVM checkout, it
+also builds and runs the headless test suite.
 
 The pacman step performs a full system upgrade to avoid an Arch partial upgrade.
 It asks for sudo authentication and pacman's confirmation; no packages or
@@ -52,9 +53,9 @@ run() {
 }
 
 echo "UKVM Arch Linux test-node setup"
-echo "Installing build tools, Git, CA certificates and Arch's rustup package."
+echo "Installing build tools, portal trial prerequisites, Git, CA certificates and Arch's rustup package."
 echo "Pacman will show the full upgrade and request confirmation."
-run sudo pacman -Syu --needed base-devel ca-certificates git pkgconf rustup
+run sudo pacman -Syu --needed base-devel ca-certificates cmake git hyprwayland-scanner ninja pkgconf rustup
 
 echo "Installing stable Rust, rustfmt and Clippy for this user."
 run rustup toolchain install stable --profile minimal --component clippy,rustfmt
