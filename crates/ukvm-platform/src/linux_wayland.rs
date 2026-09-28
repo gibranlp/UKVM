@@ -528,6 +528,12 @@ where
     H: FnMut() -> bool,
 {
     let session = CaptureSession::open().await?;
+    if timing.release_mode == ReleaseMode::EmergencyChord && !session.keyboard_granted {
+        let _ = session.close().await;
+        return Err(
+            "InputCapture did not grant keyboard capture required for emergency release".into(),
+        );
+    }
     on_notice(CaptureNotice::SessionCreated {
         version: session.portal.version(),
         keyboard_granted: session.keyboard_granted,

@@ -236,6 +236,7 @@ impl PortalEisSession {
                 let mut pointer = None;
                 let mut keyboard = None;
                 let mut active = Vec::new();
+                let mut sequence = 1;
                 while pointer
                     .as_ref()
                     .is_none_or(|device| !active.contains(device))
@@ -278,7 +279,11 @@ impl PortalEisSession {
                             }
                         }
                         EiEvent::DeviceResumed(resumed) => {
-                            resumed.device.device().start_emulating(resumed.serial, 1);
+                            resumed
+                                .device
+                                .device()
+                                .start_emulating(resumed.serial, sequence);
+                            sequence += 1;
                             connection
                                 .flush()
                                 .map_err(|err| PlatformError::Backend(err.to_string()))?;
