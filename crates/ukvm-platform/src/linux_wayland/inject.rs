@@ -105,10 +105,13 @@ impl WaylandInputInjector {
                     .build()
                 {
                     Ok(runtime) => {
-                        let portal = runtime.block_on(tokio::time::timeout(
-                            PORTAL_SETUP_TIMEOUT,
-                            PortalEisSession::open_portal(verbose),
-                        ));
+                        let portal = runtime.block_on(async {
+                            tokio::time::timeout(
+                                PORTAL_SETUP_TIMEOUT,
+                                PortalEisSession::open_portal(verbose),
+                            )
+                            .await
+                        });
                         match portal.unwrap_or_else(|_| {
                             Err(PlatformError::Backend(
                                 "RemoteDesktop portal proxy setup timed out".into(),
