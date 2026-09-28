@@ -249,9 +249,19 @@ impl Drop for PendingPortalSession {
 impl PortalEisSession {
     async fn open(request_keyboard: bool, verbose: bool) -> Result<Self, PlatformError> {
         if verbose {
+            eprintln!("[wayland] RemoteDesktop: opening dedicated session-bus connection");
+        }
+        // ashpd::RemoteDesktop::new() uses ashpd's process-global cached D-Bus
+        // connection. This actor's Tokio runtime ends after each input session;
+        // a later actor must not reuse a connection whose executor belonged to
+        // the previous runtime.
+        let bus = zbus::Connection::session()
+            .await
+            .map_err(|err| PlatformError::Backend(format!("session bus unavailable: {err}")))?;
+        if verbose {
             eprintln!("[wayland] RemoteDesktop: opening portal interface");
         }
-        let portal = RemoteDesktop::new()
+        let portal = RemoteDesktop::with_connection(bus)
             .await
             .map_err(|err| PlatformError::Backend(format!("RemoteDesktop unavailable: {err}")))?;
         if portal.version() < 2 {
