@@ -9,6 +9,31 @@ use ukvm_network::{
     trust::{default_trust_dir, resolve_address, SessionPermission, TrustStore},
 };
 
+/// Serialize read-modify-write CLI edits across processes. The OS releases
+/// the advisory lock even if a command exits unexpectedly.
+fn edit_lock() -> Result<std::fs::File, String> {
+    let dir = default_trust_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(dir.join(".edit.lock"))
+        .map_err(|e| e.to_string())?;
+    fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("cannot lock UKVM edits: {e}"))?;
+    Ok(file)
+}
+
 fn paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((
         ukvm_config::default_path().map_err(|e| e.to_string())?,
@@ -68,6 +93,7 @@ fn confirmation() -> Result<bool, String> {
 
 pub fn peer(args: &[String]) -> ExitCode {
     let result = (|| -> Result<(), String> {
+        let _lock = edit_lock()?;
         let (_, state, _, mut store) = context()?;
         match args {
             [command] if command == "list" => { if store.peers.is_empty() { println!("No trusted peers."); } for peer in &store.peers { println!("{}  {}  {}",peer.alias,peer.id,peer.address.as_deref().unwrap_or("no address")); } }
@@ -106,6 +132,7 @@ pub fn peer(args: &[String]) -> ExitCode {
 
 pub fn layout(args: &[String]) -> ExitCode {
     let result = (|| -> Result<(), String> {
+        let _lock = edit_lock()?;
         let (path, _, mut config, store) = context()?;
         match args {
             [] => {

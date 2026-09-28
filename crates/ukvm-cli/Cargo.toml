@@ -15,6 +15,7 @@ ukvm-network.workspace = true
 ukvm-platform.workspace = true
 ukvm-protocol.workspace = true
 toml = "0.8"
+fs2 = "0.4"
 
 [dependencies.tokio]
 version = "1"
