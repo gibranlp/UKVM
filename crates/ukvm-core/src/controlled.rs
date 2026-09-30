@@ -22,6 +22,11 @@ pub enum SinkKind {
 pub trait InputSink {
     fn kind(&self) -> SinkKind;
     fn begin_session(&mut self) -> Result<(), String>;
+    /// Resume an already prepared grant. A runtime must not silently prompt
+    /// for new consent after accepting an edge entry.
+    fn resume_session(&mut self) -> Result<(), String> {
+        self.begin_session()
+    }
     /// Authorization may wait for a desktop consent dialog. Receivers await
     /// this separately so local shutdown remains responsive during that wait.
     fn begin_session_async(&mut self) -> SinkFuture<'_>
@@ -39,6 +44,26 @@ pub trait InputSink {
         Self: Send,
     {
         Box::pin(async move { self.enter_remote(entry) })
+    }
+    fn enter_topology(
+        &mut self,
+        _entry: EdgePosition,
+        _exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), String> {
+        Err("topology entry is unavailable".into())
+    }
+    fn enter_topology_async(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> SinkFuture<'_>
+    where
+        Self: Send,
+    {
+        Box::pin(async move { self.enter_topology(entry, exits) })
+    }
+    fn update_exits(&mut self, _exits: Vec<ukvm_protocol::Edge>) -> Result<(), String> {
+        Err("topology exit updates are unavailable".into())
     }
     fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String>;
     /// The receiver polls this while idle so backend loss ends the network

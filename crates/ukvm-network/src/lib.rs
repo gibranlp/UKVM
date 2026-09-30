@@ -121,10 +121,27 @@ pub fn validate(message: &WireMessage) -> Result<(), String> {
         WireMessage::RemoteEntry(position) | WireMessage::ReturnControl(position) => {
             position.validate()?;
         }
+        WireMessage::TopologyEntry { entry, exits } => {
+            entry.validate()?;
+            validate_exits(exits)?;
+        }
+        WireMessage::TopologyExits(exits) => validate_exits(exits)?,
         WireMessage::Error(message) if message.len() > 120 => {
             return Err("error text too long".into())
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_exits(exits: &[ukvm_protocol::Edge]) -> Result<(), String> {
+    if exits.len() > 4
+        || exits
+            .iter()
+            .enumerate()
+            .any(|(i, edge)| exits[..i].contains(edge))
+    {
+        return Err("invalid topology exits".into());
     }
     Ok(())
 }
@@ -228,5 +245,36 @@ mod tests {
             pressed: true,
         });
         assert_eq!(counts.keyboard, 1);
+    }
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::*;
+    use ukvm_protocol::{Edge, EdgePosition};
+    #[test]
+    fn topology_entry_and_refresh_are_bounded_validated_frames() {
+        for message in [
+            WireMessage::TopologyEntry {
+                entry: EdgePosition {
+                    edge: Edge::Left,
+                    fraction: 0.5,
+                },
+                exits: vec![Edge::Left, Edge::Right, Edge::Top, Edge::Bottom],
+            },
+            WireMessage::TopologyExits(vec![Edge::Right]),
+        ] {
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
+        assert!(encode(&WireMessage::TopologyExits(vec![Edge::Right; 5])).is_err());
+        assert!(encode(&WireMessage::TopologyExits(vec![Edge::Right, Edge::Right])).is_err());
+        assert!(encode(&WireMessage::TopologyEntry {
+            entry: EdgePosition {
+                edge: Edge::Left,
+                fraction: f32::NAN
+            },
+            exits: Vec::new()
+        })
+        .is_err());
     }
 }

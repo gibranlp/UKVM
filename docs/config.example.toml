@@ -12,3 +12,16 @@ listen = "0.0.0.0:24800"
 # edge = "right"
 # peer_id = "<full 64-character SHA-256 certificate fingerprint>"
 # entry_edge = "left"
+
+# M14 coordinate topology: use `ukvm layout place X Y PEER_ALIAS`.
+# Local is (0,0); x increases right, y increases down.
+# Cardinal distance 1–2 only; distance two requires its intermediate.
+# Existing layout.links remain supported but must not duplicate coordinates.
+# [[layout.nodes]]
+# x = 1
+# y = 0
+# peer_id = "<io full 64-character SHA-256 certificate fingerprint>"
+# [[layout.nodes]]
+# x = 2
+# y = 0
+# peer_id = "<laptop full 64-character SHA-256 certificate fingerprint>"

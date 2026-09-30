@@ -1,4 +1,4 @@
-# Input protocol sketch (version 1.2)
+# Input protocol sketch (version 1.3)
 
 The input protocol is a provisional development format. Each TLS application frame has a four-byte big-endian length and a fixed-integer `bincode` payload, capped at 512 bytes before allocation. Both peers must use the exact major and minor version. The protocol is authenticated by pinned mutual TLS; `Hello.node_id` must match the authenticated certificate fingerprint. Pairing is a **separate version 2 protocol** on port 24801 and is unchanged by this revision. Discovery is an untrusted address hint.
 
@@ -25,3 +25,11 @@ Keys remain `KeyCode::LinuxEvdev` with an explicit source code domain. This firs
 ## Persistent runtime compatibility
 
 M13 uses the existing 1.2 Hello, RemoteSessionStart/Accept, RemoteEntry, ReturnControl, SessionEnd and heartbeats on a new authenticated connection for each outgoing relationship. Idle preparation follows the same readiness exchange before capture. Runtime entry may await local idle-capture cleanup before consuming input. No input wire variants or encodings change; Input Protocol 1.2 and Pairing Protocol 2 remain unchanged. DNS-SD adds an untrusted endpoint-mode TXT hint, outside either wire protocol.
+
+## Milestone 14 topology extension (1.3)
+
+Input 1.3 adds `TopologyEntry { entry, exits }` and `TopologyExits(exits)`. Both validate at most four distinct cardinal directions; entry retains the existing finite normalized fraction. TopologyEntry is accepted only once after remote authorization/readiness and before input. TopologyExits is accepted only after that topology entry and is limited to 40 updates per second. Diagnostics retain RemoteEntry and reject topology refresh outside a routed session.
+
+The EI receiver detects only configured outer exits, retains entry-edge inward hysteresis, releases held state and sends existing ReturnControl before ending the relationship. A routed sender validates the reported direction against its permitted exits and computes the next coordinate locally; the wire never selects an identity/address. A ready next node receives a fresh authorized entry while the source retains capture. A local destination releases capture. Failed handoff restores local input. Ready-exit refresh supports recovery while another receiver is active.
+
+These wire variants and changed routed ReturnControl semantics require Input Protocol 1.3 on all peers; 1.2 is intentionally rejected at Hello. Pairing Protocol 2, mTLS, pins, permission requirements and portal consent are unchanged. Existing trust needs no migration/re-pairing. See [topology](TOPOLOGY.md).

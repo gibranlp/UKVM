@@ -330,6 +330,9 @@ where
     let mut rate_window = Instant::now();
     let mut rate_count = 0u32;
     let mut remote_entry_seen = false;
+    let mut topology_entered = false;
+    let mut topology_window = Instant::now();
+    let mut topology_updates = 0u32;
     let mut health_tick = tokio::time::interval(Duration::from_millis(100));
     tokio::pin!(shutdown);
     let result = loop {
@@ -451,6 +454,37 @@ where
                 remote_entry_seen = true;
                 notice(ReceiverNotice::RemoteEntered(position));
             }
+            WireMessage::TopologyEntry { entry, exits }
+                if state == ControlledState::ReceivingInput
+                    && sink.kind() == SinkKind::RemoteInput
+                    && !remote_entry_seen =>
+            {
+                let entered = tokio::select! {
+                    _ = &mut shutdown => Err("local override during topology entry".into()),
+                    result = sink.enter_topology_async(entry, exits) => result,
+                };
+                if let Err(err) = entered {
+                    break Err(err);
+                }
+                remote_entry_seen = true;
+                topology_entered = true;
+                notice(ReceiverNotice::RemoteEntered(entry));
+            }
+            WireMessage::TopologyExits(exits)
+                if topology_entered && state == ControlledState::ReceivingInput =>
+            {
+                if topology_window.elapsed() >= Duration::from_secs(1) {
+                    topology_window = Instant::now();
+                    topology_updates = 0;
+                }
+                topology_updates += 1;
+                if topology_updates > 40 {
+                    break Err("topology update rate limit exceeded".into());
+                }
+                if let Err(err) = sink.update_exits(exits) {
+                    break Err(err);
+                }
+            }
             WireMessage::Heartbeat(nonce) => {
                 if let Err(err) =
                     write_frame(&mut connection.stream, &WireMessage::HeartbeatAck(nonce)).await
@@ -535,6 +569,11 @@ pub async fn start_remote_sender(
     start_sender_for(connection, SinkKind::RemoteInput, Some(entry_edge)).await
 }
 
+/// Routed runtime validates each reported exit against its selected topology.
+pub async fn start_topology_sender(connection: Connection) -> Result<Sender, String> {
+    start_sender_for(connection, SinkKind::RemoteInput, None).await
+}
+
 async fn start_sender_for(
     mut connection: Connection,
     kind: SinkKind,
@@ -596,7 +635,7 @@ async fn start_sender_for(
                     Ok(Ok((WireMessage::ReturnControl(position), _)))
                         if kind == SinkKind::RemoteInput =>
                     {
-                        if Some(position.edge) != expected_return_edge {
+                        if expected_return_edge.is_some_and(|edge| position.edge != edge) {
                             let _ = alive_tx.send(false);
                         } else {
                             let _ = return_tx.send(Some(position));
@@ -625,7 +664,11 @@ async fn start_sender_for(
                 tokio::select! {
                     biased;
                     changed = returned.changed() => {
-                        if changed.is_ok() && returned.borrow().is_some() { break; }
+                        if changed.is_err() {
+                            let _ = alive_tx.send(false);
+                            return Err("peer reader closed; stopping forwarding".into());
+                        }
+                        if returned.borrow().is_some() { break; }
                     },
                     message = controls.recv(), if controls_open => match message {
                         // Local emergency release ends the relationship before

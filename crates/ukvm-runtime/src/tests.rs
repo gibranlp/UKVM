@@ -191,3 +191,88 @@ async fn competing_active_sessions_fail_closed_and_cleanup_preserves_owner() {
     assert_eq!(gate.state(), Focus::Local);
     assert!(!evidence.lock().unwrap().held_key);
 }
+
+#[tokio::test]
+async fn concurrent_ready_connections_do_not_park_or_release_the_shared_focus_owner() {
+    let evidence = Arc::new(Mutex::new(Evidence::default()));
+    let gate = FocusGate::default();
+    let shared = Arc::new(Mutex::new(Some(RemoteInputSink::new(Injector {
+        evidence: evidence.clone(),
+        granted: true,
+    }))));
+    let make = || ExclusiveSink {
+        inner: SharedSession {
+            shared: shared.clone(),
+            entered: false,
+        },
+        gate: gate.clone(),
+        reserved: false,
+    };
+    let mut active = make();
+    let mut idle = make();
+    let mut competitor = make();
+    active.begin_session_async().await.unwrap();
+    idle.begin_session_async().await.unwrap();
+    competitor.begin_session_async().await.unwrap();
+    active.enter_remote_async(entry()).await.unwrap();
+    hold(&mut active);
+    assert!(competitor.enter_remote_async(entry()).await.is_err());
+    competitor.end_session().unwrap();
+    idle.end_session().unwrap();
+    assert_eq!(gate.state(), Focus::Controlled);
+    assert_eq!(evidence.lock().unwrap().parks, 0);
+    assert!(evidence.lock().unwrap().held_key && evidence.lock().unwrap().held_button);
+    active.end_session().unwrap();
+    assert_eq!(gate.state(), Focus::Local);
+    assert_eq!(evidence.lock().unwrap().parks, 1);
+    assert!(!evidence.lock().unwrap().held_key);
+    assert!(!evidence.lock().unwrap().held_button);
+    // The same legitimate grant remains available after idle and owner cleanup.
+    idle.begin_session_async().await.unwrap();
+    idle.enter_remote_async(entry()).await.unwrap();
+    idle.end_session().unwrap();
+    assert_eq!(evidence.lock().unwrap().parks, 2);
+    shared.lock().unwrap().as_mut().unwrap().shutdown().unwrap();
+    assert_eq!(evidence.lock().unwrap().closes, 1);
+}
+
+#[tokio::test]
+async fn invalid_prepared_grant_fails_entry_without_requesting_consent_while_captured() {
+    struct InvalidGrant;
+    impl PlatformInputInjector for InvalidGrant {
+        fn capabilities(&self) -> InjectionCapabilities {
+            InjectionCapabilities {
+                pointer_absolute: true,
+                ..Default::default()
+            }
+        }
+        fn begin(&mut self) -> Result<(), PlatformError> {
+            panic!("entry must not request fresh consent")
+        }
+        fn resume(&mut self) -> Result<(), PlatformError> {
+            Err(PlatformError::SessionClosed)
+        }
+        fn inject(&mut self, _: &InputEvent) -> Result<(), PlatformError> {
+            Err(PlatformError::SessionClosed)
+        }
+        fn release_all(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn end(&mut self) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+    let gate = FocusGate::default();
+    let mut session = ExclusiveSink {
+        inner: SharedSession {
+            shared: Arc::new(Mutex::new(Some(RemoteInputSink::new(InvalidGrant)))),
+            entered: false,
+        },
+        gate: gate.clone(),
+        reserved: false,
+    };
+    session.begin_session_async().await.unwrap();
+    assert!(session.enter_remote_async(entry()).await.is_err());
+    session.end_session().unwrap();
+    assert_eq!(gate.state(), Focus::Local);
+}

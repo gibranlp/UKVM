@@ -97,25 +97,20 @@ impl<S: InputSink + Send> InputSink for ExclusiveSink<S> {
         Err("runtime entry requires asynchronous capture cleanup".into())
     }
     fn enter_remote_async(&mut self, entry: EdgePosition) -> SinkFuture<'_> {
-        Box::pin(async move {
-            self.gate.reserve_inbound()?;
-            self.reserved = true;
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while self.gate.state() == Focus::Yielding {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .map_err(|_| "local capture cleanup timed out")?;
-            {
-                let mut state = self.gate.0.lock().unwrap();
-                if *state != Focus::Reserved {
-                    return Err("focus reservation lost".into());
-                }
-                *state = Focus::Controlled;
-            }
-            self.inner.enter_remote_async(entry).await
-        })
+        self.enter(entry, None)
+    }
+    fn enter_topology_async(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> SinkFuture<'_> {
+        self.enter(entry, Some(exits))
+    }
+    fn update_exits(&mut self, exits: Vec<ukvm_protocol::Edge>) -> Result<(), String> {
+        if self.gate.state() != Focus::Controlled {
+            return Err("exit update without exclusive focus".into());
+        }
+        self.inner.update_exits(exits)
     }
     fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {
         if self.gate.state() != Focus::Controlled {
@@ -133,6 +128,114 @@ impl<S: InputSink + Send> InputSink for ExclusiveSink<S> {
             self.reserved = false;
         }
         result
+    }
+}
+
+impl<S: InputSink + Send> ExclusiveSink<S> {
+    fn enter(
+        &mut self,
+        entry: EdgePosition,
+        exits: Option<Vec<ukvm_protocol::Edge>>,
+    ) -> SinkFuture<'_> {
+        Box::pin(async move {
+            self.gate.reserve_inbound()?;
+            self.reserved = true;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while self.gate.state() == Focus::Yielding {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| "local capture cleanup timed out")?;
+            {
+                let mut state = self.gate.0.lock().unwrap();
+                if *state != Focus::Reserved {
+                    return Err("focus reservation lost".into());
+                }
+                *state = Focus::Controlled;
+            }
+            match exits {
+                Some(exits) => self.inner.enter_topology_async(entry, exits).await,
+                None => self.inner.enter_remote_async(entry).await,
+            }
+        })
+    }
+}
+
+/// Per-connection lease of one prepared grant. An idle connection's cleanup
+/// must never park or release the entered owner's input.
+struct SharedSession<S> {
+    shared: Arc<Mutex<Option<S>>>,
+    entered: bool,
+}
+impl<S: InputSink + Send> InputSink for SharedSession<S> {
+    fn kind(&self) -> SinkKind {
+        SinkKind::RemoteInput
+    }
+    fn begin_session(&mut self) -> Result<(), String> {
+        if self.shared.lock().unwrap().is_some() {
+            Ok(())
+        } else {
+            Err("portal grant unavailable".into())
+        }
+    }
+    fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
+        self.entered = true;
+        let mut shared = self.shared.lock().unwrap();
+        let sink = shared.as_mut().ok_or("portal grant unavailable")?;
+        sink.resume_session()?;
+        sink.enter_remote(entry)
+    }
+    fn enter_topology(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), String> {
+        self.entered = true;
+        let mut shared = self.shared.lock().unwrap();
+        let sink = shared.as_mut().ok_or("portal grant unavailable")?;
+        sink.resume_session()?;
+        sink.enter_topology(entry, exits)
+    }
+    fn update_exits(&mut self, exits: Vec<ukvm_protocol::Edge>) -> Result<(), String> {
+        if !self.entered {
+            return Err("exit update before entry".into());
+        }
+        self.shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("portal unavailable")?
+            .update_exits(exits)
+    }
+    fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {
+        if !self.entered {
+            return Err("input without entered session".into());
+        }
+        self.shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .ok_or("portal unavailable")?
+            .handle_event(event)
+    }
+    fn is_healthy(&self) -> bool {
+        self.shared
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(InputSink::is_healthy)
+    }
+    fn end_session(&mut self) -> Result<(), String> {
+        if !self.entered {
+            return Ok(());
+        }
+        self.entered = false;
+        self.shared
+            .lock()
+            .unwrap()
+            .as_mut()
+            .map_or(Ok(()), InputSink::end_session)
     }
 }
 

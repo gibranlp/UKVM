@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// First protocol major version. Incompatible peers must fail closed.
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 2;
+pub const PROTOCOL_MINOR: u16 = 3;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Edge {
@@ -139,6 +139,13 @@ pub enum WireMessage {
     RemoteEntry(EdgePosition),
     /// Sent by the controlled node after it releases held input state.
     ReturnControl(EdgePosition),
+    /// Source-selected permitted exits; never grants trust or input permission.
+    TopologyEntry {
+        entry: EdgePosition,
+        exits: Vec<Edge>,
+    },
+    /// Refresh ready exits without recreating the active permissioned session.
+    TopologyExits(Vec<Edge>),
 }
 
 /// Candidate messages for a future authenticated transport. This is not a wire API.
@@ -179,8 +186,9 @@ mod tests {
 
     #[test]
     fn major_version_must_match() {
-        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 2 }));
+        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 3 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 1 }));
+        assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 2 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 2, minor: 0 }));
     }
 }

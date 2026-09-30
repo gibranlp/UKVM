@@ -1,10 +1,13 @@
 use super::*;
+use futures_util::{stream::FuturesUnordered, StreamExt};
+use std::collections::HashMap;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::watch;
-use ukvm_config::{Config, Link};
+use ukvm_config::{Config, Link, TopologyNode};
+use ukvm_core::Coordinate;
 use ukvm_discovery::{Advertisement, DiscoveryResult, DiscoveryService};
 use ukvm_network::{
     identity::{default_state_dir, Identity},
@@ -38,14 +41,23 @@ struct Context {
     stop: AtomicBool,
     verbose: bool,
     hints: Mutex<Vec<DiscoveryResult>>,
-    availability: Mutex<PeerAvailability>,
+    availability: Mutex<HashMap<Coordinate, PeerAvailability>>,
+    pool: Mutex<HashMap<Coordinate, transport::Sender>>,
+    active: Mutex<Option<Coordinate>>,
     rearm: Mutex<EmergencyRearmGuard>,
 }
 impl Context {
-    fn availability(&self, next: PeerAvailability) {
-        let mut current = self.availability.lock().unwrap();
+    fn availability(&self, node: &TopologyNode, next: PeerAvailability) {
+        let mut states = self.availability.lock().unwrap();
+        let current = states
+            .entry(node.coordinate())
+            .or_insert(PeerAvailability::Dormant);
         if *current != next {
-            self.log(format!("peer availability: {current:?} -> {next:?}"));
+            self.log(format!(
+                "peer {} coordinate {}: {current:?} -> {next:?}",
+                node.peer_id,
+                node.coordinate()
+            ));
             *current = next;
         }
     }
@@ -68,17 +80,22 @@ async fn pause(delay: Duration, stop: &mut watch::Receiver<bool>) {
 pub(super) async fn run(verbose: bool) -> Result<(), String> {
     let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
     let config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
-    if config.layout.links.len() > 1 {
-        return Err("this runtime supports one outgoing layout edge per node; multiple outgoing edges are not yet supported".into());
-    }
     let trust_dir = default_trust_dir()?;
     let store = TrustStore::load(&trust_dir)?;
-    for link in &config.layout.links {
+    for link in config.layout.topology() {
         if store.find_id(&link.peer_id).is_none() {
             return Err("layout references an unknown trusted peer".into());
         }
     }
     let identity = Identity::load_or_create(&default_state_dir()?)?;
+    if config
+        .layout
+        .topology()
+        .iter()
+        .any(|node| node.peer_id.eq_ignore_ascii_case(&identity.id))
+    {
+        return Err("local identity cannot occupy a remote topology coordinate".into());
+    }
     let listener = transport::bind(&config.network.listen).await?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let context = Context {
@@ -89,7 +106,9 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
         stop: AtomicBool::new(false),
         verbose,
         hints: Mutex::new(Vec::new()),
-        availability: Mutex::new(PeerAvailability::Dormant),
+        availability: Mutex::new(HashMap::new()),
+        pool: Mutex::new(HashMap::new()),
+        active: Mutex::new(None),
         rearm: Mutex::new(EmergencyRearmGuard::Ready),
     };
     let (stop_tx, stop) = watch::channel(false);
@@ -120,13 +139,17 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
         let _ = stop_tx.send(true);
         result.map_err(|e| e.to_string())
     };
-    let (signal_result, (), (), ()) = tokio::join!(
+    let (signal_result, (), (), (), (), ()) = tokio::join!(
         signal,
         receiver(&context, listener, stop.clone()),
         controller(&context, stop.clone()),
-        discovery(&context, port, stop),
+        discovery(&context, port, stop.clone()),
+        peers(&context, stop.clone()),
+        rearm_observer(&context, stop),
     );
-    context.availability(PeerAvailability::Stopped);
+    for node in context.config.layout.topology() {
+        context.availability(&node, PeerAvailability::Stopped);
+    }
     context.log("all sessions closed; local input restored");
     println!("UKVM stopped.");
     signal_result
@@ -189,172 +212,8 @@ async fn discovery(context: &Context, port: u16, mut stop: watch::Receiver<bool>
     }
 }
 
-/// Open only for an authorized session; retain the legitimate grant until
-/// invalidation or runtime shutdown. No restore token or synthetic permission.
-struct LazySink {
-    sink: Option<RemoteInputSink<WaylandInputInjector>>,
-    verbose: bool,
-    policy: Option<(PathBuf, String)>,
-}
-impl LazySink {
-    fn authorize(&self) -> Result<(), String> {
-        let (directory, id) = self
-            .policy
-            .as_ref()
-            .ok_or("no authenticated incoming peer")?;
-        TrustStore::load(directory)?
-            .authorize(id, ukvm_network::trust::SessionPermission::ControlThisNode)?;
-        Ok(())
-    }
-    fn shutdown(&mut self) {
-        if let Some(mut sink) = self.sink.take() {
-            if let Err(error) = sink.shutdown() {
-                eprintln!("[runtime] injector cleanup: {error}");
-            }
-        }
-    }
-}
-impl InputSink for LazySink {
-    fn kind(&self) -> SinkKind {
-        SinkKind::RemoteInput
-    }
-    fn begin_session(&mut self) -> Result<(), String> {
-        Err("runtime authorization requires async begin".into())
-    }
-    fn begin_session_async(&mut self) -> SinkFuture<'_> {
-        Box::pin(async {
-            self.authorize()?;
-            if self.sink.is_none() {
-                self.sink = Some(RemoteInputSink::new(
-                    WaylandInputInjector::open_verbose(self.verbose)
-                        .await
-                        .map_err(|e| e.to_string())?,
-                ));
-            }
-            let result = self
-                .sink
-                .as_mut()
-                .unwrap()
-                .begin_session_async()
-                .await
-                .and_then(|()| self.authorize());
-            if result.is_err() {
-                self.shutdown();
-            }
-            result
-        })
-    }
-    fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
-        self.authorize()?;
-        self.sink
-            .as_mut()
-            .ok_or("injector unavailable")?
-            .enter_remote(entry)
-    }
-    fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {
-        self.sink
-            .as_mut()
-            .ok_or("injector unavailable")?
-            .handle_event(event)
-    }
-    fn is_healthy(&self) -> bool {
-        self.sink.as_ref().is_none_or(InputSink::is_healthy)
-    }
-    fn end_session(&mut self) -> Result<(), String> {
-        let result = self.sink.as_mut().map_or(Ok(()), InputSink::end_session);
-        if result.is_err() {
-            self.shutdown();
-        }
-        result
-    }
-}
-
-async fn receiver(
-    context: &Context,
-    listener: tokio::net::TcpListener,
-    mut stop: watch::Receiver<bool>,
-) {
-    let mut sink = ExclusiveSink {
-        inner: LazySink {
-            sink: None,
-            verbose: context.verbose,
-            policy: None,
-        },
-        gate: context.gate.clone(),
-        reserved: false,
-    };
-    loop {
-        let accepted = tokio::select! { _ = cancelled(&mut stop) => break, result = listener.accept() => result };
-        let (tcp, address) = match accepted {
-            Ok(value) => value,
-            Err(error) => {
-                context.log(format!("accept failed: {error}"));
-                pause(Duration::from_secs(1), &mut stop).await;
-                continue;
-            }
-        };
-        let store = match TrustStore::load(&context.trust_dir) {
-            Ok(store) => store,
-            Err(error) => {
-                context.log(error);
-                continue;
-            }
-        };
-        let connection = tokio::select! {
-            _ = cancelled(&mut stop) => break,
-            result = transport::accept_remote_trusted(tcp, &context.identity, &store, &context.trust_dir, &context.config.node.name, &sink) => match result {
-                Ok(connection) => connection,
-                Err(error) => { context.log(format!("connection {address} rejected: {error}")); continue; }
-            }
-        };
-        let peer_id = connection.peer.id.clone();
-        sink.inner.policy = Some((context.trust_dir.clone(), peer_id.clone()));
-        context.log(format!("authenticated incoming peer {peer_id}"));
-        let shutdown = async {
-            loop {
-                let allowed = TrustStore::load(&context.trust_dir)
-                    .ok()
-                    .and_then(|s| s.find_id(&peer_id).cloned())
-                    .is_some_and(|p| p.permissions.connect && p.permissions.control_this_node);
-                if !allowed {
-                    context.log("incoming permission revoked or denied");
-                    return;
-                }
-                tokio::select! {
-                    _ = cancelled(&mut stop) => return,
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {},
-                }
-            }
-        };
-        let result = transport::receive_session_until(
-            connection,
-            &mut sink,
-            |notice| match notice {
-                ReceiverNotice::SessionStarted => {
-                    context.log("receiver portal/EI ready; session authorized")
-                }
-                ReceiverNotice::RemoteEntered(_) => {
-                    context.log("incoming edge transition; controlled focus")
-                }
-                ReceiverNotice::RemoteReturned(_) => {
-                    context.log("ReturnControl; held input released")
-                }
-                ReceiverNotice::SessionEnded(_) => context.log("incoming session cleanup complete"),
-                ReceiverNotice::Counts(_) => {}
-            },
-            shutdown,
-        )
-        .await;
-        if let Err(error) = result {
-            context.log(format!("incoming session ended: {error}"));
-        }
-        if context.stop.load(Ordering::Acquire) {
-            break;
-        }
-    }
-    let _ = sink.end_session();
-    sink.inner.shutdown();
-}
+mod incoming;
+use incoming::receiver;
 
 fn protocol_edge(edge: ukvm_config::Edge) -> ukvm_protocol::Edge {
     match edge {
@@ -400,90 +259,194 @@ fn addresses(context: &Context, peer: &ukvm_network::trust::Peer) -> Vec<String>
     }
     addresses
 }
-async fn controller(context: &Context, mut stop: watch::Receiver<bool>) {
-    let Some(link) = context.config.layout.links.first() else {
-        cancelled(&mut stop).await;
-        return;
-    };
-    let mut backoff = Backoff::default();
-    while !context.stop.load(Ordering::Acquire) {
-        if context.gate.state() != Focus::Local {
-            pause(Duration::from_millis(250), &mut stop).await;
-            continue;
-        }
-        if !context.rearm.lock().unwrap().allows_arming() {
-            wait_for_inward(context, &mut stop).await;
-            continue;
-        }
-        context.availability(PeerAvailability::Connecting);
-        let result = tokio::select! {
-            _ = cancelled(&mut stop) => break,
-            result = prepare(context, link) => result,
-        };
-        let sender = match result {
-            Ok(sender) => sender,
-            Err(error) => {
-                context.availability(PeerAvailability::Unavailable);
-                let delay = backoff.failed();
-                context.log(format!(
-                    "peer unavailable: {error}; retry in {}s (local input untouched)",
-                    delay.as_secs()
-                ));
-                pause(delay, &mut stop).await;
-                continue;
-            }
-        };
-        if context.stop.load(Ordering::Acquire) || !arm_outgoing(context) {
-            let _ = sender.finish().await;
-            continue;
-        }
-        context.availability(PeerAvailability::Ready);
-        context.log("remote authorized and ready; arming local edge");
-        let result = capture(context, link, &sender).await;
-        // Keep focus leased until the local portal has completed Release/Close.
-        context.gate.outbound_closed();
-        let finished = sender.finish().await;
-        context.log("outgoing session closed; local input restored");
-        if let Err(error) = result.and(finished.map(|_| ())) {
-            context.availability(PeerAvailability::Unavailable);
-            context.log(format!("outgoing failure: {error}"));
-            pause(backoff.failed(), &mut stop).await;
-        } else {
-            backoff.reset();
-            pause(Duration::from_millis(250), &mut stop).await;
-        }
+fn node_edge(node: &TopologyNode) -> ukvm_config::Edge {
+    match (node.x.signum(), node.y.signum()) {
+        (-1, _) => ukvm_config::Edge::Left,
+        (1, _) => ukvm_config::Edge::Right,
+        (_, -1) => ukvm_config::Edge::Top,
+        _ => ukvm_config::Edge::Bottom,
+    }
+}
+fn link_for(node: &TopologyNode) -> Link {
+    let edge = node_edge(node);
+    Link {
+        edge,
+        entry_edge: edge.opposite(),
+        peer_id: node.peer_id.clone(),
     }
 }
 
+async fn peers(context: &Context, stop: watch::Receiver<bool>) {
+    let nodes = context.config.layout.topology();
+    let mut workers = FuturesUnordered::new();
+    for node in &nodes {
+        workers.push(peer_worker(context, node, stop.clone()));
+    }
+    while workers.next().await.is_some() {}
+}
+async fn peer_worker(context: &Context, node: &TopologyNode, mut stop: watch::Receiver<bool>) {
+    let coordinate = node.coordinate();
+    let mut backoff = Backoff::default();
+    while !context.stop.load(Ordering::Acquire) {
+        let state = context
+            .pool
+            .lock()
+            .unwrap()
+            .get(&coordinate)
+            .map(|sender| *sender.alive.borrow());
+        let permitted = TrustStore::load(&context.trust_dir)
+            .ok()
+            .and_then(|store| store.find_id(&node.peer_id).cloned())
+            .is_some_and(|peer| peer.permissions.connect);
+        if state == Some(true) && permitted {
+            pause(Duration::from_millis(100), &mut stop).await;
+            continue;
+        }
+        let expired = context.pool.lock().unwrap().remove(&coordinate);
+        if let Some(sender) = expired {
+            let _ = sender.finish().await;
+        }
+        if *context.active.lock().unwrap() != Some(coordinate) {
+            context.availability(node, PeerAvailability::Connecting);
+        } else {
+            context.log(format!(
+                "peer {} coordinate {}: preparing return standby",
+                node.peer_id, coordinate
+            ));
+        }
+        let link = link_for(node);
+        let result = tokio::select! {
+            _ = cancelled(&mut stop) => break,
+            result = prepare_for(context, &link, true) => result,
+        };
+        match result {
+            Ok(sender) => {
+                if *context.active.lock().unwrap() != Some(coordinate) {
+                    context.availability(node, PeerAvailability::Ready);
+                } else {
+                    context.log(format!(
+                        "peer {} coordinate {}: return standby ready",
+                        node.peer_id, coordinate
+                    ));
+                }
+                context.pool.lock().unwrap().insert(coordinate, sender);
+                backoff.reset();
+            }
+            Err(error) => {
+                if *context.active.lock().unwrap() != Some(coordinate) {
+                    context.availability(node, PeerAvailability::Unavailable);
+                }
+                let delay = backoff.failed();
+                context.log(format!(
+                    "peer {} coordinate {} unavailable: {error}; retry in {}s",
+                    node.peer_id,
+                    coordinate,
+                    delay.as_secs()
+                ));
+                pause(delay, &mut stop).await;
+            }
+        }
+    }
+    let sender = context.pool.lock().unwrap().remove(&coordinate);
+    if let Some(sender) = sender {
+        let _ = sender.finish().await;
+    }
+}
+
+fn allowed_edges(context: &Context) -> Vec<linux_wayland::Edge> {
+    let guard = *context.rearm.lock().unwrap();
+    let pool = context.pool.lock().unwrap();
+    let store = TrustStore::load(&context.trust_dir).ok();
+    context.config.layout.topology().iter().filter(|node| {
+        store.as_ref().and_then(|store| store.find_id(&node.peer_id)).is_some_and(|peer| peer.permissions.connect)
+        && node.x.abs() + node.y.abs() == 1 && pool.get(&node.coordinate()).is_some_and(|sender| *sender.alive.borrow())
+        && !matches!(guard, EmergencyRearmGuard::AwaitingInward { boundary: Some(boundary) } if boundary.edge == capture_edge(node_edge(node)))
+        && !matches!(guard, EmergencyRearmGuard::AwaitingInward { boundary: None })
+    }).map(|node| capture_edge(node_edge(node))).collect()
+}
+
+async fn controller(context: &Context, mut stop: watch::Receiver<bool>) {
+    let mut backoff = Backoff::default();
+    while !context.stop.load(Ordering::Acquire) {
+        let edges = allowed_edges(context);
+        if context.gate.state() != Focus::Local || edges.is_empty() {
+            pause(Duration::from_millis(100), &mut stop).await;
+            continue;
+        }
+        if !context.gate.arm() {
+            continue;
+        }
+        let result = capture_topology(context, &edges).await;
+        context.gate.outbound_closed();
+        let previous = context.active.lock().unwrap().take();
+        if let Some(coordinate) = previous {
+            if let Some(node) = context
+                .config
+                .layout
+                .topology()
+                .iter()
+                .find(|node| node.coordinate() == coordinate)
+            {
+                let ready = context
+                    .pool
+                    .lock()
+                    .unwrap()
+                    .get(&coordinate)
+                    .is_some_and(|sender| *sender.alive.borrow());
+                context.availability(
+                    node,
+                    if ready {
+                        PeerAvailability::Ready
+                    } else {
+                        PeerAvailability::Unavailable
+                    },
+                );
+            }
+        }
+        context.log("outgoing path closed; local input restored");
+        let delay = match result {
+            Err(error) => {
+                context.log(format!("outgoing path ended: {error}"));
+                backoff.failed()
+            }
+            Ok(()) => {
+                backoff.reset();
+                Duration::from_millis(250)
+            }
+        };
+        pause(delay, &mut stop).await;
+    }
+}
+
+#[cfg(test)]
 fn arm_outgoing(context: &Context) -> bool {
     context.rearm.lock().unwrap().allows_arming() && context.gate.arm()
 }
 
-async fn wait_for_inward(context: &Context, stop: &mut watch::Receiver<bool>) {
-    eprintln!("Emergency release: launching edge remains disarmed. Move at least 32 logical pixels inward to rearm it.");
+async fn rearm_observer(context: &Context, mut stop: watch::Receiver<bool>) {
     let mut backoff = Backoff::default();
     let mut reported_error = None;
-    while !context.stop.load(Ordering::Acquire) && !context.rearm.lock().unwrap().allows_arming() {
-        if context.gate.state() != Focus::Local {
-            pause(Duration::from_millis(100), stop).await;
+    while !context.stop.load(Ordering::Acquire) {
+        if context.rearm.lock().unwrap().allows_arming()
+            || !matches!(context.gate.state(), Focus::Local | Focus::Armed)
+        {
+            pause(Duration::from_millis(100), &mut stop).await;
             continue;
         }
         let result = tokio::select! {
-            _ = cancelled(stop) => return,
+            _ = cancelled(&mut stop) => return,
             position = linux_wayland::local_pointer_position() => position,
         };
         match result {
             Ok(position) => {
                 backoff.reset();
                 reported_error = None;
-                // Ignore observations made while an incoming peer owns focus.
-                if context.gate.state() == Focus::Local
+                if matches!(context.gate.state(), Focus::Local | Focus::Armed)
                     && context.rearm.lock().unwrap().observe_local(position)
                 {
                     context.log("inward movement observed; emergency rearm guard cleared");
-                    return;
                 }
-                pause(Duration::from_millis(100), stop).await;
+                pause(Duration::from_millis(100), &mut stop).await;
             }
             Err(error) => {
                 let message = error.to_string();
@@ -493,13 +456,21 @@ async fn wait_for_inward(context: &Context, stop: &mut watch::Receiver<bool>) {
                     );
                     reported_error = Some(message);
                 }
-                pause(backoff.failed(), stop).await;
+                pause(backoff.failed(), &mut stop).await;
             }
         }
     }
 }
 
+#[cfg(test)]
 async fn prepare(context: &Context, link: &Link) -> Result<transport::Sender, String> {
+    prepare_for(context, link, false).await
+}
+async fn prepare_for(
+    context: &Context,
+    link: &Link,
+    routed: bool,
+) -> Result<transport::Sender, String> {
     let store = TrustStore::load(&context.trust_dir)?;
     let peer = store.find_id(&link.peer_id).ok_or("layout peer removed")?;
     if !peer.permissions.connect {
@@ -507,7 +478,10 @@ async fn prepare(context: &Context, link: &Link) -> Result<transport::Sender, St
     }
     let mut last_error = "no connection address available".to_string();
     for address in addresses(context, peer) {
-        context.log(format!("connecting to endpoint hint {address}"));
+        context.log(format!(
+            "peer {} {:?} direction: connecting to endpoint hint {address}",
+            peer.id, link.edge
+        ));
         match transport::connect(
             &address,
             &context.identity,
@@ -520,12 +494,25 @@ async fn prepare(context: &Context, link: &Link) -> Result<transport::Sender, St
                 if connection.peer.id != peer.id {
                     return Err("authenticated identity conflicts with layout".into());
                 }
-                context.availability(PeerAvailability::Authenticated);
+                if let Some(node) = context
+                    .config
+                    .layout
+                    .topology()
+                    .iter()
+                    .find(|node| node.peer_id == link.peer_id)
+                {
+                    if *context.active.lock().unwrap() != Some(node.coordinate()) {
+                        context.availability(node, PeerAvailability::Authenticated);
+                    }
+                }
                 context.log(format!("pinned identity verified: {}", peer.id));
                 // Keep discovery addresses ephemeral. Subsequent attempts verify
                 // the pin again; no trust-store edit races or auto-trust.
-                return transport::start_remote_sender(connection, protocol_edge(link.entry_edge))
-                    .await;
+                return if routed {
+                    transport::start_topology_sender(connection).await
+                } else {
+                    transport::start_remote_sender(connection, protocol_edge(link.entry_edge)).await
+                };
             }
             Err(error) => last_error = error,
         }
@@ -533,101 +520,8 @@ async fn prepare(context: &Context, link: &Link) -> Result<transport::Sender, St
     Err(last_error)
 }
 
-async fn capture(context: &Context, link: &Link, sender: &transport::Sender) -> Result<(), String> {
-    let entered = AtomicBool::new(false);
-    let failed = AtomicBool::new(false);
-    let mut alive = sender.alive.clone();
-    let mut returned = sender.returned.clone();
-    let mut notice = |notice| match notice {
-        CaptureNotice::Activated { edge_fraction, .. } => {
-            // A competing inbound entry can disarm this barrier. Never forward
-            // input from a failed focus acquisition.
-            if context.gate.activate()
-                && *sender.alive.borrow()
-                && !context.stop.load(Ordering::Acquire)
-            {
-                let entry = EdgePosition {
-                    edge: protocol_edge(link.entry_edge),
-                    fraction: edge_fraction,
-                };
-                if sender
-                    .control
-                    .try_send(WireMessage::RemoteEntry(entry))
-                    .is_ok()
-                {
-                    entered.store(true, Ordering::Release);
-                    context.availability(PeerAvailability::Active);
-                    context.log("edge transition; controlling peer");
-                } else {
-                    failed.store(true, Ordering::Release);
-                }
-            } else {
-                failed.store(true, Ordering::Release);
-            }
-        }
-        CaptureNotice::EmergencyRelease { boundary } => {
-            context.rearm.lock().unwrap().suppress(boundary);
-            context.log("emergency chord detected; launching edge disarmed until inward movement");
-            // Terminate forwarding before local Release/Close. SessionEnd
-            // releases remote held state; unsent events are discarded.
-            if sender.control.try_send(WireMessage::SessionEnd).is_err() {
-                context.log(
-                    "emergency session end queue unavailable; sender finish will close the session",
-                );
-            }
-        }
-        CaptureNotice::Enabled => context.log("InputCapture edge enabled"),
-        CaptureNotice::RemoteReturn(_) => context.log("ReturnControl received; releasing capture"),
-        CaptureNotice::ReleaseResult(_) => context.log("InputCapture Release completed"),
-        CaptureNotice::Closed(_) => context.log("InputCapture closed"),
-        _ => {}
-    };
-    let mut event = |event| {
-        if !entered.load(Ordering::Acquire) || failed.load(Ordering::Acquire) {
-            return Err("focus unavailable; releasing capture".into());
-        }
-        match sender.queue.try_send(event) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(InputEvent::PointerMotion {
-                ..
-            })) => Ok(()),
-            Err(_) => Err("input delivery failed; releasing capture".into()),
-        }
-    };
-    let peer_id = link.peer_id.clone();
-    let mut last_policy: Option<std::time::Instant> = None;
-    let mut permitted = false;
-    let mut healthy = || {
-        if last_policy.is_none_or(|last| last.elapsed() >= Duration::from_millis(250)) {
-            permitted = TrustStore::load(&context.trust_dir)
-                .ok()
-                .and_then(|s| s.find_id(&peer_id).cloned())
-                .is_some_and(|p| p.permissions.connect);
-            last_policy = Some(std::time::Instant::now());
-        }
-        *alive.borrow_and_update()
-            && permitted
-            && !failed.load(Ordering::Acquire)
-            && !context.stop.load(Ordering::Acquire)
-            && matches!(context.gate.state(), Focus::Armed | Focus::Controlling)
-    };
-    let mut return_request = || *returned.borrow_and_update();
-    linux_wayland::capture_with_events_mode(
-        capture_edge(link.edge),
-        None,
-        CaptureTiming {
-            duration: Duration::from_secs(3600),
-            active_duration: None,
-            release_mode: ReleaseMode::EmergencyChord,
-        },
-        &mut notice,
-        &mut event,
-        &mut healthy,
-        &mut return_request,
-    )
-    .await
-    .map(|_| ())
-}
+mod topology_capture;
+use topology_capture::capture_topology;
 
 #[cfg(test)]
 #[path = "wayland_tests.rs"]

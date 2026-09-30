@@ -70,6 +70,7 @@ impl Fixture {
                 },
                 network: Default::default(),
                 layout: ukvm_config::Layout {
+                    nodes: Vec::new(),
                     links: vec![Link {
                         edge: ukvm_config::Edge::Right,
                         peer_id: peer.id.clone(),
@@ -83,7 +84,9 @@ impl Fixture {
             stop: AtomicBool::new(false),
             verbose: false,
             hints: Mutex::new(Vec::new()),
-            availability: Mutex::new(PeerAvailability::Dormant),
+            availability: Mutex::new(HashMap::new()),
+            pool: Mutex::new(HashMap::new()),
+            active: Mutex::new(None),
             rearm: Mutex::new(EmergencyRearmGuard::Ready),
         };
         Self {
@@ -327,20 +330,7 @@ fn bounded_discovery_candidates_preserve_configured_fallback_and_ignore_names() 
 #[tokio::test]
 async fn denied_runtime_policy_does_not_open_portal_or_injector() {
     let fixture = Fixture::new(false);
-    let mut sink = LazySink {
-        sink: None,
-        verbose: false,
-        policy: Some((fixture.context.trust_dir.clone(), fixture.peer.id.clone())),
-    };
-    assert!(sink
-        .begin_session_async()
-        .await
-        .unwrap_err()
-        .contains("denied"));
-    assert!(sink.sink.is_none());
-    assert!(sink
-        .enter_remote(super::super::lifecycle_tests::entry())
-        .is_err());
+    incoming::assert_denied_before_portal(&fixture.context, &fixture.peer.id).await;
 }
 
 fn launching_boundary() -> linux_wayland::OuterSegment {

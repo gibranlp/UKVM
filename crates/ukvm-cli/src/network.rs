@@ -639,9 +639,7 @@ pub fn control(edge: &str, args: &[String]) -> ExitCode {
         let config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
         let link = config
             .layout
-            .links
-            .iter()
-            .find(|l| l.edge == edge)
+            .adjacent_link(edge)
             .ok_or("no peer configured on that edge")?;
         let state = default_trust_dir()?;
         let store = TrustStore::load(&state)?;

@@ -22,6 +22,7 @@ pub struct RemotePointer {
     position: (f64, f64),
     entry_boundary: f64,
     armed: bool,
+    exits: Vec<OuterSegment>,
 }
 
 fn geometry_edge(edge: ProtocolEdge) -> Edge {
@@ -34,8 +35,32 @@ fn geometry_edge(edge: ProtocolEdge) -> Edge {
 }
 
 impl RemotePointer {
+    #[cfg(test)]
     pub fn new(zones: Vec<Zone>, entry: EdgePosition) -> Result<Self, String> {
+        Self::with_exits(zones, entry, Vec::new())
+    }
+    pub fn with_exits(
+        zones: Vec<Zone>,
+        entry: EdgePosition,
+        exits: Vec<ProtocolEdge>,
+    ) -> Result<Self, String> {
         entry.validate()?;
+        if exits.len() > 4
+            || exits
+                .iter()
+                .enumerate()
+                .any(|(i, edge)| exits[..i].contains(edge))
+        {
+            return Err("invalid topology exits".into());
+        }
+        let mut exit_segments = Vec::new();
+        for edge in exits {
+            if edge != entry.edge {
+                for index in 0..zones.len() {
+                    exit_segments.extend(outer_segments(&zones, index, geometry_edge(edge))?);
+                }
+            }
+        }
         let edge = geometry_edge(entry.edge);
         let mut segments = Vec::new();
         for index in 0..zones.len() {
@@ -98,7 +123,29 @@ impl RemotePointer {
             position,
             entry_boundary: boundary,
             armed: false,
+            exits: exit_segments,
         })
+    }
+
+    pub fn update_exits(&mut self, exits: Vec<ProtocolEdge>) -> Result<(), String> {
+        if exits.len() > 4
+            || exits
+                .iter()
+                .enumerate()
+                .any(|(i, edge)| exits[..i].contains(edge))
+        {
+            return Err("invalid topology exits".into());
+        }
+        let mut segments = Vec::new();
+        for edge in exits {
+            if geometry_edge(edge) != self.return_edge {
+                for index in 0..self.zones.len() {
+                    segments.extend(outer_segments(&self.zones, index, geometry_edge(edge))?);
+                }
+            }
+        }
+        self.exits = segments;
+        Ok(())
     }
 
     pub fn position(&self) -> (f32, f32) {
@@ -145,6 +192,53 @@ impl RemotePointer {
                 },
                 fraction: fraction as f32,
             });
+        }
+        // Only explicit, ready topology exits may leave the receiver. Internal
+        // monitor seams and unconfigured directions remain bounded locally.
+        for segment in &self.exits {
+            let (outward, crossed, orth, lo, hi) = match segment.edge {
+                Edge::Left => (
+                    dx < 0.0,
+                    candidate.0 < f64::from(segment.start.0),
+                    candidate.1,
+                    segment.start.1,
+                    segment.end.1,
+                ),
+                Edge::Right => (
+                    dx > 0.0,
+                    candidate.0 >= f64::from(segment.start.0),
+                    candidate.1,
+                    segment.start.1,
+                    segment.end.1,
+                ),
+                Edge::Top => (
+                    dy < 0.0,
+                    candidate.1 < f64::from(segment.start.1),
+                    candidate.0,
+                    segment.start.0,
+                    segment.end.0,
+                ),
+                Edge::Bottom => (
+                    dy > 0.0,
+                    candidate.1 >= f64::from(segment.start.1),
+                    candidate.0,
+                    segment.start.0,
+                    segment.end.0,
+                ),
+            };
+            if outward && crossed && (f64::from(lo)..=f64::from(hi)).contains(&orth) {
+                let edge = match segment.edge {
+                    Edge::Left => ProtocolEdge::Left,
+                    Edge::Right => ProtocolEdge::Right,
+                    Edge::Top => ProtocolEdge::Top,
+                    Edge::Bottom => ProtocolEdge::Bottom,
+                };
+                return MotionResult::Return(EdgePosition {
+                    edge,
+                    fraction: ((orth - f64::from(lo)) / f64::from((hi - lo).max(1))).clamp(0.0, 1.0)
+                        as f32,
+                });
+            }
         }
         self.position = self.nearest_valid(candidate);
         let (x, y) = self.position();
@@ -308,5 +402,107 @@ mod tests {
             pointer.motion(200.0, 0.0),
             MotionResult::Return(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::*;
+    fn pointer(entry: ProtocolEdge, exits: Vec<ProtocolEdge>) -> RemotePointer {
+        RemotePointer::with_exits(
+            vec![Zone {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }],
+            EdgePosition {
+                edge: entry,
+                fraction: 0.5,
+            },
+            exits,
+        )
+        .unwrap()
+    }
+    #[test]
+    fn every_cardinal_forward_exit_is_directional_and_entry_return_is_preserved() {
+        for (entry, forward, inward, outward) in [
+            (
+                ProtocolEdge::Left,
+                ProtocolEdge::Right,
+                (100.0, 0.0),
+                (3000.0, 0.0),
+            ),
+            (
+                ProtocolEdge::Right,
+                ProtocolEdge::Left,
+                (-100.0, 0.0),
+                (-3000.0, 0.0),
+            ),
+            (
+                ProtocolEdge::Top,
+                ProtocolEdge::Bottom,
+                (0.0, 100.0),
+                (0.0, 3000.0),
+            ),
+            (
+                ProtocolEdge::Bottom,
+                ProtocolEdge::Top,
+                (0.0, -100.0),
+                (0.0, -3000.0),
+            ),
+        ] {
+            let mut routed = pointer(entry, vec![forward]);
+            assert!(matches!(
+                routed.motion(inward.0, inward.1),
+                MotionResult::Position(..)
+            ));
+            assert!(
+                matches!(routed.motion(outward.0,outward.1),MotionResult::Return(EdgePosition{edge,..}) if edge==forward)
+            );
+            let mut returning = pointer(entry, vec![forward]);
+            returning.motion(inward.0, inward.1);
+            assert!(
+                matches!(returning.motion(-outward.0,-outward.1),MotionResult::Return(EdgePosition{edge,..}) if edge==entry)
+            );
+        }
+    }
+    #[test]
+    fn unavailable_exits_clamp_and_recovery_refresh_allows_intentional_crossing() {
+        let mut routed = pointer(ProtocolEdge::Left, Vec::new());
+        assert!(matches!(
+            routed.motion(3000.0, 0.0),
+            MotionResult::Position(..)
+        ));
+        routed.update_exits(vec![ProtocolEdge::Right]).unwrap();
+        assert!(matches!(
+            routed.motion(10.0, 0.0),
+            MotionResult::Return(EdgePosition {
+                edge: ProtocolEdge::Right,
+                ..
+            })
+        ));
+        routed.update_exits(Vec::new()).unwrap();
+        assert!(matches!(
+            routed.motion(10.0, 0.0),
+            MotionResult::Position(..)
+        ));
+        assert!(routed
+            .update_exits(vec![ProtocolEdge::Left, ProtocolEdge::Left])
+            .is_err());
+        assert!(RemotePointer::with_exits(
+            vec![Zone {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100
+            }],
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.5
+            },
+            vec![ProtocolEdge::Right; 5]
+        )
+        .is_err());
     }
 }

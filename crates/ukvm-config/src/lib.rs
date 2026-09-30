@@ -65,6 +65,100 @@ impl Default for Network {
 pub struct Layout {
     #[serde(default)]
     pub links: Vec<Link>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<TopologyNode>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyNode {
+    pub x: i32,
+    pub y: i32,
+    pub peer_id: String,
+}
+impl TopologyNode {
+    pub fn coordinate(&self) -> ukvm_core::Coordinate {
+        ukvm_core::Coordinate {
+            x: self.x,
+            y: self.y,
+        }
+    }
+}
+impl Layout {
+    pub fn adjacent_link(&self, edge: Edge) -> Option<Link> {
+        self.links
+            .iter()
+            .find(|link| link.edge == edge)
+            .cloned()
+            .or_else(|| {
+                self.nodes
+                    .iter()
+                    .find(|node| node.coordinate() == edge.coordinate())
+                    .map(|node| Link {
+                        edge,
+                        entry_edge: edge.opposite(),
+                        peer_id: node.peer_id.clone(),
+                    })
+            })
+    }
+    /// Existing edge links remain valid distance-one coordinates.
+    pub fn topology(&self) -> Vec<TopologyNode> {
+        let mut nodes = self.nodes.clone();
+        nodes.extend(self.links.iter().map(|link| {
+            let (x, y) = match link.edge {
+                Edge::Left => (-1, 0),
+                Edge::Right => (1, 0),
+                Edge::Top => (0, -1),
+                Edge::Bottom => (0, 1),
+            };
+            TopologyNode {
+                x,
+                y,
+                peer_id: link.peer_id.clone(),
+            }
+        }));
+        nodes
+    }
+    pub fn validate_topology(&self) -> Result<(), ConfigError> {
+        let nodes = self.topology();
+        let mut coordinates = std::collections::HashSet::new();
+        let mut identities = std::collections::HashSet::new();
+        for node in &nodes {
+            if !matches!((node.x, node.y), (-2..=-1 | 1..=2, 0) | (0, -2..=-1 | 1..=2)) {
+                return Err(ConfigError::Invalid(
+                    "topology requires cardinal coordinates at distance 1–2 from local (0,0)"
+                        .into(),
+                ));
+            }
+            if !coordinates.insert(node.coordinate()) {
+                return Err(ConfigError::Invalid(format!(
+                    "conflicting topology coordinate {}",
+                    node.coordinate()
+                )));
+            }
+            if node.peer_id.len() != 64 || !node.peer_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(ConfigError::Invalid("invalid topology peer ID".into()));
+            }
+            if !identities.insert(node.peer_id.to_ascii_lowercase()) {
+                return Err(ConfigError::Invalid(
+                    "one peer cannot occupy multiple topology coordinates".into(),
+                ));
+            }
+        }
+        for node in &nodes {
+            if (node.x.abs() == 2 || node.y.abs() == 2)
+                && !coordinates.contains(&ukvm_core::Coordinate {
+                    x: node.x / 2,
+                    y: node.y / 2,
+                })
+            {
+                return Err(ConfigError::Invalid(
+                    "distance-two node requires its distance-one adjacency".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -84,6 +178,16 @@ pub enum Edge {
     Bottom,
 }
 impl Edge {
+    pub const ALL: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+    pub fn coordinate(self) -> ukvm_core::Coordinate {
+        let (x, y) = match self {
+            Self::Left => (-1, 0),
+            Self::Right => (1, 0),
+            Self::Top => (0, -1),
+            Self::Bottom => (0, 1),
+        };
+        ukvm_core::Coordinate { x, y }
+    }
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
             "left" => Ok(Self::Left),
@@ -217,10 +321,49 @@ impl Config {
                 )));
             }
         }
+        self.layout.validate_topology()
+    }
+    pub fn remove_peer_from_layout(&mut self, peer_id: &str) {
+        self.layout.links.retain(|link| link.peer_id != peer_id);
+        self.layout.nodes.retain(|node| node.peer_id != peer_id);
+        let remaining = self.layout.topology();
+        self.layout.nodes.retain(|node| {
+            node.x.abs() + node.y.abs() == 1
+                || remaining
+                    .iter()
+                    .any(|inner| inner.x == node.x / 2 && inner.y == node.y / 2)
+        });
+    }
+    pub fn set_position(&mut self, x: i32, y: i32, peer_id: String) -> Result<(), ConfigError> {
+        let mut next = self.clone();
+        next.layout.nodes.retain(|node| node.x != x || node.y != y);
+        next.layout
+            .links
+            .retain(|link| link.edge.coordinate() != ukvm_core::Coordinate { x, y });
+        next.layout.nodes.push(TopologyNode { x, y, peer_id });
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+    pub fn remove_position(&mut self, x: i32, y: i32) -> Result<(), ConfigError> {
+        let mut next = self.clone();
+        let old = next.layout.topology().len();
+        next.layout.nodes.retain(|node| node.x != x || node.y != y);
+        next.layout
+            .links
+            .retain(|link| link.edge.coordinate() != ukvm_core::Coordinate { x, y });
+        if old == next.layout.topology().len() {
+            return Err(ConfigError::Invalid("no node at coordinate".into()));
+        }
+        next.validate()?;
+        *self = next;
         Ok(())
     }
     pub fn set_link(&mut self, edge: Edge, peer_id: String) {
         self.layout.links.retain(|l| l.edge != edge);
+        self.layout
+            .nodes
+            .retain(|node| node.coordinate() != edge.coordinate());
         self.layout.links.push(Link {
             edge,
             peer_id,
@@ -342,5 +485,89 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .ends_with(".tmp")));
+    }
+}
+
+#[cfg(test)]
+mod topology_tests {
+    use super::*;
+    fn node(x: i32, y: i32, id: char) -> TopologyNode {
+        TopologyNode {
+            x,
+            y,
+            peer_id: id.to_string().repeat(64),
+        }
+    }
+    #[test]
+    fn parses_and_roundtrips_all_eight_cardinal_positions() {
+        let mut config = Config::default();
+        for (index, (x, y)) in [
+            (1, 0),
+            (2, 0),
+            (-1, 0),
+            (-2, 0),
+            (0, -1),
+            (0, -2),
+            (0, 1),
+            (0, 2),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            config
+                .layout
+                .nodes
+                .push(node(x, y, char::from(b'a' + index as u8 % 6)));
+            config.layout.nodes[index].peer_id = format!("{index:064x}");
+        }
+        config.validate().unwrap();
+        let source = toml::to_string_pretty(&config).unwrap();
+        assert!(source.contains("[[layout.nodes]]"));
+        let decoded: Config = toml::from_str(&source).unwrap();
+        decoded.validate().unwrap();
+        assert_eq!(decoded, config);
+    }
+    #[test]
+    fn duplicate_conflicting_diagonal_local_far_and_gapped_positions_fail_closed() {
+        for nodes in [
+            vec![node(1, 0, 'a'), node(1, 0, 'b')],
+            vec![node(1, 0, 'a'), node(0, -1, 'a')],
+            vec![node(1, 1, 'a')],
+            vec![node(0, 0, 'a')],
+            vec![node(3, 0, 'a')],
+            vec![node(2, 0, 'a')],
+            vec![node(i32::MIN, 0, 'a')],
+        ] {
+            let mut config = Config::default();
+            config.layout.nodes = nodes;
+            assert!(config.validate().is_err());
+        }
+        assert!(toml::from_str::<Config>(
+            "[node]\nname='test'\n[[layout.nodes]]\nx=1\nx=2\ny=0\npeer_id='bad'\n"
+        )
+        .is_err());
+        let mut config = Config::default();
+        config.set_link(Edge::Right, "a".repeat(64));
+        config.layout.nodes.push(node(1, 0, 'b'));
+        assert!(config.validate().is_err());
+    }
+    #[test]
+    fn placement_and_removal_are_atomic_and_legacy_adjacency_is_retained() {
+        let mut config = Config::default();
+        config.set_link(Edge::Right, "a".repeat(64));
+        config.set_position(2, 0, "b".repeat(64)).unwrap();
+        let before = config.clone();
+        assert!(config.set_position(0, -2, "c".repeat(64)).is_err());
+        assert!(config.remove_position(1, 0).is_err());
+        assert_eq!(config, before);
+        assert_eq!(
+            config.layout.topology()[0]
+                .coordinate()
+                .adjacent(ukvm_core::Edge::Right),
+            ukvm_core::Coordinate { x: 3, y: 0 }
+        );
+        config.remove_position(2, 0).unwrap();
+        config.remove_position(1, 0).unwrap();
+        assert!(config.layout.topology().is_empty());
     }
 }

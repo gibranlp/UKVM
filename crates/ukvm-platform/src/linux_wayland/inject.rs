@@ -38,9 +38,19 @@ const COMMAND_QUEUE: usize = 256;
 
 enum Command {
     Begin(reply::SyncSender<Result<(), PlatformError>>),
+    Resume(reply::SyncSender<Result<(), PlatformError>>),
     BeginAsync(oneshot::Sender<Result<(), PlatformError>>),
     Event(InputEvent, reply::SyncSender<Result<(), PlatformError>>),
     Enter(EdgePosition, reply::SyncSender<Result<(), PlatformError>>),
+    Topology(
+        EdgePosition,
+        Vec<ukvm_protocol::Edge>,
+        reply::SyncSender<Result<(), PlatformError>>,
+    ),
+    Exits(
+        Vec<ukvm_protocol::Edge>,
+        reply::SyncSender<Result<(), PlatformError>>,
+    ),
     RemoteEvent(
         InputEvent,
         reply::SyncSender<Result<Option<EdgePosition>, PlatformError>>,
@@ -210,6 +220,10 @@ impl PlatformInputInjector for WaylandInputInjector {
         self.request(Command::Begin, AUTHORIZE_TIMEOUT)
     }
 
+    fn resume(&mut self) -> Result<(), PlatformError> {
+        self.request(Command::Resume, COMMAND_TIMEOUT)
+    }
+
     fn begin_async(
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PlatformError>> + Send + '_>>
@@ -239,6 +253,21 @@ impl PlatformInputInjector for WaylandInputInjector {
 
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
         self.request(|reply| Command::Enter(entry, reply), COMMAND_TIMEOUT)
+    }
+
+    fn enter_topology(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), PlatformError> {
+        self.request(
+            |reply| Command::Topology(entry, exits, reply),
+            COMMAND_TIMEOUT,
+        )
+    }
+
+    fn update_exits(&mut self, exits: Vec<ukvm_protocol::Edge>) -> Result<(), PlatformError> {
+        self.request(|reply| Command::Exits(exits, reply), COMMAND_TIMEOUT)
     }
 
     fn inject_remote(&mut self, event: &InputEvent) -> Result<Option<EdgePosition>, PlatformError> {
@@ -533,6 +562,14 @@ impl PortalEisSession {
     }
 
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
+        self.enter_topology(entry, Vec::new())
+    }
+
+    fn enter_topology(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), PlatformError> {
         if !self
             .pointer
             .has_capability(DeviceCapability::PointerAbsolute)
@@ -558,7 +595,8 @@ impl PortalEisSession {
                 })
             })
             .collect::<Result<Vec<_>, PlatformError>>()?;
-        let pointer = RemotePointer::new(zones, entry).map_err(PlatformError::Backend)?;
+        let pointer =
+            RemotePointer::with_exits(zones, entry, exits).map_err(PlatformError::Backend)?;
         let (x, y) = pointer.position();
         self.absolute_motion(x, y)?;
         self.remote_pointer = Some(pointer);
@@ -733,6 +771,17 @@ async fn run_actor(
                         if result.is_err() { healthy.store(false, Ordering::Release); }
                         let _ = reply.send(result);
                     }
+                    Some(Command::Topology(entry, exits, reply)) => {
+                        let result = if in_use { active.enter_topology(entry, exits) } else { Err(PlatformError::SessionClosed) };
+                        if result.is_err() { healthy.store(false, Ordering::Release); }
+                        let _ = reply.send(result);
+                    }
+                    Some(Command::Exits(exits, reply)) => {
+                        let result = if in_use {
+                            active.remote_pointer.as_mut().ok_or(PlatformError::SessionClosed).and_then(|pointer| pointer.update_exits(exits).map_err(PlatformError::Backend))
+                        } else { Err(PlatformError::SessionClosed) };
+                        let _ = reply.send(result);
+                    }
                     Some(Command::RemoteEvent(event, reply)) => {
                         let result = if in_use { active.inject_remote(&event) } else { Err(PlatformError::SessionClosed) };
                         if result.is_err() { healthy.store(false, Ordering::Release); }
@@ -753,7 +802,7 @@ async fn run_actor(
                         let result = session.take().expect("active session").close().await;
                         let _ = reply.send(result);
                     }
-                    Some(Command::Begin(reply)) => {
+                    Some(Command::Begin(reply) | Command::Resume(reply)) => {
                         let result = if in_use {
                             Err(PlatformError::Backend("injector session already active".into()))
                         } else {
@@ -847,7 +896,12 @@ async fn run_actor(
                     let _ = reply.send(Ok(()));
                     break;
                 }
-                Some(Command::Enter(_, reply)) => {
+                Some(
+                    Command::Resume(reply)
+                    | Command::Enter(_, reply)
+                    | Command::Topology(_, _, reply)
+                    | Command::Exits(_, reply),
+                ) => {
                     let _ = reply.send(Err(PlatformError::SessionClosed));
                 }
                 Some(Command::RemoteEvent(_, reply)) => {

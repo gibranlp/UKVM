@@ -491,6 +491,7 @@ pub enum CaptureNotice {
         activation_id: Option<u32>,
         barrier_id: Option<u32>,
         edge_fraction: f32,
+        edge: Option<Edge>,
     },
     RemoteReturn(EdgePosition),
     EmergencyRelease {
@@ -607,6 +608,43 @@ where
     H: FnMut() -> bool,
     R: FnMut() -> Option<EdgePosition>,
 {
+    capture_edges_with_events_mode(
+        &[edge],
+        zone_index,
+        timing,
+        on_notice,
+        on_event,
+        is_healthy,
+        return_request,
+    )
+    .await
+}
+
+/// One permissioned capture session with barriers for authenticated ready edges.
+pub async fn capture_edges_with_events_mode<F, G, H, R>(
+    edges: &[Edge],
+    zone_index: Option<usize>,
+    timing: CaptureTiming,
+    on_notice: &mut F,
+    on_event: &mut G,
+    is_healthy: &mut H,
+    return_request: &mut R,
+) -> Result<CaptureSummary, String>
+where
+    F: FnMut(CaptureNotice),
+    G: FnMut(InputEvent) -> Result<(), String>,
+    H: FnMut() -> bool,
+    R: FnMut() -> Option<EdgePosition>,
+{
+    if edges.is_empty()
+        || edges.len() > 4
+        || edges
+            .iter()
+            .enumerate()
+            .any(|(i, edge)| edges[..i].contains(edge))
+    {
+        return Err("capture requires 1–4 distinct ready edges".into());
+    }
     let session = CaptureSession::open_cancellable(is_healthy).await?;
     if timing.release_mode == ReleaseMode::EmergencyChord && !session.keyboard_granted {
         let _ = session.close().await;
@@ -625,7 +663,7 @@ where
         return_request,
     };
     let result = capture_inner(
-        &session, edge, zone_index, timing, on_notice, &mut hooks, &mut phase,
+        &session, edges, zone_index, timing, on_notice, &mut hooks, &mut phase,
     )
     .await;
     let close = session.close().await;
@@ -648,7 +686,7 @@ struct CaptureHooks<'a, G, H, R> {
 
 async fn capture_inner<F, G, H, R>(
     session: &CaptureSession,
-    edge: Edge,
+    edges: &[Edge],
     zone_index: Option<usize>,
     timing: CaptureTiming,
     on_notice: &mut F,
@@ -701,7 +739,13 @@ where
     let zone_set =
         capture_setup(session.zones(), hooks.is_healthy, Duration::from_secs(10)).await?;
     on_notice(CaptureNotice::Zones(zone_set.clone()));
-    let requested = select_barriers(&zone_set.zones, edge, zone_index)?;
+    let mut requested = Vec::new();
+    for edge in edges {
+        for mut barrier in select_barriers(&zone_set.zones, *edge, zone_index)? {
+            barrier.id = requested.len() as u32 + 1;
+            requested.push(barrier);
+        }
+    }
     on_notice(CaptureNotice::BarriersRequested(requested.clone()));
     let barriers = requested
         .iter()
@@ -800,7 +844,8 @@ where
                     triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id))
                         .map(|item| item.segment.fraction_for_cursor(position))
                 }).unwrap_or(0.5);
-                on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier, edge_fraction });
+                let edge = triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id)).map(|item| item.segment.edge);
+                on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier, edge_fraction, edge });
             }
             signal = deactivated.next() => {
                 let Some(signal) = signal else { abort_reason = Some("InputCapture Deactivated signal stream closed".into()); break; };

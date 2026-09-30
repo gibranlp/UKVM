@@ -28,13 +28,7 @@ pub enum Focus {
 }
 
 /// A direction in the logical layout, independent of display coordinates.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Edge {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
+pub use ukvm_protocol::Edge;
 
 #[cfg(test)]
 mod tests {
@@ -49,3 +43,30 @@ mod tests {
     }
 }
 pub mod controlled;
+
+/// Logical topology coordinates; screen pixels belong to platform backends.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Coordinate {
+    pub x: i32,
+    pub y: i32,
+}
+impl Coordinate {
+    pub const LOCAL: Self = Self { x: 0, y: 0 };
+    pub fn adjacent(self, edge: ukvm_protocol::Edge) -> Self {
+        let (dx, dy) = match edge {
+            ukvm_protocol::Edge::Left => (-1, 0),
+            ukvm_protocol::Edge::Right => (1, 0),
+            ukvm_protocol::Edge::Top => (0, -1),
+            ukvm_protocol::Edge::Bottom => (0, 1),
+        };
+        Self {
+            x: self.x + dx,
+            y: self.y + dy,
+        }
+    }
+}
+impl std::fmt::Display for Coordinate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({},{})", self.x, self.y)
+    }
+}

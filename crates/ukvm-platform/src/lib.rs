@@ -115,6 +115,9 @@ pub trait PlatformInputInjector: Send {
     fn capabilities(&self) -> InjectionCapabilities;
     /// Must clean up partial native state before returning an error.
     fn begin(&mut self) -> Result<(), PlatformError>;
+    fn resume(&mut self) -> Result<(), PlatformError> {
+        self.begin()
+    }
     fn begin_async(
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), PlatformError>> + Send + '_>>
@@ -125,6 +128,18 @@ pub trait PlatformInputInjector: Send {
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported(
             "remote edge entry is unavailable",
+        ))
+    }
+    fn enter_topology(
+        &mut self,
+        _entry: EdgePosition,
+        _exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported("topology entry is unavailable"))
+    }
+    fn update_exits(&mut self, _exits: Vec<ukvm_protocol::Edge>) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported(
+            "topology exit updates are unavailable",
         ))
     }
     fn inject_remote(&mut self, event: &InputEvent) -> Result<Option<EdgePosition>, PlatformError> {
@@ -161,6 +176,10 @@ impl<I: PlatformInputInjector> RemoteInputSink<I> {
         }
     }
 
+    pub fn grant_is_healthy(&self) -> bool {
+        self.injector.is_healthy()
+    }
+
     pub fn shutdown(&mut self) -> Result<(), String> {
         let released = if self.active {
             self.injector.release_all()
@@ -181,6 +200,13 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
 
     fn begin_session(&mut self) -> Result<(), String> {
         self.injector.begin().map_err(|e| e.to_string())?;
+        self.active = true;
+        self.entered = false;
+        Ok(())
+    }
+
+    fn resume_session(&mut self) -> Result<(), String> {
+        self.injector.resume().map_err(|e| e.to_string())?;
         self.active = true;
         self.entered = false;
         Ok(())
@@ -211,6 +237,28 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
             .map_err(|e| e.to_string())?;
         self.entered = true;
         Ok(())
+    }
+
+    fn enter_topology(
+        &mut self,
+        entry: EdgePosition,
+        exits: Vec<ukvm_protocol::Edge>,
+    ) -> Result<(), String> {
+        if !self.active || self.entered {
+            return Err("topology entry is out of order".into());
+        }
+        self.injector
+            .enter_topology(entry, exits)
+            .map_err(|e| e.to_string())?;
+        self.entered = true;
+        Ok(())
+    }
+
+    fn update_exits(&mut self, exits: Vec<ukvm_protocol::Edge>) -> Result<(), String> {
+        if !self.active || !self.entered {
+            return Err("topology exit update before entry".into());
+        }
+        self.injector.update_exits(exits).map_err(|e| e.to_string())
     }
 
     fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String> {

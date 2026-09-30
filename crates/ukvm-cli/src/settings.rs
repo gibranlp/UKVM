@@ -23,21 +23,14 @@ fn context() -> Result<(PathBuf, PathBuf, Config, TrustStore), String> {
 }
 fn validated() -> Result<(PathBuf, PathBuf, Config, TrustStore), String> {
     let context = context()?;
-    for link in &context.2.layout.links {
-        let peer = context.3.find_id(&link.peer_id).ok_or_else(|| {
+    for node in context.2.layout.topology() {
+        context.3.find_id(&node.peer_id).ok_or_else(|| {
             format!(
-                "{} edge references unknown peer {}",
-                link.edge.as_str(),
-                link.peer_id
+                "coordinate {} references unknown peer {}",
+                node.coordinate(),
+                node.peer_id
             )
         })?;
-        if peer.address.is_none() {
-            return Err(format!(
-                "{} edge peer {} has no address",
-                link.edge.as_str(),
-                peer.alias
-            ));
-        }
     }
     let local_cert = default_state_dir()?.join("node.der");
     if local_cert.exists() {
@@ -79,7 +72,7 @@ pub fn peer(args: &[String]) -> ExitCode {
             [command, name] if command == "remove" => {
                 let peer = store.find(name).ok_or("unknown peer")?.clone();
                 let (config_path, _, mut config, _) = context()?;
-                config.layout.links.retain(|link| link.peer_id != peer.id);
+                config.remove_peer_from_layout(&peer.id);
                 ukvm_config::save(&config_path,&config).map_err(|e| e.to_string())?;
                 store.remove(&state,name)?; println!("Removed peer {} and its layout links.",peer.alias);
             }
@@ -112,21 +105,42 @@ pub fn layout(args: &[String]) -> ExitCode {
         match args {
             [] => {
                 println!("UniversalKVM Layout\nThis node: {}", config.node.name);
-                for edge in [Edge::Left, Edge::Right, Edge::Top, Edge::Bottom] {
-                    if let Some(link) = config.layout.links.iter().find(|l| l.edge == edge) {
-                        let peer = store
-                            .find_id(&link.peer_id)
-                            .ok_or("layout references unknown peer")?;
-                        println!(
-                            "{}: {} ({})",
-                            edge.as_str().to_uppercase(),
-                            peer.alias,
-                            peer.address.as_deref().unwrap_or("no address")
-                        );
-                    } else {
-                        println!("{}: none", edge.as_str().to_uppercase());
-                    }
+                for node in config.layout.topology() {
+                    let peer = store
+                        .find_id(&node.peer_id)
+                        .ok_or("layout references unknown peer")?;
+                    println!(
+                        "{}: {} [{}] ({})",
+                        node.coordinate(),
+                        peer.alias,
+                        peer.id,
+                        peer.address.as_deref().unwrap_or("discovery only")
+                    );
                 }
+            }
+            [command, x, y, name] if command == "place" => {
+                let x = x.parse().map_err(|_| "x must be an integer")?;
+                let y = y.parse().map_err(|_| "y must be an integer")?;
+                let peer = store.find(name).ok_or("unknown trusted peer")?;
+                let local_cert = default_state_dir()?.join("node.der");
+                if local_cert.exists()
+                    && certificate_id(&std::fs::read(local_cert).map_err(|e| e.to_string())?)
+                        == peer.id
+                {
+                    return Err("cannot place this node as its own remote peer".into());
+                }
+                config
+                    .set_position(x, y, peer.id.clone())
+                    .map_err(|e| e.to_string())?;
+                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
+                println!("({x},{y}): {} [{}]", peer.alias, peer.id);
+            }
+            [command, x, y] if command == "remove-position" => {
+                let x = x.parse().map_err(|_| "x must be an integer")?;
+                let y = y.parse().map_err(|_| "y must be an integer")?;
+                config.remove_position(x, y).map_err(|e| e.to_string())?;
+                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
+                println!("Removed ({x},{y}).");
             }
             [command, edge, name] if command == "set" => {
                 let edge = Edge::parse(edge)?;
@@ -153,7 +167,10 @@ pub fn layout(args: &[String]) -> ExitCode {
                 ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
                 println!("Removed {} layout link.", edge.as_str());
             }
-            _ => return Err("usage: ukvm layout [set EDGE PEER|remove EDGE]".into()),
+            _ => return Err(
+                "usage: ukvm layout [place X Y PEER|remove-position X Y|set EDGE PEER|remove EDGE]"
+                    .into(),
+            ),
         }
         Ok(())
     })();

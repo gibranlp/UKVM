@@ -69,12 +69,12 @@ pub fn temporary_paths(paths: &[&Path]) -> Vec<PathBuf> {
 }
 
 pub fn current_edge(config: &Config, peer_id: &str) -> Option<Edge> {
-    config
-        .layout
-        .links
-        .iter()
-        .find(|link| link.peer_id == peer_id)
-        .map(|link| link.edge)
+    Edge::ALL.into_iter().find(|edge| {
+        config
+            .layout
+            .adjacent_link(*edge)
+            .is_some_and(|link| link.peer_id == peer_id)
+    })
 }
 
 /// Reuse the existing node-level layout. `replace` only permits replacing a
@@ -87,9 +87,8 @@ pub fn set_peer_edge(
 ) -> Result<bool, String> {
     if let Some(occupied) = config
         .layout
-        .links
-        .iter()
-        .find(|link| link.edge == edge && link.peer_id != peer_id)
+        .adjacent_link(edge)
+        .filter(|link| link.peer_id != peer_id)
     {
         if !replace {
             return Err(format!(
@@ -101,7 +100,7 @@ pub fn set_peer_edge(
     }
     if config
         .layout
-        .links
+        .topology()
         .iter()
         .filter(|link| link.peer_id == peer_id)
         .count()
@@ -110,7 +109,7 @@ pub fn set_peer_edge(
     {
         return Ok(false);
     }
-    config.layout.links.retain(|link| link.peer_id != peer_id);
+    config.remove_peer_from_layout(peer_id);
     config.set_link(edge, peer_id.to_string());
     config.validate().map_err(|e| e.to_string())?;
     Ok(true)

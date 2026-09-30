@@ -13,7 +13,7 @@ Commands:\n\
   version   Show executable and protocol versions\n\
   config [path|check|show]  Inspect configuration\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
-  layout [set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
+  layout [place X Y PEER|remove-position X Y|set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
@@ -576,6 +576,7 @@ fn print_capture_notice(
             activation_id,
             barrier_id,
             edge_fraction,
+            ..
         } => {
             println!(
                 "CAPTURE ACTIVATED: activation_id={activation_id:?}, barrier_id={barrier_id:?}"
