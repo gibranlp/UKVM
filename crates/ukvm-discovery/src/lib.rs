@@ -22,6 +22,8 @@ pub struct Advertisement {
     pub node_name: String,
     pub node_id: String,
     pub pairing_port: u16,
+    /// False for a persistent control endpoint; run never enables pairing.
+    pub pairing_available: bool,
     pub control_port: u16,
     pub pairing_version: u8,
     pub input_version: (u16, u16),
@@ -55,6 +57,14 @@ impl Advertisement {
             self.pairing_port,
             &[
                 ("name", name),
+                (
+                    "mode",
+                    if self.pairing_available {
+                        "pairing"
+                    } else {
+                        "control"
+                    },
+                ),
                 ("pair", pair.as_str()),
                 ("input", input.as_str()),
                 ("id", self.node_id.as_str()),
@@ -81,6 +91,7 @@ pub struct DiscoveryResult {
     /// Untrusted TXT hint. Never use this as the verified peer ID.
     pub advertised_node_id: Option<String>,
     pub pairing_version: u8,
+    pub pairing_available: bool,
     pub input_version: Option<(u16, u16)>,
     pub control_port: Option<u16>,
     pub addresses: Vec<SocketAddr>,
@@ -88,7 +99,7 @@ pub struct DiscoveryResult {
 
 impl DiscoveryResult {
     pub fn compatible(&self, local_pairing_version: u8) -> bool {
-        self.pairing_version == local_pairing_version
+        self.pairing_available && self.pairing_version == local_pairing_version
     }
 
     /// DNS-SD addresses are connection hints only. Prefer IPv4 for the current
@@ -162,6 +173,9 @@ pub fn parse_service(service: &ResolvedService) -> Result<DiscoveryResult, Strin
         display_name: name.into(),
         advertised_node_id,
         pairing_version,
+        pairing_available: service
+            .get_property_val_str("mode")
+            .is_none_or(|mode| mode == "pairing"),
         input_version,
         control_port,
         addresses,
@@ -187,6 +201,10 @@ impl DiscoveryCache {
             // still untrusted; do not merge separate instances by claimed ID.
             if entry.result.display_name == result.display_name
                 && entry.result.pairing_version == result.pairing_version
+                && entry.result.pairing_available == result.pairing_available
+                && entry.result.advertised_node_id == result.advertised_node_id
+                && entry.result.control_port == result.control_port
+                && entry.result.input_version == result.input_version
             {
                 entry.result.addresses.extend(result.addresses);
                 entry
@@ -438,6 +456,7 @@ mod tests {
             pairing_port: 24801,
             control_port: 24800,
             pairing_version: 2,
+            pairing_available: true,
             input_version: (1, 1),
         }
         .service_info()
@@ -456,6 +475,27 @@ mod tests {
         );
         assert!(candidate.addresses[1].is_ipv6());
         assert!(candidate.compatible(2));
+    }
+
+    #[test]
+    fn persistent_control_advertisement_is_not_a_pairing_endpoint() {
+        let advertisement = Advertisement {
+            node_name: "runtime".into(),
+            node_id: "d".repeat(64),
+            pairing_port: 24800,
+            pairing_available: false,
+            control_port: 24800,
+            pairing_version: 2,
+            input_version: (1, 2),
+        };
+        let info = advertisement.service_info().unwrap();
+        assert_eq!(info.get_property_val_str("mode"), Some("control"));
+        let mut service = advertised("runtime", &advertisement.node_id, "192.168.1.40", "2");
+        service.txt_properties = info.get_properties().clone();
+        let candidate = parse_service(&service).unwrap();
+        assert!(!candidate.pairing_available);
+        assert!(!candidate.compatible(2));
+        assert_eq!(candidate.control_port, Some(24800));
     }
 
     #[test]
@@ -485,6 +525,7 @@ mod tests {
             pairing_port: 24801,
             control_port: 24800,
             pairing_version: 2,
+            pairing_available: true,
             input_version: (1, 1)
         }
         .service_info()
@@ -497,6 +538,7 @@ mod tests {
             display_name: name.into(),
             advertised_node_id: Some(id.into()),
             pairing_version: 2,
+            pairing_available: true,
             input_version: Some((1, 1)),
             control_port: Some(24800),
             addresses: vec![address.parse().unwrap()],
@@ -557,6 +599,7 @@ mod tests {
             pairing_port: 24801,
             control_port: 24800,
             pairing_version: 2,
+            pairing_available: true,
             input_version: (1, 1),
         };
         let guard = service.advertise(&advertisement).await.unwrap();

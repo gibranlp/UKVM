@@ -26,3 +26,11 @@ Input capture and injection must use OS sanctioned interfaces and surface permis
 ## Reporting issues
 
 Until a private security contact is established, avoid posting exploit details or secrets in public issues. Maintainers should add a dedicated security reporting channel before accepting network or input injection code.
+
+## Persistent runtime boundary (M13)
+
+`ukvm run` is an explicit foreground remote-input mode, separate from the diagnostic default DebugSink. It does not enable pairing or grant permissions. Runtime discovery advertises a stable public identity hint for as long as the node runs, extending its LAN visibility beyond temporary pairing. The TXT `mode=control` marker prevents current pairing browsing from offering runtime endpoints; the marker remains untrusted. Every outbound connection must match the layout ID and pinned certificate. Runtime hints stay ephemeral; a failed hint cannot overwrite a pin or permission.
+
+Outgoing barriers are enabled only after authenticated remote session acceptance, which follows explicit receiver permission and normal portal/EI authorization. Incoming permission is checked before/after portal consent, at entry, and every 250 ms during operation; outgoing connect permission is rechecked at the same interval during capture. Trust-store read/validation failures deny control. Active focus is exclusive; an incoming entry waits for idle local capture to close, and cannot interrupt an active outgoing relationship. Colliding active entries fail closed and clean up.
+
+SIGINT cancels workers cooperatively, releases local capture and held injected state, ends network sessions and closes the retained portal/EI grant. TLS sender tasks are owned and aborted on cancellation; the injector thread is joined on destruction. EOF/write failures restore control when observed; a silent partition can require the existing four-second heartbeat deadline plus capture polling/portal cleanup. No network system can prove instantaneous reachability at the exact edge crossing. There is no replay of held state after reconnect. Runtime restart requires fresh consent; no restore token is stored. Physical runtime recovery remains pending, separately from the proven M12 diagnostic paths.

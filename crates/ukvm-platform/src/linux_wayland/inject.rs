@@ -56,6 +56,7 @@ pub struct WaylandInputInjector {
     commands: mpsc::Sender<Command>,
     capabilities: Arc<Mutex<InjectionCapabilities>>,
     healthy: Arc<AtomicBool>,
+    actor: Option<std::thread::JoinHandle<()>>,
 }
 
 impl WaylandInputInjector {
@@ -98,7 +99,7 @@ impl WaylandInputInjector {
         let actor_caps = Arc::clone(&capabilities);
         let actor_health = Arc::clone(&healthy);
         let (ready_tx, ready_rx) = reply::sync_channel(1);
-        std::thread::Builder::new()
+        let actor = std::thread::Builder::new()
             .name("ukvm-wayland-injector".into())
             .spawn(move || {
                 match tokio::runtime::Builder::new_current_thread()
@@ -140,15 +141,20 @@ impl WaylandInputInjector {
                 }
             })
             .map_err(|err| PlatformError::Backend(err.to_string()))?;
-        ready_rx
+        let ready = ready_rx
             .recv_timeout(PORTAL_SETUP_TIMEOUT + COMMAND_TIMEOUT)
-            .map_err(|err| {
-                PlatformError::Backend(format!("injector actor did not start: {err}"))
-            })??;
+            .map_err(|err| PlatformError::Backend(format!("injector actor did not start: {err}")))
+            .and_then(|ready| ready);
+        if let Err(err) = ready {
+            drop(commands);
+            let _ = actor.join();
+            return Err(err);
+        }
         Ok(Self {
             commands,
             capabilities,
             healthy,
+            actor: Some(actor),
         })
     }
 
@@ -177,6 +183,18 @@ impl WaylandInputInjector {
             })?;
         rx.recv_timeout(COMMAND_TIMEOUT)
             .map_err(|err| PlatformError::Backend(format!("injector command timed out: {err}")))?
+    }
+}
+
+impl Drop for WaylandInputInjector {
+    fn drop(&mut self) {
+        // Close the command channel before joining. The actor releases held
+        // input, closes its portal/EI session and destroys its Tokio runtime.
+        let (replacement, _) = mpsc::channel(1);
+        drop(std::mem::replace(&mut self.commands, replacement));
+        if let Some(actor) = self.actor.take() {
+            let _ = actor.join();
+        }
     }
 }
 
@@ -682,7 +700,9 @@ impl PortalEisSession {
             keyboard.device().stop_emulating(self.connection.serial());
         }
         let flushed = self.connection.flush();
-        let closed = self.portal_session.close().await;
+        let closed = tokio::time::timeout(COMMAND_TIMEOUT, self.portal_session.close())
+            .await
+            .map_err(|_| PlatformError::Backend("portal session close timed out".into()))?;
         released?;
         flushed.map_err(|err| PlatformError::Backend(format!("EI close flush failed: {err}")))?;
         closed.map_err(|err| PlatformError::Backend(format!("portal session close failed: {err}")))
@@ -743,13 +763,13 @@ async fn run_actor(
                         let _ = reply.send(result);
                     }
                     Some(Command::BeginAsync(reply)) => {
-                        let result = if in_use {
-                            Err(PlatformError::Backend("injector session already active".into()))
+                        if in_use {
+                            let _ = reply.send(Err(PlatformError::Backend("injector session already active".into())));
                         } else {
-                            in_use = true;
-                            Ok(())
-                        };
-                        let _ = reply.send(result);
+                            // A cancelled authorization must not strand a
+                            // reusable portal grant in an occupied state.
+                            in_use = reply.send(Ok(())).is_ok();
+                        }
                     }
                     None => break,
                 },
@@ -759,7 +779,12 @@ async fn run_actor(
                         healthy.store(false, Ordering::Release);
                         in_use = false;
                         if let Some(active) = session.take() {
-                            let _ = active.close().await;
+                            if active.close().await.is_err() {
+                                // Drop the dedicated portal connection instead
+                                // of accumulating uncertain grants after Close
+                                // failure. The next runtime attempt opens anew.
+                                break;
+                            }
                         }
                     }
                 }

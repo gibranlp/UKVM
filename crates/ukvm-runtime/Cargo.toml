@@ -1,0 +1,18 @@
+[package]
+name = "ukvm-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ukvm-core.workspace = true
+ukvm-config.workspace = true
+ukvm-discovery.workspace = true
+ukvm-network.workspace = true
+ukvm-platform.workspace = true
+ukvm-protocol.workspace = true
+tokio = { version = "1", features = ["rt", "time", "signal", "net", "sync", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

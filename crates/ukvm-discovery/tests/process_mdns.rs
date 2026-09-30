@@ -14,6 +14,7 @@ fn advertisement() -> Advertisement {
         pairing_port: 24801,
         control_port: 24800,
         pairing_version: 2,
+        pairing_available: true,
         input_version: (1, 1),
     }
 }

@@ -214,6 +214,7 @@ pub fn pair(args: &[String]) -> ExitCode {
                             pairing_port: local_addr.port(),
                             control_port,
                             pairing_version: PAIRING_VERSION,
+                            pairing_available: true,
                             input_version: (
                                 ukvm_protocol::PROTOCOL_MAJOR,
                                 ukvm_protocol::PROTOCOL_MINOR,
@@ -532,6 +533,7 @@ mod tests {
             display_name: "claimed-io".into(),
             advertised_node_id: Some("0".repeat(64)),
             pairing_version: PAIRING_VERSION,
+            pairing_available: true,
             input_version: Some((1, 1)),
             control_port: Some(24800),
             addresses: vec!["127.0.0.1:1".parse().unwrap(), address],

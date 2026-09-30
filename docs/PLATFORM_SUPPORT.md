@@ -1,20 +1,20 @@
 # Platform support plan
 
-**Current status:** Linux Wayland capture, authenticated DebugSink forwarding and remote input injection are proven between spectrum and io. The user confirmed pointer movement, clicks, scroll, keyboard, modifiers, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 implements inverse-edge return using permissioned EI absolute motion, but that round trip and receiver-side held-input cleanup on disconnect still need physical acceptance. The packaged portal on spectrum and io lacks RemoteDesktop; io uses a reversible consent-capable draft. A green build on one OS does not claim runtime support on another.
+**Current status:** Linux Wayland capture, authenticated DebugSink forwarding and remote input injection are proven between spectrum and io. The user confirmed pointer movement, clicks, scroll, keyboard, modifiers, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 inverse-edge return and receiver-side held-input cleanup on disconnect were physically accepted in M12. The new M13 foreground runtime is implemented and requires its own physical acceptance. The packaged portal on spectrum and io lacks RemoteDesktop; io uses a reversible consent-capable draft. A green build on one OS does not claim runtime support on another.
 
 In Milestone 5, a physical right-edge capture on this Hyprland machine sent 611 normalized pointer events through a localhost mutual-TLS connection to UKVM's DebugSink. The receiver counted exactly 611 pointer events, no keyboard events, and injected nothing. InputCapture `Release` succeeded; the user confirmed local mouse and keyboard control returned normally. Later two-computer tests sent 528 and 621 pointer events with none dropped. A receiver-kill test during capture released local control. Other compositors remain untested. See [network transport](NETWORK.md).
 
 | Environment | InputCapture | Controlled-node injection |
 | --- | --- | --- |
 | Arch Linux / Hyprland 0.56.2, packaged portal | Pointer and keyboard proven by physical tests | Unavailable: packaged portal has no RemoteDesktop |
-| Arch Linux / Hyprland 0.56.2, consent-capable draft portal on io | Pointer and keyboard proven | Pointer, clicks, scroll and keyboard physically proven across two PCs; natural edge return unproven |
+| Arch Linux / Hyprland 0.56.2, consent-capable draft portal on io | Pointer and keyboard proven | Pointer, clicks, scroll and keyboard physically proven across two PCs; natural edge return proven in M12; M13 runtime acceptance pending |
 | GNOME Wayland | Untested | Untested |
 | KDE Plasma Wayland | Untested | Untested |
 | Other wlroots/COSMIC | Untested | Untested |
 
 | Target | Candidate sanctioned mechanisms | Main open questions |
 | --- | --- | --- |
-| Linux Wayland | InputCapture/EI capture and experimental RemoteDesktop/EI injection verified on Hyprland with a draft portal | A released consent-capable RemoteDesktop backend, natural return, receiver disconnect cleanup, other compositors, zone-change recovery and cross-platform key mapping need testing |
+| Linux Wayland | InputCapture/EI capture and experimental RemoteDesktop/EI injection verified on Hyprland with a draft portal | A released consent-capable RemoteDesktop backend, M13 runtime recovery, other compositors, zone-change recovery and cross-platform key mapping need testing |
 | Linux X11 | XInput2/X11 event capture and XTEST injection | Grabs, multiple displays, X server security, injected-event loops |
 | macOS | Quartz event taps, Core Graphics event posting, display APIs | Accessibility and Input Monitoring grants, event tap lifecycle, secure input, multi-display coordinates |
 | Windows | Raw input or low-level hooks, `SendInput`, monitor APIs | Hook behavior, integrity levels, secure desktop and session boundaries |
@@ -89,3 +89,9 @@ The [portal routing format](https://flatpak.github.io/xdg-desktop-portal/docs/po
 - `tokio` drives portal and EI streams; `futures-util` provides stream iteration. These are Linux-only dependencies in the platform crate. `ashpd` 0.13 requires Rust 1.87, so the workspace MSRV was raised from 1.78 to 1.87.
 
 Windows [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) synthesizes input and is subject to Windows integrity restrictions. Microsoft documents [low-level mouse hooks](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelmouseproc) and points to raw input for some monitoring use cases. Apple documents [Quartz event services](https://developer.apple.com/documentation/coregraphics/quartz-event-services?changes=_11&language=objc) for event taps. X.Org documents [XTEST](https://www.x.org/releases/current/doc/xextproto/xtest.pdf) for synthetic X11 input. Each backend needs real platform testing before support can be advertised.
+
+## M13 foreground runtime
+
+`ukvm run` uses the same sanctioned Linux Wayland backends and does not add OS backends, portal routing changes or privileged input paths. The receiver retains legitimate RemoteDesktop/EI consent across sessions. Local InputCapture setup now uses a dedicated portal connection, cancellable health-aware waits and bounded setup/cleanup deadlines so shutdown or peer loss before activation cannot leave a pending capture client. The injector actor thread is owned and joined when destroyed. These lifecycle changes require a new physical regression even though the M12 input path was proven.
+
+The initial runtime supports one outgoing layout edge per node and the existing spectrum-right/io-left mapping. Automated tests use simulated injection plus real localhost TLS; they are not compositor acceptance. M13 ten-round-trip, emergency release, receiver restart, active disconnect, network interruption, idle and 30–60 minute checks are pending. See [runtime acceptance](RUNTIME.md).

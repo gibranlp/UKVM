@@ -33,6 +33,13 @@ pub trait InputSink {
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), String> {
         Err("sink does not support remote entry".into())
     }
+    /// Runtime entry may first disarm an idle local capture barrier.
+    fn enter_remote_async(&mut self, entry: EdgePosition) -> SinkFuture<'_>
+    where
+        Self: Send,
+    {
+        Box::pin(async move { self.enter_remote(entry) })
+    }
     fn handle_event(&mut self, event: &InputEvent) -> Result<SinkAction, String>;
     /// The receiver polls this while idle so backend loss ends the network
     /// session even when no further input arrives.

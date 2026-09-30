@@ -202,15 +202,66 @@ pub async fn probe() -> ProbeReport {
     }
 }
 
+async fn capture_setup<T, E: std::fmt::Display, H: FnMut() -> bool>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+    healthy: &mut H,
+    timeout: Duration,
+) -> Result<T, String> {
+    if !healthy() {
+        return Err("capture setup cancelled before creating authority".into());
+    }
+    tokio::pin!(future);
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(deadline);
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            result = &mut future => return result.map_err(|e| e.to_string()),
+            _ = &mut deadline => return Err("InputCapture setup timed out".into()),
+            _ = tokio::signal::ctrl_c() => return Err("local shutdown during capture setup".into()),
+            _ = tick.tick() => if !healthy() { return Err("peer unavailable or local shutdown during capture setup".into()); },
+        }
+    }
+}
+
 struct CaptureSession {
     portal: InputCapture,
     session: Session<InputCapture>,
     keyboard_granted: bool,
+    bus: zbus::Connection,
 }
 
 impl CaptureSession {
     async fn open() -> Result<Self, String> {
-        let portal = InputCapture::new().await.map_err(|e| e.to_string())?;
+        Self::open_cancellable(&mut || true).await
+    }
+
+    async fn open_cancellable<H: FnMut() -> bool>(healthy: &mut H) -> Result<Self, String> {
+        let bus = capture_setup(
+            zbus::Connection::session(),
+            healthy,
+            Duration::from_secs(10),
+        )
+        .await?;
+        // Each capture owns its bus connection. If consent/session creation is
+        // cancelled, explicitly disconnect that portal client so even a request
+        // whose session handle has not arrived cannot retain input authority.
+        let result = capture_setup(
+            Self::open_on_bus(bus.clone()),
+            healthy,
+            Duration::from_secs(125),
+        )
+        .await;
+        if result.is_err() {
+            let _ = tokio::time::timeout(Duration::from_secs(4), bus.close()).await;
+        }
+        result
+    }
+
+    async fn open_on_bus(bus: zbus::Connection) -> Result<Self, String> {
+        let portal = InputCapture::with_connection(bus.clone())
+            .await
+            .map_err(|e| e.to_string())?;
         let requested = CaptureFlags::Keyboard | CaptureFlags::Pointer;
         let (session, flags) = if portal.version() >= 2 {
             let session = portal
@@ -251,6 +302,7 @@ impl CaptureSession {
             portal,
             session,
             keyboard_granted: flags.contains(CaptureFlags::Keyboard),
+            bus,
         })
     }
 
@@ -278,10 +330,23 @@ impl CaptureSession {
     }
 
     async fn close(self) -> Result<(), String> {
-        let disabled = self.portal.disable(&self.session, Default::default()).await;
-        let closed = self.session.close().await;
-        disabled.map_err(|e| format!("InputCapture Disable failed: {e}"))?;
-        closed.map_err(|e| format!("InputCapture session Close failed: {e}"))
+        let disabled = tokio::time::timeout(
+            Duration::from_secs(4),
+            self.portal.disable(&self.session, Default::default()),
+        )
+        .await;
+        let closed = tokio::time::timeout(Duration::from_secs(4), self.session.close()).await;
+        // Disconnect even if Disable/Close failed or the portal disappeared.
+        let disconnected = tokio::time::timeout(Duration::from_secs(4), self.bus.close()).await;
+        disabled
+            .map_err(|_| "InputCapture Disable timed out")?
+            .map_err(|e| format!("InputCapture Disable failed: {e}"))?;
+        closed
+            .map_err(|_| "InputCapture Close timed out")?
+            .map_err(|e| format!("InputCapture session Close failed: {e}"))?;
+        disconnected
+            .map_err(|_| "InputCapture bus close timed out")?
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -535,7 +600,7 @@ where
     H: FnMut() -> bool,
     R: FnMut() -> Option<EdgePosition>,
 {
-    let session = CaptureSession::open().await?;
+    let session = CaptureSession::open_cancellable(is_healthy).await?;
     if timing.release_mode == ReleaseMode::EmergencyChord && !session.keyboard_granted {
         let _ = session.close().await;
         return Err(
@@ -606,22 +671,28 @@ where
         .map_err(|e| e.to_string())?;
     // ConnectToEIS must precede Enable. Keep the EI receiver alive throughout
     // every enabled/active cycle of this portal session.
-    let fd = session
-        .portal
-        .connect_to_eis(&session.session, Default::default())
-        .await
-        .map_err(|e| e.to_string())?;
+    let fd = capture_setup(
+        session
+            .portal
+            .connect_to_eis(&session.session, Default::default()),
+        hooks.is_healthy,
+        Duration::from_secs(10),
+    )
+    .await?;
     on_notice(CaptureNotice::EisSocketAcquired);
     let stream = UnixStream::from(fd);
     stream.set_nonblocking(true).map_err(|e| e.to_string())?;
     let context = ei::Context::new(stream).map_err(|e| e.to_string())?;
     on_notice(CaptureNotice::EisContextConnected);
-    let (_connection, mut events) = context
-        .handshake_tokio("ukvm", ei::handshake::ContextType::Receiver)
-        .await
-        .map_err(|e| format!("EI handshake failed: {e}"))?;
+    let (_connection, mut events) = capture_setup(
+        context.handshake_tokio("ukvm", ei::handshake::ContextType::Receiver),
+        hooks.is_healthy,
+        Duration::from_secs(10),
+    )
+    .await?;
     on_notice(CaptureNotice::EisHandshakeComplete);
-    let zone_set = session.zones().await?;
+    let zone_set =
+        capture_setup(session.zones(), hooks.is_healthy, Duration::from_secs(10)).await?;
     on_notice(CaptureNotice::Zones(zone_set.clone()));
     let requested = select_barriers(&zone_set.zones, edge, zone_index)?;
     on_notice(CaptureNotice::BarriersRequested(requested.clone()));
@@ -641,13 +712,19 @@ where
             )
         })
         .collect::<Vec<_>>();
-    let response = session
-        .portal
-        .set_pointer_barriers(&session.session, &barriers, zone_set.id, Default::default())
-        .await
-        .map_err(|e| e.to_string())?
-        .response()
-        .map_err(|e| e.to_string())?;
+    let response = capture_setup(
+        session.portal.set_pointer_barriers(
+            &session.session,
+            &barriers,
+            zone_set.id,
+            Default::default(),
+        ),
+        hooks.is_healthy,
+        Duration::from_secs(10),
+    )
+    .await?
+    .response()
+    .map_err(|e| e.to_string())?;
     let failed = response
         .failed_barriers()
         .iter()
@@ -662,11 +739,12 @@ where
         ));
     }
     *phase = phase.advance(CapturePhase::WaitingForBarrier)?;
-    session
-        .portal
-        .enable(&session.session, Default::default())
-        .await
-        .map_err(|e| e.to_string())?;
+    capture_setup(
+        session.portal.enable(&session.session, Default::default()),
+        hooks.is_healthy,
+        Duration::from_secs(10),
+    )
+    .await?;
     on_notice(CaptureNotice::Enabled);
     let mut summary = CaptureSummary::default();
     let deadline = tokio::time::sleep(timing.duration);
@@ -868,10 +946,58 @@ fn normalize_event(event: &EiEvent) -> Option<InputEvent> {
 
 #[cfg(test)]
 mod tests {
+    use super::capture_setup;
     use super::{
         emergency_modifiers_held, select_barriers, validate_barriers, CapturePhase, Edge,
         InjectionPortalCapability, InterfaceProbe, Zone,
     };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn unavailable_peer_does_not_poll_capture_creation() {
+        let polls = std::cell::Cell::new(0);
+        let pending = std::future::poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            std::task::Poll::<Result<(), String>>::Pending
+        });
+        assert!(
+            capture_setup(pending, &mut || false, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert_eq!(polls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn capture_setup_cancellation_drops_pending_resources() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+        struct Resource(Arc<AtomicUsize>);
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let available = Arc::new(AtomicBool::new(true));
+        let pending = async {
+            let _resource = Resource(drops.clone());
+            std::future::pending::<Result<(), String>>().await
+        };
+        let peer_loss = async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            available.store(false, Ordering::SeqCst);
+        };
+        let mut healthy = || available.load(Ordering::SeqCst);
+        let (result, ()) = tokio::join!(
+            capture_setup(pending, &mut healthy, Duration::from_secs(1)),
+            peer_loss
+        );
+        assert!(result.is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn emergency_release_requires_all_three_modifier_families() {

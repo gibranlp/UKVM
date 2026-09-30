@@ -17,7 +17,10 @@ fn parse_discover_args(args: &[String]) -> Result<Option<&str>, &'static str> {
 
 pub async fn browse(interface: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
     let service = DiscoveryService::new(interface)?;
-    service.browse_for(DEFAULT_BROWSE).await
+    service
+        .browse_for(DEFAULT_BROWSE)
+        .await
+        .map(|hints| hints.into_iter().filter(|h| h.pairing_available).collect())
 }
 
 pub fn print_candidates(candidates: &[DiscoveryResult]) {

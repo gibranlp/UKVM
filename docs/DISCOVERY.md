@@ -4,7 +4,7 @@ UKVM uses DNS-SD over multicast DNS to find **temporary pairing endpoints** on t
 
 ## Mechanism and scope
 
-`ukvm-discovery` uses `mdns-sd` 0.21.4, a Rust DNS-SD publisher/browser with Linux, macOS and Windows support. The alternative of native Avahi/Bonjour wrappers would add OS-specific integration at this stage; custom UDP broadcast would add a new protocol. The crate exposes a short-lived `DiscoveryService` with advertisement and bounded browsing. The CLI provides `ukvm discover` and `ukvm pair --discover`; it passes the chosen resolved socket address into the **same Pairing Protocol 2 initiator** as `ukvm pair HOST`. The normal mTLS/input protocol 1.1 is unchanged.
+`ukvm-discovery` uses `mdns-sd` 0.21.4, a Rust DNS-SD publisher/browser with Linux, macOS and Windows support. The alternative of native Avahi/Bonjour wrappers would add OS-specific integration at this stage; custom UDP broadcast would add a new protocol. The crate exposes a short-lived `DiscoveryService` with advertisement and bounded browsing. The CLI provides `ukvm discover` and `ukvm pair --discover`; it passes the chosen resolved socket address into the **same Pairing Protocol 2 initiator** as `ukvm pair HOST`. The normal mTLS/input protocol is currently 1.2; Pairing Protocol 2 is unchanged.
 
 Only `ukvm pair` as a listener advertises, for its existing 90-second pairing window. Exit, timeout, rejection and normal completion drop the advertisement and request DNS-SD goodbye records. A crash or peer cache may leave a stale entry until its DNS TTL expires; connecting to such an entry fails safely. `ukvm discover` browses for four seconds, then stops. There is no persistent discovery cache or daemon.
 
@@ -19,7 +19,7 @@ The advertisement carries:
 | Address records | Local interface IPv4/IPv6 addresses | Connection hints. |
 | TXT `name` | Configured display name, or hostname fallback | Untrusted label. |
 | TXT `pair` | Pairing protocol version, currently 2 | Compatibility hint; handshake checks again. |
-| TXT `input` | Input protocol version, currently 1.1 | Informational hint. |
+| TXT `input` | Input protocol version, currently 1.2 | Informational hint. |
 | TXT `id` | Full public certificate SHA-256 node ID | **Advertised node ID**, never a verified identity. |
 | TXT `control` | Normal UKVM TCP port, normally 24800 | Informational hint, not a listening claim. |
 
@@ -73,3 +73,9 @@ target/debug/ukvm pair --discover --interface enp10s0
 Select B by its displayed address and name; **compare the codes on both physical screens** and answer yes only if they match. After success, run `target/debug/ukvm peer list`, `target/debug/ukvm peer show <alias>`, and `target/debug/ukvm peer permissions <alias>` on both hosts. Check reciprocal full fingerprints and `connect=true`, `debug-input=false`, `control-this-node=false`. These temporary XDG profiles keep the known-good trust stores untouched. Do not delete the temporary profiles until the result is recorded; each contains a private identity.
 
 For packet inspection, on B capture `udp port 5353` on `enp0s20u2u1u2`. A successful advertiser should send an mDNS announcement from `192.168.1.40` containing `_ukvm._tcp.local.` PTR and associated SRV/TXT/address records. When A browses, B should receive A's PTR query and send an mDNS response from `192.168.1.40`; A's capture on `enp10s0` should see that response. The response may be multicast or unicast according to mDNS behavior, so filter on B's source IP and UDP 5353 rather than only destination `224.0.0.251`.
+
+## Persistent control advertisement (M13)
+
+`ukvm run` uses the existing DNS-SD daemon and service type for the authenticated control listener. It sets TXT `mode=control`, advertises the listening control port in SRV and TXT `control`, and keeps the announcement guard alive until shutdown or discovery failure. Pairing advertisements now set `mode=pairing`; old advertisements without `mode` retain their pairing interpretation. Current `ukvm discover`/`pair --discover` filter out control-only endpoints. No pairing listener runs inside `run`.
+
+Runtime browsing keeps bounded snapshots refreshed through four-second browse windows with six-second pauses. A layout ID matches only an untrusted candidate hint; the runtime then verifies pinned mTLS and the authenticated Hello ID before using that endpoint. Unknown identities are never connected by runtime layout selection. Discovered addresses remain ephemeral and never edit the trust store; configured addresses are fallback hints. Stale or spoofed hints fail safely, and valid later hints permit recovery at a changed IP. Version hints do not replace wire negotiation. If multicast is unavailable, the runtime retries the configured address and reports discovery failures in verbose mode.

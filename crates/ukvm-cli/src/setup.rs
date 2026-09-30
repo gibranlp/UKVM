@@ -696,6 +696,7 @@ mod tests {
             display_name: "io".into(),
             advertised_node_id: Some(b.id.clone()),
             pairing_version: 2,
+            pairing_available: true,
             input_version: Some((1, 1)),
             control_port: Some(port),
             addresses: vec!["127.0.0.1:24801".parse().unwrap()],

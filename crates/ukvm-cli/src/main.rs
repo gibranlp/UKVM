@@ -14,6 +14,7 @@ Commands:\n\
   config [path|check|show]  Inspect configuration\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
   layout [set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
+  run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
   doctor    Probe the current graphical session and portal capabilities\n\
@@ -72,6 +73,7 @@ fn main() -> ExitCode {
         [command] if command == "doctor" => doctor(),
         [command, rest @ ..] if command == "identity" => network::identity(rest),
         [command, rest @ ..] if command == "listen" => network::listen(rest),
+        [command, rest @ ..] if command == "run" => run(rest),
         [command, target, rest @ ..] if command == "connect" => {
             network::connect(target, rest, false)
         }
@@ -440,8 +442,26 @@ fn doctor() -> ExitCode {
     }
     #[cfg(not(target_os = "linux"))]
     println!("Platform diagnostics are not implemented for this OS yet.");
-    println!("\nDiscovery\n  Backend: mDNS/DNS-SD (_ukvm._tcp.local.)\n  Publish/browse: implemented\n  Live multicast: not tested by doctor; run 'ukvm discover'\n  Active advertisement: no (only while 'ukvm pair' listens)");
+    println!("\nDiscovery\n  Backend: mDNS/DNS-SD (_ukvm._tcp.local.)\n  Publish/browse: implemented\n  Live multicast: not tested by doctor; run 'ukvm discover'\n  Active advertisement: only while 'ukvm pair' or 'ukvm run' runs");
     ExitCode::SUCCESS
+}
+
+fn run(args: &[String]) -> ExitCode {
+    let verbose = match args {
+        [] => false,
+        [flag] if flag == "--verbose" => true,
+        [flag] if matches!(flag.as_str(), "--help" | "-h") => {
+            println!("Usage: ukvm run [--verbose]\nRun authenticated edge control continuously in this graphical session. Ctrl+C stops.");
+            return ExitCode::SUCCESS;
+        }
+        _ => return fail("usage: ukvm run [--verbose]"),
+    };
+    with_runtime(async {
+        match ukvm_runtime::run(verbose).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => fail(&error),
+        }
+    })
 }
 
 fn with_runtime<F: std::future::Future>(future: F) -> F::Output {

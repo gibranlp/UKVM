@@ -165,6 +165,7 @@ mod tests {
             display_name: name.into(),
             advertised_node_id: id.map(str::to_string),
             pairing_version: 2,
+            pairing_available: true,
             input_version: Some((1, 1)),
             control_port: Some(24800),
             addresses: vec!["192.168.1.40:24801".parse().unwrap()],

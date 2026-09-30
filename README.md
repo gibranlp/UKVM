@@ -2,7 +2,19 @@
 
 UniversalKVM (`ukvm`) is a planned cross-platform software KVM for moving keyboard and mouse control between computers while each uses its own display. One installation can act as controller, controlled machine, or both. Targets are Linux Wayland, Linux X11, macOS, and Windows.
 
-**Current state:** Linux Wayland InputCapture, authenticated transport, pairing, discovery and real cross-PC input have been physically tested between `spectrum` and `io`. With a reversible consent-capable portal draft on io, the user confirmed pointer movement, clicks, keyboard, modifiers, scrolling, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 natural return by crossing io's left edge has been physically repeated three times on one listener, with local control restored. A timed abrupt sender stop while Shift and a mouse button were held left both PCs with normal local input and no held state. The packaged Hyprland portal lacks RemoteDesktop; see [Wayland injection trial](docs/WAYLAND_INJECTION_TRIAL.md). No background node is implemented.
+**Current state:** Linux Wayland InputCapture, authenticated transport, pairing, discovery and real cross-PC input have been physically tested between `spectrum` and `io`. With a reversible consent-capable portal draft on io, the user confirmed pointer movement, clicks, keyboard, modifiers, scrolling, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 natural return by crossing io's left edge has been physically repeated three times on one listener, with local control restored. A timed abrupt sender stop while Shift and a mouse button were held left both PCs with normal local input and no held state. The packaged Hyprland portal lacks RemoteDesktop; see [Wayland injection trial](docs/WAYLAND_INJECTION_TRIAL.md). `ukvm run` now provides a foreground persistent runtime; M13 physical acceptance is pending.
+
+## Continuous use
+
+With the existing identity, trusted peers, explicit `control-this-node` permission on io, and spectrum's right-edge layout, run this on **both** computers:
+
+```sh
+ukvm run --verbose
+```
+
+The runtime listens, advertises/discovers endpoint hints, verifies pinned mTLS identities, obtains normal portal consent, and rearms after return or failure. It enables the local edge only after the remote injector accepts the session. Offline or rejected peers leave local input usable; reconnection retries automatically. Ctrl+Alt+Shift+Escape releases control; Ctrl+C shuts down. Normal `ukvm run` prints concise startup/shutdown output; verbose mode adds lifecycle events without individual input events. Existing diagnostic commands remain available.
+
+The first authorized incoming session requests RemoteDesktop consent. A valid portal/EI grant is reused until invalidated or shutdown; restarting asks again. The initial runtime supports Linux Wayland and at most one outgoing layout edge per node. Physical M13 acceptance, including restart/network recovery and sustained idle use, is still pending. See [runtime design and acceptance procedure](docs/RUNTIME.md).
 
 ## Build and inspect
 
@@ -32,7 +44,7 @@ For guided first-run configuration, run `ukvm setup` while the other node is in 
 
 ## Design
 
-The CLI remains independent of the future background process. Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
+The CLI calls the reusable `ukvm-runtime` library for foreground operation; user-session service packaging remains future work. Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
 
 ## License
 

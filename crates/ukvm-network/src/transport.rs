@@ -441,7 +441,11 @@ where
                     && sink.kind() == SinkKind::RemoteInput
                     && !remote_entry_seen =>
             {
-                if let Err(err) = sink.enter_remote(position) {
+                let entered = tokio::select! {
+                    _ = &mut shutdown => Err("local override during remote entry".into()),
+                    result = sink.enter_remote_async(position) => result,
+                };
+                if let Err(err) = entered {
                     break Err(err);
                 }
                 remote_entry_seen = true;
@@ -481,25 +485,40 @@ pub struct Sender {
     pub alive: watch::Receiver<bool>,
     pub returned: watch::Receiver<Option<EdgePosition>>,
     pub rtt_micros: Arc<AtomicU64>,
+    tasks: SenderTasks,
+}
+
+// Dropping a sender (including cancellation while arming capture) owns and
+// cancels both halves rather than detaching Tokio tasks and TLS sockets.
+struct SenderTasks {
     writer: JoinHandle<Result<SenderStats, String>>,
     reader: JoinHandle<()>,
+}
+
+impl Drop for SenderTasks {
+    fn drop(&mut self) {
+        self.writer.abort();
+        self.reader.abort();
+    }
 }
 
 impl Sender {
     pub async fn finish(self) -> Result<SenderStats, String> {
         drop(self.queue);
         drop(self.control);
-        let mut writer = self.writer;
-        let result = match tokio::time::timeout(HEALTH_TIMEOUT + HEALTH_TIMEOUT, &mut writer).await
-        {
-            Ok(joined) => joined.map_err(|e| e.to_string())?,
-            Err(_) => {
-                writer.abort();
-                Err("sender shutdown timed out".into())
-            }
-        };
-        self.reader.abort();
-        result
+        let mut tasks = self.tasks;
+        let result =
+            match tokio::time::timeout(HEALTH_TIMEOUT + HEALTH_TIMEOUT, &mut tasks.writer).await {
+                Ok(joined) => joined.map_err(|e| e.to_string()),
+                Err(_) => {
+                    tasks.writer.abort();
+                    let _ = (&mut tasks.writer).await;
+                    Ok(Err("sender shutdown timed out".into()))
+                }
+            };
+        tasks.reader.abort();
+        let _ = (&mut tasks.reader).await;
+        result?
     }
 }
 
@@ -653,8 +672,7 @@ async fn start_sender_for(
         alive,
         returned,
         rtt_micros,
-        writer,
-        reader,
+        tasks: SenderTasks { writer, reader },
     })
 }
 

@@ -7,6 +7,7 @@ members = [
     "crates/ukvm-network",
     "crates/ukvm-platform",
     "crates/ukvm-protocol",
+    "crates/ukvm-runtime",
 ]
 resolver = "2"
 
@@ -23,3 +24,4 @@ ukvm-discovery = { path = "crates/ukvm-discovery" }
 ukvm-network = { path = "crates/ukvm-network" }
 ukvm-platform = { path = "crates/ukvm-platform" }
 ukvm-protocol = { path = "crates/ukvm-protocol" }
+ukvm-runtime = { path = "crates/ukvm-runtime" }

@@ -1600,6 +1600,7 @@ dependencies = [
  "ukvm-network",
  "ukvm-platform",
  "ukvm-protocol",
+ "ukvm-runtime",
 ]
 
 [[package]]
@@ -1668,6 +1669,20 @@ name = "ukvm-protocol"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "ukvm-runtime"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tokio",
+ "ukvm-config",
+ "ukvm-core",
+ "ukvm-discovery",
+ "ukvm-network",
+ "ukvm-platform",
+ "ukvm-protocol",
 ]
 
 [[package]]
