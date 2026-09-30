@@ -13,5 +13,8 @@ ukvm-core.workspace = true
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "input_capture", "remote_desktop", "screencast"] }
 futures-util = "0.3"
 reis = { version = "0.7.1", features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "time", "signal", "net", "macros"] }
+tokio = { version = "1", features = ["rt", "time", "signal", "net", "macros", "io-util"] }
 zbus = "5.18"
+
+[dev-dependencies]
+tempfile = "3"

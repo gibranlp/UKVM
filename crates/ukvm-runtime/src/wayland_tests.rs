@@ -84,6 +84,7 @@ impl Fixture {
             verbose: false,
             hints: Mutex::new(Vec::new()),
             availability: Mutex::new(PeerAvailability::Dormant),
+            rearm: Mutex::new(EmergencyRearmGuard::Ready),
         };
         Self {
             _temp: temp,
@@ -340,4 +341,150 @@ async fn denied_runtime_policy_does_not_open_portal_or_injector() {
     assert!(sink
         .enter_remote(super::super::lifecycle_tests::entry())
         .is_err());
+}
+
+fn launching_boundary() -> linux_wayland::OuterSegment {
+    linux_wayland::OuterSegment {
+        zone: 0,
+        edge: linux_wayland::Edge::Right,
+        start: (0, 0),
+        end: (0, 2159),
+    }
+}
+
+#[test]
+fn emergency_restores_local_focus_but_only_inward_movement_allows_next_crossing() {
+    let fixture = Fixture::new(true);
+    assert!(arm_outgoing(&fixture.context));
+    assert!(fixture.context.gate.activate());
+    fixture
+        .context
+        .rearm
+        .lock()
+        .unwrap()
+        .suppress(Some(launching_boundary()));
+    fixture.context.gate.outbound_closed(); // completed Release/Close path
+    assert_eq!(fixture.context.gate.state(), Focus::Local);
+    for point in [
+        ukvm_platform::Point { x: -0.5, y: 500.0 },
+        ukvm_platform::Point { x: 0.0, y: 800.0 },
+        ukvm_platform::Point { x: -31.0, y: 906.0 },
+    ] {
+        assert!(!fixture.context.rearm.lock().unwrap().observe_local(point));
+        assert!(!arm_outgoing(&fixture.context));
+        assert!(!fixture.context.gate.activate());
+        assert_eq!(fixture.context.gate.state(), Focus::Local);
+    }
+    assert!(fixture
+        .context
+        .rearm
+        .lock()
+        .unwrap()
+        .observe_local(ukvm_platform::Point { x: -32.0, y: 906.0 }));
+    assert!(arm_outgoing(&fixture.context));
+    assert_eq!(fixture.context.gate.state(), Focus::Armed);
+    assert!(fixture.context.gate.activate()); // later intentional portal crossing
+    assert_eq!(fixture.context.gate.state(), Focus::Controlling);
+}
+
+#[test]
+fn normal_return_and_disconnect_still_allow_rearming_without_movement_guard() {
+    let fixture = Fixture::new(true);
+    // Both normal return and disconnect execute the same existing focus Close
+    // path; only EmergencyRelease latches the additional movement guard.
+    for _ in 0..2 {
+        assert!(arm_outgoing(&fixture.context));
+        assert!(fixture.context.gate.activate());
+        fixture.context.gate.outbound_closed();
+        assert_eq!(fixture.context.gate.state(), Focus::Local);
+        assert!(fixture.context.rearm.lock().unwrap().allows_arming());
+    }
+    assert!(arm_outgoing(&fixture.context));
+}
+
+#[tokio::test]
+async fn emergency_session_end_cleans_held_input_and_discards_queued_events_before_rearming() {
+    use super::super::lifecycle_tests::{entry, sink, Evidence};
+    let fixture = Fixture::new(true);
+    let listener = transport::bind("127.0.0.1:0").await.unwrap();
+    fixture.hint(listener.local_addr().unwrap());
+    let identity = fixture.peer.clone();
+    let store = fixture.peer_store.clone();
+    let trust = fixture.peer_trust.clone();
+    let remote_gate = FocusGate::default();
+    let gate = remote_gate.clone();
+    let evidence = Arc::new(Mutex::new(Evidence::default()));
+    let shared = evidence.clone();
+    let receiver = tokio::spawn(async move {
+        let mut sink = sink(&gate, &shared);
+        let (tcp, _) = listener.accept().await.unwrap();
+        let connection =
+            transport::accept_remote_trusted(tcp, &identity, &store, &trust, "peer", &sink)
+                .await
+                .unwrap();
+        let counts = transport::receive_session(connection, &mut sink, |_| {})
+            .await
+            .unwrap();
+        // Events queued after emergency SessionEnd never reach the injector.
+        assert_eq!(counts.keyboard, 1);
+        assert_eq!(counts.buttons, 1);
+        assert_eq!(gate.state(), Focus::Local);
+        assert!(!shared.lock().unwrap().held_key);
+        assert!(!shared.lock().unwrap().held_button);
+        sink.inner.shutdown().unwrap();
+    });
+    let sender = fixture.prepare().await.unwrap();
+    assert!(arm_outgoing(&fixture.context));
+    assert!(fixture.context.gate.activate());
+    sender
+        .control
+        .send(WireMessage::RemoteEntry(entry()))
+        .await
+        .unwrap();
+    sender
+        .queue
+        .send(InputEvent::Key {
+            code: ukvm_protocol::KeyCode::LinuxEvdev(42),
+            pressed: true,
+        })
+        .await
+        .unwrap();
+    sender
+        .queue
+        .send(InputEvent::PointerButton {
+            button: 272,
+            pressed: true,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !evidence.lock().unwrap().held_button {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture
+        .context
+        .rearm
+        .lock()
+        .unwrap()
+        .suppress(Some(launching_boundary()));
+    sender.control.try_send(WireMessage::SessionEnd).unwrap();
+    sender
+        .queue
+        .try_send(InputEvent::Key {
+            code: ukvm_protocol::KeyCode::LinuxEvdev(30),
+            pressed: true,
+        })
+        .unwrap();
+    fixture.context.gate.outbound_closed();
+    sender.finish().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!arm_outgoing(&fixture.context));
+    assert!(!evidence.lock().unwrap().held_key);
+    assert!(!evidence.lock().unwrap().held_button);
 }

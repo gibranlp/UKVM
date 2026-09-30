@@ -12,7 +12,9 @@ use ukvm_network::{
     trust::{cert_path, default_trust_dir, resolve_address, TrustStore},
 };
 use ukvm_platform::{
-    linux_wayland::{self, CaptureNotice, CaptureTiming, ReleaseMode, WaylandInputInjector},
+    linux_wayland::{
+        self, CaptureNotice, CaptureTiming, EmergencyRearmGuard, ReleaseMode, WaylandInputInjector,
+    },
     RemoteInputSink,
 };
 use ukvm_protocol::WireMessage;
@@ -37,6 +39,7 @@ struct Context {
     verbose: bool,
     hints: Mutex<Vec<DiscoveryResult>>,
     availability: Mutex<PeerAvailability>,
+    rearm: Mutex<EmergencyRearmGuard>,
 }
 impl Context {
     fn availability(&self, next: PeerAvailability) {
@@ -87,6 +90,7 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
         verbose,
         hints: Mutex::new(Vec::new()),
         availability: Mutex::new(PeerAvailability::Dormant),
+        rearm: Mutex::new(EmergencyRearmGuard::Ready),
     };
     let (stop_tx, stop) = watch::channel(false);
     // Register SIGINT before announcing readiness and retain this exact
@@ -407,6 +411,10 @@ async fn controller(context: &Context, mut stop: watch::Receiver<bool>) {
             pause(Duration::from_millis(250), &mut stop).await;
             continue;
         }
+        if !context.rearm.lock().unwrap().allows_arming() {
+            wait_for_inward(context, &mut stop).await;
+            continue;
+        }
         context.availability(PeerAvailability::Connecting);
         let result = tokio::select! {
             _ = cancelled(&mut stop) => break,
@@ -425,7 +433,7 @@ async fn controller(context: &Context, mut stop: watch::Receiver<bool>) {
                 continue;
             }
         };
-        if context.stop.load(Ordering::Acquire) || !context.gate.arm() {
+        if context.stop.load(Ordering::Acquire) || !arm_outgoing(context) {
             let _ = sender.finish().await;
             continue;
         }
@@ -443,6 +451,50 @@ async fn controller(context: &Context, mut stop: watch::Receiver<bool>) {
         } else {
             backoff.reset();
             pause(Duration::from_millis(250), &mut stop).await;
+        }
+    }
+}
+
+fn arm_outgoing(context: &Context) -> bool {
+    context.rearm.lock().unwrap().allows_arming() && context.gate.arm()
+}
+
+async fn wait_for_inward(context: &Context, stop: &mut watch::Receiver<bool>) {
+    eprintln!("Emergency release: launching edge remains disarmed. Move at least 32 logical pixels inward to rearm it.");
+    let mut backoff = Backoff::default();
+    let mut reported_error = None;
+    while !context.stop.load(Ordering::Acquire) && !context.rearm.lock().unwrap().allows_arming() {
+        if context.gate.state() != Focus::Local {
+            pause(Duration::from_millis(100), stop).await;
+            continue;
+        }
+        let result = tokio::select! {
+            _ = cancelled(stop) => return,
+            position = linux_wayland::local_pointer_position() => position,
+        };
+        match result {
+            Ok(position) => {
+                backoff.reset();
+                reported_error = None;
+                // Ignore observations made while an incoming peer owns focus.
+                if context.gate.state() == Focus::Local
+                    && context.rearm.lock().unwrap().observe_local(position)
+                {
+                    context.log("inward movement observed; emergency rearm guard cleared");
+                    return;
+                }
+                pause(Duration::from_millis(100), stop).await;
+            }
+            Err(error) => {
+                let message = error.to_string();
+                if reported_error.as_ref() != Some(&message) {
+                    eprintln!(
+                        "Cannot observe inward movement: {message}; launching edge stays disarmed."
+                    );
+                    reported_error = Some(message);
+                }
+                pause(backoff.failed(), stop).await;
+            }
         }
     }
 }
@@ -511,6 +563,17 @@ async fn capture(context: &Context, link: &Link, sender: &transport::Sender) -> 
                 }
             } else {
                 failed.store(true, Ordering::Release);
+            }
+        }
+        CaptureNotice::EmergencyRelease { boundary } => {
+            context.rearm.lock().unwrap().suppress(boundary);
+            context.log("emergency chord detected; launching edge disarmed until inward movement");
+            // Terminate forwarding before local Release/Close. SessionEnd
+            // releases remote held state; unsent events are discarded.
+            if sender.control.try_send(WireMessage::SessionEnd).is_err() {
+                context.log(
+                    "emergency session end queue unavailable; sender finish will close the session",
+                );
             }
         }
         CaptureNotice::Enabled => context.log("InputCapture edge enabled"),

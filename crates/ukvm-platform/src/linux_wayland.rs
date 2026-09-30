@@ -17,8 +17,12 @@ use std::{collections::HashSet, os::unix::net::UnixStream, path::PathBuf, time::
 use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
 mod geometry;
+mod pointer_position;
+mod rearm;
 mod return_edge;
 pub use geometry::{all_outer_segments, outer_segments, Edge, OuterSegment, Zone, ZoneSet};
+pub use pointer_position::local_pointer_position;
+pub use rearm::{EmergencyRearmGuard, EMERGENCY_REARM_DISTANCE};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {
@@ -489,6 +493,9 @@ pub enum CaptureNotice {
         edge_fraction: f32,
     },
     RemoteReturn(EdgePosition),
+    EmergencyRelease {
+        boundary: Option<OuterSegment>,
+    },
     Deactivated {
         activation_id: Option<u32>,
     },
@@ -863,6 +870,13 @@ where
                                     ReleaseMode::Escape => true,
                                     ReleaseMode::EmergencyChord => emergency_modifiers_held(&held_keys),
                                 } {
+                                    if timing.release_mode == ReleaseMode::EmergencyChord {
+                                        let boundary = triggered_barrier
+                                            .and_then(|id| requested.iter().find(|item| item.id == id))
+                                            .or_else(|| (requested.len() == 1).then(|| &requested[0]))
+                                            .map(|item| item.segment);
+                                        on_notice(CaptureNotice::EmergencyRelease { boundary });
+                                    }
                                     break;
                                 }
                             }

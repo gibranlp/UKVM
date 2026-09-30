@@ -595,6 +595,9 @@ fn print_capture_notice(
                 position.edge, position.fraction
             );
         }
+        CaptureNotice::EmergencyRelease { .. } => {
+            println!("Emergency chord detected; releasing local capture.");
+        }
         CaptureNotice::Deactivated { activation_id } => {
             if verbose {
                 println!("[wayland] Deactivated: activation_id={activation_id:?}");

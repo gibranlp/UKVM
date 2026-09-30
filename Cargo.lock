@@ -1658,6 +1658,7 @@ dependencies = [
  "ashpd",
  "futures-util",
  "reis",
+ "tempfile",
  "tokio",
  "ukvm-core",
  "ukvm-protocol",

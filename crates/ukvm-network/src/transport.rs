@@ -620,19 +620,24 @@ async fn start_sender_for(
             let mut ticker = tokio::time::interval(Duration::from_secs(1));
             ticker.tick().await;
             let mut nonce = 0u64;
+            let mut controls_open = true;
             loop {
                 tokio::select! {
                     biased;
                     changed = returned.changed() => {
                         if changed.is_ok() && returned.borrow().is_some() { break; }
                     },
-                    message = controls.recv(), if !controls.is_closed() => match message {
+                    message = controls.recv(), if controls_open => match message {
+                        // Local emergency release ends the relationship before
+                        // queued input. The common tail sends SessionEnd and
+                        // the receiver releases all held keys/buttons.
+                        Some(WireMessage::SessionEnd) => break,
                         Some(message) => {
                             if let Err(err) = send_with_timeout(&mut write, &message).await {
                                 let _ = alive_tx.send(false); return Err(err);
                             }
                         },
-                        None => controls.close(),
+                        None => controls_open = false,
                     },
                     event = rx.recv() => match event {
                         Some(event) => {
