@@ -1,8 +1,13 @@
 use std::process::ExitCode;
 
+mod daily;
 mod discovery;
+#[cfg(target_os = "linux")]
+mod install;
 mod network;
 mod pairing;
+#[cfg(target_os = "linux")]
+mod service;
 mod settings;
 mod setup;
 mod setup_model;
@@ -27,9 +32,9 @@ Commands:\n\
   listen --remote [--bind ADDR] [--verbose]  Authorized RemoteDesktop/EIS input receiver\n\
   connect PEER [--peer-cert PATH] [--state-dir DIR]  Check peer connection\n\
   debug send-test-events HOST --peer-cert PATH  Send safe synthetic debug events\n\
-  status    Show node, peers, layout, and capabilities\n\
-  start     Start UKVM (not implemented yet)\n\
-  stop      Stop UKVM (not implemented yet)\n\
+  status    Show node, runtime/service state, topology, peers and backend readiness\n\
+  peers     Show trusted pins, permissions and known availability\n\
+  service install [--verbose]|enable|start|stop|restart|status|disable|uninstall  Manage user service\n\
   pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
   pair --discover [--interface NAME]  Find and select a pairing node\n\
   pair --interface NAME [--debug]  Advertise pairing on one interface\n\
@@ -39,7 +44,7 @@ Commands:\n\
   pair cleanup  Remove expired recovery records\n\
   discover [--interface NAME]  Browse nearby pairing nodes for four seconds\n\
   setup [--interface NAME] [--host HOST] [--debug]  Guide identity, trust, permissions, and layout\n\
-  devices   List peers (not implemented yet)\n\
+  install [--prefix PATH] [--destdir PATH]  Install compiled binary and user-service assets\n\
   help      Show this help";
 
 fn main() -> ExitCode {
@@ -63,13 +68,22 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         [command, rest @ ..] if command == "config" => settings::config(rest),
+        #[cfg(not(target_os = "linux"))]
+        [command, ..] if command == "service" || command == "install" => {
+            fail("service/installation support currently requires Linux")
+        }
         [command, rest @ ..] if command == "peer" => settings::peer(rest),
         [command, rest @ ..] if command == "layout" => settings::layout(rest),
         [command, rest @ ..] if command == "pair" => pairing::pair(rest),
         [command, rest @ ..] if command == "discover" => discovery::discover(rest),
         [command, rest @ ..] if command == "setup" => setup::setup(rest),
         [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
-        [command] if command == "status" => settings::status(),
+        [command] if command == "status" => daily::status(),
+        [command, rest @ ..] if command == "peers" => daily::peers(rest),
+        #[cfg(target_os = "linux")]
+        [command, rest @ ..] if command == "service" => service::command(rest),
+        #[cfg(target_os = "linux")]
+        [command, rest @ ..] if command == "install" => install::command(rest),
         [command] if command == "doctor" => doctor(),
         [command, rest @ ..] if command == "identity" => network::identity(rest),
         [command, rest @ ..] if command == "listen" => network::listen(rest),

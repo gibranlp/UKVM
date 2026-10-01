@@ -158,6 +158,9 @@ impl Fixture {
             pool: Mutex::new(HashMap::new()),
             active: Mutex::new(None),
             rearm: Mutex::new(EmergencyRearmGuard::Ready),
+            incoming_peer: Mutex::new(None),
+            capture_status: Mutex::new("not requested".into()),
+            receiver_status: Arc::new(Mutex::new("consent not requested".into())),
         };
         Self {
             _temp: temp,

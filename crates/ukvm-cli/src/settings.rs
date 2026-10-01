@@ -213,50 +213,6 @@ pub fn config(args: &[String]) -> ExitCode {
     finish(result)
 }
 
-pub fn status() -> ExitCode {
-    let result = (|| -> Result<(), String> {
-        let (_, _, config, store) = validated()?;
-        let id = match std::fs::read(default_state_dir()?.join("node.der")) {
-            Ok(bytes) => certificate_id(&bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                "not initialized; run ukvm identity".into()
-            }
-            Err(e) => return Err(e.to_string()),
-        };
-        println!("UniversalKVM\nNode\n  Name: {}\n  ID: {}\nPlatform\n  OS: {}\nNetwork\n  Listen: {}\nTrusted peers: {}",config.node.name,id,std::env::consts::OS,config.network.listen,store.peers.len());
-        for peer in &store.peers {
-            let edges = config
-                .layout
-                .links
-                .iter()
-                .filter(|l| l.peer_id == peer.id)
-                .map(|l| l.edge.as_str())
-                .collect::<Vec<_>>();
-            println!(
-                "  {}: {}  position: {}  debug-input: {}  control-this-node: {}",
-                peer.alias,
-                peer.address.as_deref().unwrap_or("no address"),
-                if edges.is_empty() {
-                    "none".into()
-                } else {
-                    edges.join(",")
-                },
-                peer.permissions.debug_input,
-                peer.permissions.control_this_node
-            );
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let probe = super::with_runtime(ukvm_platform::linux_wayland::probe());
-            let injection = ukvm_platform::linux_wayland::injection_evidence(&probe.remote);
-            println!("Capabilities\n  Controller pointer: {}\n  Controller keyboard: {}\n  Controlled pointer: detected={} implemented={} physically_proven={}\n  Reason: {}",probe.capture.pointer_advertised,probe.capture.keyboard_advertised,injection.pointer.detected,injection.pointer.implemented,injection.pointer.physically_proven,if injection.pointer.detected { "requires local portal consent and physical inject-test" } else { "RemoteDesktop v2 pointer endpoint unavailable" });
-        }
-        println!("Discovery\n  Backend: mDNS/DNS-SD\n  Supported: yes\n  Active: no (only while ukvm pair listens)");
-        println!("Configuration: valid");
-        Ok(())
-    })();
-    finish(result)
-}
 fn finish(result: Result<(), String>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,

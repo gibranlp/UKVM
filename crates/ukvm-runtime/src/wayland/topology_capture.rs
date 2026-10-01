@@ -335,7 +335,10 @@ pub(super) async fn capture_topology(
             "barriers accepted {:?}; rejected {:?}",
             decision.accepted, decision.rejected
         )),
-        CaptureNotice::Lifecycle { phase, detail } => context.log(format!("InputCapture {phase:?}: {detail}")),
+        CaptureNotice::Lifecycle { phase, detail } => {
+            *context.capture_status.lock().unwrap() = format!("{phase:?}: {detail}");
+            context.log(format!("InputCapture {phase:?}: {detail}"));
+        },
         CaptureNotice::SessionCreated { version, keyboard_granted } => context.log(format!("InputCapture session created: portal v{version}, keyboard_granted={keyboard_granted}")),
         CaptureNotice::EisSocketAcquired => context.log("InputCapture EIS socket acquired"),
         CaptureNotice::EisContextConnected => context.log("InputCapture EI context connected (receiver)"),

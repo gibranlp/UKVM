@@ -45,6 +45,9 @@ struct Context {
     pool: Mutex<HashMap<Coordinate, transport::Sender>>,
     active: Mutex<Option<Coordinate>>,
     rearm: Mutex<EmergencyRearmGuard>,
+    incoming_peer: Mutex<Option<String>>,
+    capture_status: Mutex<String>,
+    receiver_status: Arc<Mutex<String>>,
 }
 impl Context {
     fn availability(&self, node: &TopologyNode, next: PeerAvailability) {
@@ -77,7 +80,7 @@ async fn pause(delay: Duration, stop: &mut watch::Receiver<bool>) {
     tokio::select! { _ = tokio::time::sleep(delay) => {}, _ = cancelled(stop) => {} }
 }
 
-pub(super) async fn run(verbose: bool) -> Result<(), String> {
+pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Result<(), String> {
     let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
     let config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
     let trust_dir = default_trust_dir()?;
@@ -110,11 +113,14 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
         pool: Mutex::new(HashMap::new()),
         active: Mutex::new(None),
         rearm: Mutex::new(EmergencyRearmGuard::Ready),
+        incoming_peer: Mutex::new(None),
+        capture_status: Mutex::new("not requested".into()),
+        receiver_status: Arc::new(Mutex::new("consent not requested".into())),
     };
     let (stop_tx, stop) = watch::channel(false);
     // Register SIGINT before announcing readiness and retain this exact
     // future, so an interrupt cannot race between successive registrations.
-    let mut interrupt = Box::pin(tokio::signal::ctrl_c());
+    let mut interrupt = Box::pin(shutdown_signal());
     let early = std::future::poll_fn(|cx| {
         use std::future::Future;
         std::task::Poll::Ready(match interrupt.as_mut().poll(cx) {
@@ -139,13 +145,14 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
         let _ = stop_tx.send(true);
         result.map_err(|e| e.to_string())
     };
-    let (signal_result, (), (), (), (), ()) = tokio::join!(
+    let (signal_result, (), (), (), (), (), ()) = tokio::join!(
         signal,
         receiver(&context, listener, stop.clone()),
         controller(&context, stop.clone()),
         discovery(&context, port, stop.clone()),
         peers(&context, stop.clone()),
-        rearm_observer(&context, stop),
+        rearm_observer(&context, stop.clone()),
+        publish_status(&context, owner, stop),
     );
     for node in context.config.layout.topology() {
         context.availability(&node, PeerAvailability::Stopped);
@@ -153,6 +160,46 @@ pub(super) async fn run(verbose: bool) -> Result<(), String> {
     context.log("all sessions closed; local input restored");
     println!("UKVM stopped.");
     signal_result
+}
+
+async fn shutdown_signal() -> Result<(), std::io::Error> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! { result = tokio::signal::ctrl_c() => result, _ = terminate.recv() => Ok(()) }
+}
+
+async fn publish_status(
+    context: &Context,
+    owner: &ownership::RuntimeOwner,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            _ = cancelled(&mut stop) => break,
+            _ = tick.tick() => {
+                let active = *context.active.lock().unwrap();
+                let topology = context.config.layout.topology();
+                let states = context.availability.lock().unwrap();
+                let snapshot = ownership::RuntimeSnapshot {
+                    name: context.config.node.name.clone(),
+                    node_id: context.identity.id.clone(),
+                    state: "running".into(),
+                    focus: format!("{:?}", context.gate.state()),
+                    active_peer: active.and_then(|coordinate| topology.iter().find(|node| node.coordinate() == coordinate).map(|node| node.peer_id.clone()))
+                        .or_else(|| context.incoming_peer.lock().unwrap().clone()),
+                    active_coordinate: active.map(|coordinate| coordinate.to_string()),
+                    capture: context.capture_status.lock().unwrap().clone(),
+                    receiver: context.receiver_status.lock().unwrap().clone(),
+                    peers: topology.iter().map(|node| ownership::PeerStatus {
+                        id: node.peer_id.clone(), coordinate: node.coordinate().to_string(),
+                        availability: format!("{:?}", states.get(&node.coordinate()).unwrap_or(&PeerAvailability::Dormant)),
+                    }).collect(),
+                    ..Default::default()
+                };
+                if let Err(error) = owner.publish(snapshot) { context.log(format!("status snapshot unavailable: {error}")); }
+            }
+        }
+    }
 }
 
 async fn discovery(context: &Context, port: u16, mut stop: watch::Receiver<bool>) {

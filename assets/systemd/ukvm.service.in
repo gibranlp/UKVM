@@ -1,0 +1,27 @@
+# UKVM managed user service (M15)
+[Unit]
+Description=UniversalKVM graphical user runtime
+Documentation=https://github.com/gibranlp/UKVM
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+ConditionEnvironment=WAYLAND_DISPLAY
+ConditionUser=!root
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecCondition=:@UKVM_EXEC@ service check-session
+ExecStart=:@UKVM_EXEC@ run@UKVM_OPTIONS@
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=45
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ukvm
+
+[Install]
+WantedBy=graphical-session.target

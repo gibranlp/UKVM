@@ -7,6 +7,8 @@ use ukvm_core::controlled::{InputSink, SinkAction, SinkFuture, SinkKind};
 use ukvm_protocol::{EdgePosition, InputEvent};
 
 #[cfg(target_os = "linux")]
+pub mod ownership;
+#[cfg(target_os = "linux")]
 mod wayland;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -258,7 +260,8 @@ impl Backoff {
 pub async fn run(verbose: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        wayland::run(verbose).await
+        let owner = ownership::RuntimeOwner::acquire()?;
+        wayland::run(verbose, &owner).await
     }
     #[cfg(not(target_os = "linux"))]
     {

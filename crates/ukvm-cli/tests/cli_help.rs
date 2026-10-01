@@ -85,6 +85,15 @@ fn runtime_help_and_invalid_options_do_not_start_runtime() {
 #[cfg(target_os = "linux")]
 #[test]
 fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
+    runtime_shutdown_test("-INT");
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn runtime_sigterm_releases_ownership_and_rejects_competing_instance() {
+    runtime_shutdown_test("-TERM");
+}
+#[cfg(target_os = "linux")]
+fn runtime_shutdown_test(signal: &str) {
     use std::{
         io::{BufRead, BufReader},
         process::Stdio,
@@ -98,6 +107,8 @@ fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
         }
     }
     let temp = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let config = temp.path().join("config/ukvm");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::write(
@@ -111,6 +122,7 @@ fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
             .env("XDG_CONFIG_HOME", temp.path().join("config"))
             .env("XDG_STATE_HOME", temp.path().join("state"))
             .env("XDG_DATA_HOME", temp.path().join("data"))
+            .env("XDG_RUNTIME_DIR", temp.path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -133,7 +145,13 @@ fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
         let _ = child.0.wait();
     }
     let startup = startup.unwrap();
-    assert!(startup.starts_with("UKVM running as runtime-test"));
+    if !startup.starts_with("UKVM running as runtime-test") {
+        let _ = child.0.kill();
+        let _ = child.0.wait();
+        let mut error = String::new();
+        std::io::Read::read_to_string(&mut child.0.stderr.take().unwrap(), &mut error).unwrap();
+        panic!("runtime failed to start: {error}");
+    }
     let address = startup
         .split(" on ")
         .nth(1)
@@ -141,9 +159,44 @@ fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
         .split(". Ctrl+C")
         .next()
         .unwrap();
-    // The child has installed SIGINT handling before announcing readiness.
+    let second = Command::new(env!("CARGO_BIN_EXE_ukvm"))
+        .arg("run")
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("XDG_RUNTIME_DIR", temp.path())
+        .output()
+        .unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8(second.stderr)
+        .unwrap()
+        .contains("already owns"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !temp.path().join("ukvm/status.toml").exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let snapshot = std::fs::read_to_string(temp.path().join("ukvm/status.toml")).unwrap();
+    assert!(snapshot.contains(r#"focus = "Local""#));
+    let live_status = Command::new(env!("CARGO_BIN_EXE_ukvm"))
+        .arg("status")
+        .env("XDG_CONFIG_HOME", temp.path().join("config"))
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .env("XDG_RUNTIME_DIR", temp.path())
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            "unix:path=/nonexistent/ukvm-test-bus",
+        )
+        .output()
+        .unwrap();
+    assert!(live_status.status.success());
+    let text = String::from_utf8(live_status.stdout).unwrap();
+    assert!(text.contains("Runtime: running"), "{text}");
+    assert!(text.contains("Focus: Local"), "{text}");
+    // Both shutdown signals have been registered before announcing readiness.
     assert!(Command::new("kill")
-        .args(["-INT", &child.0.id().to_string()])
+        .args([signal, &child.0.id().to_string()])
         .status()
         .unwrap()
         .success());
@@ -161,5 +214,7 @@ fn runtime_starts_and_sigint_releases_listener_without_portal_consent() {
     };
     assert!(status.success());
     assert!(reader.join().unwrap().contains("UKVM stopped."));
+    assert!(!temp.path().join("ukvm/status.toml").exists());
+    assert!(temp.path().join("ukvm/runtime.lock").exists());
     assert!(std::net::TcpListener::bind(address).is_ok());
 }

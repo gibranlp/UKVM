@@ -117,7 +117,7 @@ Approve normal portal consent. Wait for each peer's coordinate/Ready log. Test a
 
 Linux Wayland with permissioned portal/EI only. M14 supports eight cardinal positions, not diagonal grids, cycles, arbitrary distance, monitor mapping UI or network relaying. All reachable external segments of a configured direction are armed; internal monitor seams are excluded. Portal providers must supply valid zones and accept the requested barriers. EI virtual position is requested state rather than compositor cursor readback. If a node is busy or has no ready reverse standby, a rapid reverse handoff may restore the physical source instead of waiting with input captured. All topology/preferences are loaded at startup; permissions and readiness are checked live.
 
-No services, autostart, GUI/TUI, clipboard, file transfer, new OS backends or SpectrumOS integration are added. Milestone 15 is not started.
+M14 adds no services, GUI/TUI, clipboard, file transfer, new OS backends or SpectrumOS integration. M15 service packaging is documented separately in [daily runtime](SERVICE.md); it preserves the partial-edge blocker described below.
 
 
 ## Local desktop geometry

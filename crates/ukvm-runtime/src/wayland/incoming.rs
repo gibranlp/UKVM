@@ -5,6 +5,7 @@ type Injector = RemoteInputSink<WaylandInputInjector>;
 struct Authority {
     sink: Arc<Mutex<Option<Injector>>>,
     initialization: tokio::sync::Mutex<()>,
+    status: Arc<Mutex<String>>,
 }
 struct IncomingSink {
     authority: Arc<Authority>,
@@ -64,14 +65,24 @@ impl InputSink for IncomingSink {
             }
             let missing = self.authority.sink.lock().unwrap().is_none();
             if missing {
+                *self.authority.status.lock().unwrap() =
+                    "requesting normal portal consent/EI grant".into();
                 let injector = WaylandInputInjector::open_verbose(self.verbose)
                     .await
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        *self.authority.status.lock().unwrap() = format!("unavailable: {e}");
+                        e.to_string()
+                    })?;
                 let mut sink = RemoteInputSink::new(injector);
-                sink.begin_session_async().await?;
+                if let Err(error) = sink.begin_session_async().await {
+                    *self.authority.status.lock().unwrap() = format!("unavailable: {error}");
+                    return Err(error);
+                }
                 self.authorize()?;
                 sink.end_session()?;
                 *self.authority.sink.lock().unwrap() = Some(sink);
+                *self.authority.status.lock().unwrap() =
+                    "permissioned portal/EI grant ready (reused between sessions)".into();
             }
             self.authorize()
         })
@@ -98,12 +109,18 @@ impl InputSink for IncomingSink {
         self.session.handle_event(event)
     }
     fn is_healthy(&self) -> bool {
-        self.authority
-            .sink
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(Injector::grant_is_healthy)
+        let (exists, healthy) = {
+            let sink = self.authority.sink.lock().unwrap();
+            (
+                sink.is_some(),
+                sink.as_ref().is_some_and(Injector::grant_is_healthy),
+            )
+        };
+        if exists && !healthy {
+            *self.authority.status.lock().unwrap() =
+                "portal/EI grant invalid; fresh normal consent required".into();
+        }
+        healthy
     }
     fn end_session(&mut self) -> Result<(), String> {
         let result = self.session.end_session();
@@ -173,10 +190,13 @@ async fn incoming(
             ReceiverNotice::SessionStarted => {
                 context.log(format!("peer {peer_id}: receiver portal/EI ready"))
             }
-            ReceiverNotice::RemoteEntered(position) => context.log(format!(
-                "peer {peer_id}: incoming {:?} entry; controlled focus",
-                position.edge
-            )),
+            ReceiverNotice::RemoteEntered(position) => {
+                *context.incoming_peer.lock().unwrap() = Some(peer_id.clone());
+                context.log(format!(
+                    "peer {peer_id}: incoming {:?} entry; controlled focus",
+                    position.edge
+                ));
+            }
             ReceiverNotice::RemoteReturned(position) => context.log(format!(
                 "peer {peer_id}: ReturnControl {:?}; held input released",
                 position.edge
@@ -189,6 +209,12 @@ async fn incoming(
         shutdown,
     )
     .await;
+    if context.gate.state() != Focus::Controlled {
+        let mut active = context.incoming_peer.lock().unwrap();
+        if active.as_deref() == Some(&peer_id) {
+            *active = None;
+        }
+    }
     if let Err(error) = result {
         context.log(format!("peer {peer_id}: incoming ended: {error}"));
     }
@@ -202,6 +228,7 @@ pub(super) async fn receiver(
     let authority = Arc::new(Authority {
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
+        status: Arc::clone(&context.receiver_status),
     });
     let mut connections = FuturesUnordered::new();
     // Eight positions per source; a bounded number of readiness relationships
@@ -235,6 +262,7 @@ pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
     let authority = Arc::new(Authority {
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
+        status: Arc::clone(&context.receiver_status),
     });
     let mut sink = IncomingSink {
         session: SharedSession {

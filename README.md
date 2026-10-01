@@ -16,6 +16,23 @@ The runtime listens, advertises/discovers endpoint hints, verifies pinned mTLS i
 
 The first authorized incoming session requests RemoteDesktop consent. A valid portal/EI grant is reused until invalidated or shutdown; restarting asks again. The runtime supports Linux Wayland with up to eight cardinal positions at distance 1–2. See [topology configuration and physical test plan](docs/TOPOLOGY.md). Emergency release keeps the launching edge disarmed until the local pointer moves at least 32 logical pixels inward. Idle pointer observation currently requires Hyprland; unavailable observation keeps the edge disarmed. M13 is physically validated; M14 multi-node acceptance remains pending. See [runtime design and acceptance procedure](docs/RUNTIME.md).
 
+## Installation and background use
+
+```sh
+cargo build --release --workspace
+./target/release/ukvm install
+export PATH="$HOME/.local/bin:$PATH"
+ukvm service install
+# Explicitly opt in, from a Wayland graphical terminal:
+ukvm service enable
+ukvm service start
+ukvm status
+ukvm peers
+journalctl --user -u ukvm
+```
+
+Install does not enable/start. The service uses the existing runtime and normal portal consent, with per-user single-instance ownership and cooperative shutdown. Use `ukvm service stop`, `restart`, `disable`, `status` or `uninstall` as needed. Desktop systemd graphical-session integration is required; see [installed paths, lifecycle and acceptance](docs/SERVICE.md). The Hyprland partial-edge validator blocker remains unchanged; neither service installation nor M15 resolves it.
+
 ## Build and inspect
 
 On a fresh Arch Linux test computer, run [`scripts/setup-arch-test-node.sh`](scripts/setup-arch-test-node.sh) as your normal user after copying the script or repository there. It installs the build packages and stable Rust toolchain, then builds and tests UKVM when the checkout is present. Preview its commands with `bash scripts/setup-arch-test-node.sh --dry-run`. The receiving DebugSink does not need Wayland portal packages. See [network transport](docs/NETWORK.md) for the two-node procedure.
@@ -44,7 +61,7 @@ For guided first-run configuration, run `ukvm setup` while the other node is in 
 
 ## Design
 
-The CLI calls the reusable `ukvm-runtime` library for foreground operation; user-session service packaging remains future work. Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
+The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linux installation, a systemd user service and daily status/peers commands are available in M15; physical service acceptance is pending. See [service setup](docs/SERVICE.md). Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
 
 ## License
 

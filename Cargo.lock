@@ -1676,9 +1676,13 @@ dependencies = [
 name = "ukvm-runtime"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "futures-util",
+ "rustix",
+ "serde",
  "tempfile",
  "tokio",
+ "toml",
  "ukvm-config",
  "ukvm-core",
  "ukvm-discovery",
