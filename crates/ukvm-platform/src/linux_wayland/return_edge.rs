@@ -2,7 +2,7 @@
 //! The portal does not report compositor cursor coordinates. This model is
 //! valid only while UKVM drives every remote motion with EI absolute positions.
 
-use super::geometry::{outer_segments, Edge, OuterSegment, Zone};
+use super::geometry::{outer_segments, Edge, EdgeSpan, OuterSegment, Zone};
 use ukvm_protocol::{Edge as ProtocolEdge, EdgePosition};
 
 const ENTRY_INSET: f64 = 24.0;
@@ -18,7 +18,7 @@ pub struct RemotePointer {
     zones: Vec<Zone>,
     return_edge: Edge,
     return_segments: Vec<OuterSegment>,
-    span: (f64, f64),
+    span: EdgeSpan,
     position: (f64, f64),
     entry_boundary: f64,
     armed: bool,
@@ -73,17 +73,8 @@ impl RemotePointer {
             Edge::Left | Edge::Right => (f64::from(segment.start.1), f64::from(segment.end.1)),
             Edge::Top | Edge::Bottom => (f64::from(segment.start.0), f64::from(segment.end.0)),
         };
-        let span = (
-            segments
-                .iter()
-                .map(|s| orth(s).0)
-                .fold(f64::INFINITY, f64::min),
-            segments
-                .iter()
-                .map(|s| orth(s).1)
-                .fold(f64::NEG_INFINITY, f64::max),
-        );
-        let desired = span.0 + f64::from(entry.fraction) * (span.1 - span.0);
+        let span = EdgeSpan::new(&segments, edge)?;
+        let desired = span.coordinate(entry.fraction);
         let segment = segments
             .iter()
             .min_by(|a, b| {
@@ -163,80 +154,42 @@ impl RemotePointer {
         if !self.armed && inward >= ARM_DISTANCE {
             self.armed = true;
         }
-        let outward = match self.return_edge {
-            Edge::Left => dx < 0.0,
-            Edge::Right => dx > 0.0,
-            Edge::Top => dy < 0.0,
-            Edge::Bottom => dy > 0.0,
-        };
-        let orth = match self.return_edge {
-            Edge::Left | Edge::Right => candidate.1,
-            Edge::Top | Edge::Bottom => candidate.0,
-        };
-        let on_segment = self.return_segments.iter().any(|s| {
-            let (lo, hi) = match self.return_edge {
-                Edge::Left | Edge::Right => (f64::from(s.start.1), f64::from(s.end.1)),
-                Edge::Top | Edge::Bottom => (f64::from(s.start.0), f64::from(s.end.0)),
-            };
-            (lo..=hi).contains(&orth)
-        });
-        if self.armed && outward && inward < 0.0 && on_segment {
-            let fraction =
-                ((orth - self.span.0) / (self.span.1 - self.span.0).max(1.0)).clamp(0.0, 1.0);
-            return MotionResult::Return(EdgePosition {
-                edge: match self.return_edge {
-                    Edge::Left => ProtocolEdge::Left,
-                    Edge::Right => ProtocolEdge::Right,
-                    Edge::Top => ProtocolEdge::Top,
-                    Edge::Bottom => ProtocolEdge::Bottom,
-                },
-                fraction: fraction as f32,
-            });
+        if self.armed {
+            if let Some(segment) = self
+                .return_segments
+                .iter()
+                .find(|segment| segment.crossed(&self.zones, self.position, candidate))
+            {
+                return MotionResult::Return(EdgePosition {
+                    edge: match self.return_edge {
+                        Edge::Left => ProtocolEdge::Left,
+                        Edge::Right => ProtocolEdge::Right,
+                        Edge::Top => ProtocolEdge::Top,
+                        Edge::Bottom => ProtocolEdge::Bottom,
+                    },
+                    fraction: self.span.fraction(match segment.edge {
+                        Edge::Left | Edge::Right => candidate.1,
+                        Edge::Top | Edge::Bottom => candidate.0,
+                    }),
+                });
+            }
         }
-        // Only explicit, ready topology exits may leave the receiver. Internal
-        // monitor seams and unconfigured directions remain bounded locally.
         for segment in &self.exits {
-            let (outward, crossed, orth, lo, hi) = match segment.edge {
-                Edge::Left => (
-                    dx < 0.0,
-                    candidate.0 < f64::from(segment.start.0),
-                    candidate.1,
-                    segment.start.1,
-                    segment.end.1,
-                ),
-                Edge::Right => (
-                    dx > 0.0,
-                    candidate.0 >= f64::from(segment.start.0),
-                    candidate.1,
-                    segment.start.1,
-                    segment.end.1,
-                ),
-                Edge::Top => (
-                    dy < 0.0,
-                    candidate.1 < f64::from(segment.start.1),
-                    candidate.0,
-                    segment.start.0,
-                    segment.end.0,
-                ),
-                Edge::Bottom => (
-                    dy > 0.0,
-                    candidate.1 >= f64::from(segment.start.1),
-                    candidate.0,
-                    segment.start.0,
-                    segment.end.0,
-                ),
-            };
-            if outward && crossed && (f64::from(lo)..=f64::from(hi)).contains(&orth) {
+            if segment.crossed(&self.zones, self.position, candidate) {
                 let edge = match segment.edge {
                     Edge::Left => ProtocolEdge::Left,
                     Edge::Right => ProtocolEdge::Right,
                     Edge::Top => ProtocolEdge::Top,
                     Edge::Bottom => ProtocolEdge::Bottom,
                 };
+                let span = EdgeSpan::new(&self.exits, segment.edge)
+                    .expect("exit includes its own segment");
                 return MotionResult::Return(EdgePosition {
                     edge,
-                    fraction: ((orth - f64::from(lo)) / f64::from((hi - lo).max(1))).clamp(0.0, 1.0)
-                        as f32,
+                    fraction: span.fraction(match segment.edge {
+                        Edge::Left | Edge::Right => candidate.1,
+                        Edge::Top | Edge::Bottom => candidate.0,
+                    }),
                 });
             }
         }
@@ -502,6 +455,138 @@ mod topology_tests {
                 fraction: 0.5
             },
             vec![ProtocolEdge::Right; 5]
+        )
+        .is_err());
+    }
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+    #[test]
+    fn multi_monitor_internal_seam_does_not_trigger_but_external_exit_does() {
+        let mut pointer = RemotePointer::with_exits(
+            vec![
+                Zone {
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 200,
+                },
+                Zone {
+                    x: 100,
+                    y: 50,
+                    width: 200,
+                    height: 100,
+                },
+            ],
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.5,
+            },
+            vec![ProtocolEdge::Right],
+        )
+        .unwrap();
+        assert!(matches!(
+            pointer.motion(100.0, 0.0),
+            MotionResult::Position(..)
+        ));
+        assert!((pointer.position().0 - 124.0).abs() < 0.001);
+        assert!(matches!(
+            pointer.motion(200.0, 0.0),
+            MotionResult::Return(EdgePosition {
+                edge: ProtocolEdge::Right,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn return_uses_boundary_of_current_monitor_not_initial_entry_monitor() {
+        let zones = vec![
+            Zone {
+                x: 0,
+                y: 0,
+                width: 200,
+                height: 100,
+            },
+            Zone {
+                x: 50,
+                y: 100,
+                width: 150,
+                height: 100,
+            },
+        ];
+        let mut pointer = RemotePointer::new(
+            zones,
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.25,
+            },
+        )
+        .unwrap();
+        pointer.motion(100.0, 0.0); // arm entry return
+        pointer.motion(0.0, 100.0); // cross internal bottom seam onto lower monitor
+        let result = pointer.motion(-90.0, 0.0); // lower left x=50, not upper x=0
+        let MotionResult::Return(position) = result else {
+            panic!("lower external left must return")
+        };
+        assert_eq!(position.edge, ProtocolEdge::Left);
+        assert!((position.fraction - 0.7525).abs() < 0.01);
+    }
+    #[test]
+    fn multiple_exit_segments_share_whole_edge_fraction_and_reentry_position() {
+        let zones = vec![
+            Zone {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            Zone {
+                x: 0,
+                y: 100,
+                width: 200,
+                height: 100,
+            },
+        ];
+        let mut pointer = RemotePointer::with_exits(
+            zones.clone(),
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.75,
+            },
+            vec![ProtocolEdge::Right],
+        )
+        .unwrap();
+        let MotionResult::Return(position) = pointer.motion(300.0, 0.0) else {
+            panic!("lower right must exit")
+        };
+        assert!((position.fraction - 0.75).abs() < 0.001);
+        let reentered = RemotePointer::new(zones, position).unwrap();
+        assert!((reentered.position().1 - 149.25).abs() < 0.01);
+        assert!((reentered.position().0 - 176.0).abs() < 0.01);
+    }
+    #[test]
+    fn empty_or_invalid_ei_geometry_fails_before_remote_entry() {
+        assert!(RemotePointer::new(
+            Vec::new(),
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.5
+            }
+        )
+        .is_err());
+        assert!(RemotePointer::new(
+            vec![Zone {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 100
+            }],
+            EdgePosition {
+                edge: ProtocolEdge::Left,
+                fraction: 0.5
+            }
         )
         .is_err());
     }

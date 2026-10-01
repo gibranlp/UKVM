@@ -306,6 +306,32 @@ pub(super) async fn capture_topology(
         CaptureNotice::EmergencyRelease { boundary } => {
             path.lock().unwrap().emergency(context, boundary)
         }
+        CaptureNotice::Zones(zones) => {
+            context.log(format!(
+                "portal zone set {}: {} logical output rectangles",
+                zones.id,
+                zones.zones.len()
+            ));
+            for (index, zone) in zones.zones.iter().enumerate() {
+                context.log(format!("zone {index}: origin ({},{}) size {}x{} logical units (portal coordinate space)", zone.x, zone.y, zone.width, zone.height));
+            }
+        }
+        CaptureNotice::BarriersRequested(barriers) => {
+            for barrier in barriers {
+                context.log(format!(
+                    "external {:?} barrier {} zone {}: {:?} -> {:?}",
+                    barrier.segment.edge,
+                    barrier.id,
+                    barrier.segment.zone,
+                    barrier.segment.start,
+                    barrier.segment.end
+                ));
+            }
+        }
+        CaptureNotice::BarrierDecision(decision) => context.log(format!(
+            "barriers accepted {:?}; rejected {:?}",
+            decision.accepted, decision.rejected
+        )),
         CaptureNotice::Enabled => context.log(format!("InputCapture edges enabled: {edges:?}")),
         CaptureNotice::ReleaseResult(_) => context.log("InputCapture Release completed"),
         CaptureNotice::Closed(_) => context.log("InputCapture closed"),

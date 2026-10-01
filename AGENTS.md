@@ -61,3 +61,5 @@ When a change needs to be checked on the other computer, complete local review a
 Use the repository owner's configured Git identity. Do not add Codex as an author, co-author, contributor, or commit trailer, and do not add Codex to a contributors list.
 
 M14 topology uses `[[layout.nodes]]` x/y/pinned peer_id, with existing edge links interpreted as adjacent positions. Every routed destination directly authenticates/authorizes the physical source; no receiver delegates its permission. Ready connections share one serialized legitimate portal/EI grant, but only an exclusive entered lease may begin/inject/park. Read `docs/TOPOLOGY.md` before changing routing or availability.
+
+Local capture geometry uses permissioned InputCapture portal zones, with all reachable external segments per direction and internal seams removed. Entry/return fractions share a direction-wide logical span; release and emergency hysteresis use the actual launch segment. Geometry fix physical acceptance is pending. See `docs/TOPOLOGY.md`.

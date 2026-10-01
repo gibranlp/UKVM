@@ -115,6 +115,23 @@ Approve normal portal consent. Wait for each peer's coordinate/Ready log. Test a
 
 ## Limits
 
-Linux Wayland with permissioned portal/EI only. M14 supports eight cardinal positions, not diagonal grids, cycles, arbitrary distance, monitor mapping UI or network relaying. Multi-segment ambiguous local outer edges still fail clearly; existing display geometry restrictions remain. EI virtual position is requested state rather than compositor cursor readback. If a node is busy or has no ready reverse standby, a rapid reverse handoff may restore the physical source instead of waiting with input captured. All topology/preferences are loaded at startup; permissions and readiness are checked live.
+Linux Wayland with permissioned portal/EI only. M14 supports eight cardinal positions, not diagonal grids, cycles, arbitrary distance, monitor mapping UI or network relaying. All reachable external segments of a configured direction are armed; internal monitor seams are excluded. Portal providers must supply valid zones and accept the requested barriers. EI virtual position is requested state rather than compositor cursor readback. If a node is busy or has no ready reverse standby, a rapid reverse handoff may restore the physical source instead of waiting with input captured. All topology/preferences are loaded at startup; permissions and readiness are checked live.
 
 No services, autostart, GUI/TUI, clipboard, file transfer, new OS backends or SpectrumOS integration are added. Milestone 15 is not started.
+
+
+## Local desktop geometry
+
+Machine coordinates describe node adjacency, not monitor positions. The platform backend reads the permissioned InputCapture portal's `GetZones` rectangles in logical coordinates, including negative origins, offsets and unequal sizes. Scaling follows the logical geometry supplied by the portal provider; UKVM does not guess physical pixel scales or monitor names. See the [InputCapture API](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html).
+
+For each ready direction, subtract overlapping/shared monitor edges and install barriers on every remaining external segment. Gaps contain no barrier. Empty geometry, an unreachable explicitly selected zone edge, or rejected barriers fail before enabling capture. Geometry changes close the capture session and the runtime rebuilds it from fresh portal zones. Verbose output lists zone rectangles, external segment endpoints and barrier acceptance.
+
+Entry and ReturnControl use a consistent normalized orthogonal span across all segments in the selected direction. Receiver geometry comes from its legitimate EI regions. A return position is clamped to the actual source launch segment rather than a desktop bounding rectangle or a gap. Emergency release uses that same launch segment for the existing 32-logical-pixel inward rearm guard; normal return and disconnect recovery remain unchanged. Requested EI positions and portal release positions remain subject to compositor behavior.
+
+Automated coverage includes side-by-side and stacked outputs, unequal sizes, negative/offset origins, multiple segments, internal seams, empty edges, cross-output returns and emergency rearming. The user confirmed spectrum's right transition worked but its left transition failed before this fix. Physical acceptance of this geometry fix is pending.
+
+### Spectrum geometry retest
+
+Keep io configured at `(-1,0)`. Pull and build this commit on both machines, start `ukvm run --verbose` on io, then spectrum. Confirm spectrum logs its actual portal zones and accepted left boundary segments. Cross internal monitor seams without handing off; cross each listed external left segment at several heights and return through io's right edge. Confirm return lands on the launching monitor. Repeat at least ten times.
+
+Exercise Ctrl+Alt+Shift+Escape with held keys/buttons: local input must return immediately, the launching direction must remain disarmed until 32 logical pixels of inward movement, and another intentional crossing must work. Stop io and test the left edge remains usable; restart io and confirm recovery. If practical, change an output offset/scale while idle and confirm fresh geometry is logged before the next switch. Record only the configurations physically tested.

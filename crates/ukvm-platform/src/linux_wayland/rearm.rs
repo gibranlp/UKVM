@@ -126,3 +126,38 @@ mod tests {
         assert!(!guard.allows_arming());
     }
 }
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+    #[test]
+    fn emergency_latches_actual_offset_segment_not_desktop_bounding_rectangle() {
+        let zones = [
+            super::super::Zone {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 200,
+            },
+            super::super::Zone {
+                x: -200,
+                y: 100,
+                width: 200,
+                height: 100,
+            },
+        ];
+        let segment = super::super::outer_segments(&zones, 0, Edge::Left).unwrap()[0];
+        assert_eq!(segment.start, (0, 0));
+        assert_eq!(segment.end, (0, 99));
+        let mut guard = EmergencyRearmGuard::Ready;
+        guard.suppress(Some(segment));
+        assert!(!guard.observe_local(Point { x: 0.5, y: 50.0 }));
+        assert!(!guard.observe_local(Point {
+            x: -100.0,
+            y: 150.0
+        }));
+        assert!(!guard.observe_local(Point { x: 31.0, y: 50.0 }));
+        assert!(guard.observe_local(Point { x: 32.0, y: 50.0 }));
+        assert!(guard.allows_arming());
+    }
+}

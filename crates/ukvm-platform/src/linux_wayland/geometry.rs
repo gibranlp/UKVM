@@ -86,6 +86,87 @@ impl OuterSegment {
     }
 }
 
+/// One normalized orthogonal coordinate space for all external segments in a
+/// cardinal direction. Gaps are retained spatially, never made into barriers.
+#[derive(Clone, Copy, Debug)]
+pub struct EdgeSpan {
+    first: f64,
+    last: f64,
+}
+impl EdgeSpan {
+    pub fn new(segments: &[OuterSegment], edge: Edge) -> Result<Self, String> {
+        let segments: Vec<_> = segments
+            .iter()
+            .filter(|segment| segment.edge == edge)
+            .collect();
+        if segments.is_empty() {
+            return Err("direction has no reachable external boundary".into());
+        }
+        let first = segments
+            .iter()
+            .map(|segment| segment.orthogonal().0)
+            .fold(f64::INFINITY, f64::min);
+        let last = segments
+            .iter()
+            .map(|segment| segment.orthogonal().1)
+            .fold(f64::NEG_INFINITY, f64::max);
+        Ok(Self { first, last })
+    }
+    pub fn fraction(self, coordinate: f64) -> f32 {
+        ((coordinate - self.first) / (self.last - self.first).max(1.0)).clamp(0.0, 1.0) as f32
+    }
+    pub fn coordinate(self, fraction: f32) -> f64 {
+        self.first + f64::from(fraction.clamp(0.0, 1.0)) * (self.last - self.first)
+    }
+    pub fn cursor_fraction(self, segment: OuterSegment, cursor: (f32, f32)) -> f32 {
+        self.fraction(f64::from(match segment.edge {
+            Edge::Left | Edge::Right => cursor.1,
+            Edge::Top | Edge::Bottom => cursor.0,
+        }))
+    }
+    /// Return to the actual launching segment, clamping a position in a gap or
+    /// another output to its closest reachable point, not a synthetic edge.
+    pub fn release_position(self, segment: OuterSegment, fraction: f32) -> (f64, f64) {
+        let (lo, hi) = segment.orthogonal();
+        let coordinate = self.coordinate(fraction).clamp(lo, hi);
+        let local = ((coordinate - lo) / (hi - lo).max(1.0)) as f32;
+        segment.release_position_at(local)
+    }
+}
+impl OuterSegment {
+    fn orthogonal(self) -> (f64, f64) {
+        match self.edge {
+            Edge::Left | Edge::Right => (f64::from(self.start.1), f64::from(self.end.1)),
+            Edge::Top | Edge::Bottom => (f64::from(self.start.0), f64::from(self.end.0)),
+        }
+    }
+    /// Crossing must originate in the output owning this external segment.
+    /// A shared seam, or a distant segment at the same y/x, cannot trigger it.
+    pub fn crossed(self, zones: &[Zone], from: (f64, f64), to: (f64, f64)) -> bool {
+        let Some(zone) = zones.get(self.zone) else {
+            return false;
+        };
+        let Ok(bounds) = zone.bounds() else {
+            return false;
+        };
+        if from.0 < bounds.left as f64
+            || from.0 >= bounds.right as f64
+            || from.1 < bounds.top as f64
+            || from.1 >= bounds.bottom as f64
+        {
+            return false;
+        }
+        let (outward, orthogonal) = match self.edge {
+            Edge::Left => (to.0 < f64::from(self.start.0) && to.0 < from.0, to.1),
+            Edge::Right => (to.0 >= f64::from(self.start.0) && to.0 > from.0, to.1),
+            Edge::Top => (to.1 < f64::from(self.start.1) && to.1 < from.1, to.0),
+            Edge::Bottom => (to.1 >= f64::from(self.start.1) && to.1 > from.1, to.0),
+        };
+        let (lo, hi) = self.orthogonal();
+        outward && (lo..=hi).contains(&orthogonal)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Bounds {
     left: i64,
@@ -313,5 +394,84 @@ mod tests {
     fn rejects_invalid_dimensions() {
         assert!(outer_segments(&[zone(0, 0, 0, 100)], 0, Edge::Left).is_err());
         assert!(outer_segments(&[zone(i32::MAX, 0, 2, 100)], 0, Edge::Right).is_err());
+    }
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::*;
+    fn z(x: i32, y: i32, width: u32, height: u32) -> Zone {
+        Zone {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+    fn direction(zones: &[Zone], edge: Edge) -> Vec<OuterSegment> {
+        all_outer_segments(zones)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.edge == edge)
+            .collect()
+    }
+    #[test]
+    fn stacked_different_resolutions_and_logical_scale_rectangles_keep_external_lefts() {
+        // Logical rectangles: a 3840x2160 output at scale 2 is 1920x1080;
+        // offsets/resolutions are already transformed by the portal provider.
+        let zones = [z(-1920, -1080, 1920, 1080), z(-1280, 0, 1280, 720)];
+        let left = direction(&zones, Edge::Left);
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].start, (-1920, -1080));
+        assert_eq!(left[1].start, (-1280, 0));
+        assert!(outer_segments(&zones, 1, Edge::Top).unwrap().is_empty());
+        let bottom = outer_segments(&zones, 0, Edge::Bottom).unwrap();
+        assert_eq!(bottom[0].start, (-1920, 0));
+        assert_eq!(bottom[0].end, (-1281, 0));
+        let span = EdgeSpan::new(&left, Edge::Left).unwrap();
+        let fraction = span.cursor_fraction(left[1], (-1280.0, 360.0));
+        assert!((span.coordinate(fraction) - 360.0).abs() < 0.001);
+        let restored = span.release_position(left[1], fraction);
+        assert!((restored.0 + 1279.5).abs() < 0.001);
+        assert!((restored.1 - 360.0).abs() < 0.001);
+    }
+    #[test]
+    fn offset_side_by_side_segments_exclude_seams_and_normalize_across_direction() {
+        let zones = [z(0, 0, 1920, 1080), z(-2560, 200, 2560, 1440)];
+        let left = direction(&zones, Edge::Left);
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].start, (0, 0));
+        assert_eq!(left[0].end, (0, 199));
+        assert_eq!(left[1].start, (-2560, 200));
+        assert_eq!(left[1].end, (-2560, 1639));
+        assert!(!left[0].crossed(&zones, (0.5, 500.0), (-10.0, 500.0)));
+        assert!(left[0].crossed(&zones, (0.5, 100.0), (-10.0, 100.0)));
+        assert!(left[1].crossed(&zones, (-2559.5, 800.0), (-2570.0, 800.0)));
+        let span = EdgeSpan::new(&left, Edge::Left).unwrap();
+        let fraction = span.cursor_fraction(left[1], (-2560.0, 800.0));
+        assert!((fraction - 800.0 / 1639.0).abs() < 0.0001);
+        assert!((span.release_position(left[1], fraction).1 - 800.0).abs() < 0.001);
+        // Return outside the launching segment clamps inside that segment.
+        assert_eq!(span.release_position(left[0], 1.0), (0.5, 199.0));
+    }
+    #[test]
+    fn separated_external_segments_do_not_create_gap_barriers() {
+        let zones = [z(0, -200, 100, 100), z(0, 100, 100, 100)];
+        let left = direction(&zones, Edge::Left);
+        assert_eq!(left.len(), 2);
+        assert!(left
+            .iter()
+            .all(|s| !s.crossed(&zones, (0.5, 0.0), (-1.0, 0.0))));
+        assert!(EdgeSpan::new(&[], Edge::Left).is_err());
+        assert!(EdgeSpan::new(&left, Edge::Top).is_err());
+    }
+    #[test]
+    fn aligned_vertical_stack_only_outer_top_bottom_and_both_left_segments() {
+        let zones = [z(0, 0, 100, 100), z(0, 100, 100, 100)];
+        assert!(outer_segments(&zones, 0, Edge::Bottom).unwrap().is_empty());
+        assert!(outer_segments(&zones, 1, Edge::Top).unwrap().is_empty());
+        assert_eq!(direction(&zones, Edge::Left).len(), 2);
+        assert_eq!(direction(&zones, Edge::Top).len(), 1);
+        assert_eq!(direction(&zones, Edge::Bottom).len(), 1);
     }
 }

@@ -20,7 +20,9 @@ mod geometry;
 mod pointer_position;
 mod rearm;
 mod return_edge;
-pub use geometry::{all_outer_segments, outer_segments, Edge, OuterSegment, Zone, ZoneSet};
+pub use geometry::{
+    all_outer_segments, outer_segments, Edge, EdgeSpan, OuterSegment, Zone, ZoneSet,
+};
 pub use pointer_position::local_pointer_position;
 pub use rearm::{EmergencyRearmGuard, EMERGENCY_REARM_DISTANCE};
 
@@ -373,8 +375,8 @@ pub struct BarrierRequest {
     pub segment: OuterSegment,
 }
 
-/// Selects all segments on one zone edge. Without a zone, there must be one
-/// unambiguous segment across the entire layout.
+/// Selects external segments on one zone edge, or all reachable external
+/// segments in this direction across the permissioned portal zones.
 pub fn select_barriers(
     zones: &[Zone],
     edge: Edge,
@@ -391,13 +393,6 @@ pub fn select_barriers(
     if segments.is_empty() {
         return Err(format!(
             "no outer {} edge exists for the selected zone",
-            edge.as_str()
-        ));
-    }
-    if zone.is_none() && segments.len() != 1 {
-        return Err(format!(
-            "{} outer {} segments exist; specify a zone index",
-            segments.len(),
             edge.as_str()
         ));
     }
@@ -842,7 +837,7 @@ where
                 active_until = timing.active_duration.map(|duration| tokio::time::Instant::now() + duration);
                 let edge_fraction = signal.cursor_position().and_then(|position| {
                     triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id))
-                        .map(|item| item.segment.fraction_for_cursor(position))
+                        .and_then(|item| EdgeSpan::new(&requested.iter().map(|item| item.segment).collect::<Vec<_>>(), item.segment.edge).ok().map(|span| span.cursor_fraction(item.segment, position)))
                 }).unwrap_or(0.5);
                 let edge = triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id)).map(|item| item.segment.edge);
                 on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier, edge_fraction, edge });
@@ -949,8 +944,18 @@ where
             .and_then(|id| requested.iter().find(|item| item.id == id))
             .or_else(|| (requested.len() == 1).then(|| &requested[0]))
             .map(|item| {
-                item.segment
-                    .release_position_at(returned.map_or(0.5, |position| position.fraction))
+                let segments = requested
+                    .iter()
+                    .map(|item| item.segment)
+                    .collect::<Vec<_>>();
+                returned.map_or_else(
+                    || item.segment.release_position(),
+                    |position| {
+                        EdgeSpan::new(&segments, item.segment.edge)
+                            .map(|span| span.release_position(item.segment, position.fraction))
+                            .unwrap_or_else(|_| item.segment.release_position())
+                    },
+                )
             });
         on_notice(CaptureNotice::ReleaseRequested {
             activation_id,
@@ -1096,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_edge_needs_zone_selection() {
+    fn multiple_external_segments_arm_without_manual_zone_selection() {
         let zones = [
             Zone {
                 x: 0,
@@ -1111,7 +1116,11 @@ mod tests {
                 height: 100,
             },
         ];
-        assert!(select_barriers(&zones, Edge::Top, None).is_err());
+        let barriers = select_barriers(&zones, Edge::Top, None).unwrap();
+        assert_eq!(barriers.len(), 2);
+        assert_ne!(barriers[0].id, barriers[1].id);
+        assert!(select_barriers(&zones, Edge::Right, Some(0)).is_err());
+        assert!(select_barriers(&[], Edge::Left, None).is_err());
         assert_eq!(
             select_barriers(&zones, Edge::Top, Some(0)).unwrap().len(),
             1
