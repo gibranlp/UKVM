@@ -506,6 +506,11 @@ fn print_capture_notice(
 ) {
     use ukvm_platform::linux_wayland::CaptureNotice;
     match notice {
+        CaptureNotice::Lifecycle { phase, detail } => {
+            if verbose {
+                println!("[wayland] InputCapture {phase:?}: {detail}");
+            }
+        }
         CaptureNotice::SessionCreated {
             version,
             keyboard_granted,

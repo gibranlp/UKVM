@@ -453,7 +453,10 @@ impl CapturePhase {
                 | (Self::Configuring, Self::WaitingForBarrier)
                 | (Self::WaitingForBarrier, Self::Captured)
                 | (Self::Captured, Self::WaitingForBarrier)
-                | (Self::WaitingForBarrier | Self::Captured, Self::Releasing)
+                | (
+                    Self::Configuring | Self::WaitingForBarrier | Self::Captured,
+                    Self::Releasing
+                )
                 | (Self::Releasing, Self::Closed)
         );
         valid
@@ -464,6 +467,11 @@ impl CapturePhase {
 
 #[derive(Clone, Debug)]
 pub enum CaptureNotice {
+    /// Lifecycle metadata only; never individual input events.
+    Lifecycle {
+        phase: CapturePhase,
+        detail: String,
+    },
     SessionCreated {
         version: u32,
         keyboard_granted: bool,
@@ -661,11 +669,25 @@ where
         &session, edges, zone_index, timing, on_notice, &mut hooks, &mut phase,
     )
     .await;
-    let close = session.close().await;
-    if phase == CapturePhase::Releasing {
-        phase = phase.advance(CapturePhase::Closed)?;
-        debug_assert_eq!(phase, CapturePhase::Closed);
+    if let Err(error) = &result {
+        on_notice(CaptureNotice::Lifecycle {
+            phase,
+            detail: format!("capture ended: {error}"),
+        });
     }
+    if phase != CapturePhase::Releasing {
+        phase = phase.advance(CapturePhase::Releasing)?;
+    }
+    on_notice(CaptureNotice::Lifecycle {
+        phase,
+        detail: "requesting Disable, Session.Close and client bus disconnect".into(),
+    });
+    let close = session.close().await;
+    phase = phase.advance(CapturePhase::Closed)?;
+    on_notice(CaptureNotice::Lifecycle {
+        phase,
+        detail: format!("cleanup result: {close:?}"),
+    });
     on_notice(CaptureNotice::Closed(close.clone()));
     match (result, close) {
         (Ok(summary), Ok(())) => Ok(summary),
@@ -709,6 +731,20 @@ where
         .receive_zones_changed()
         .await
         .map_err(|e| e.to_string())?;
+    let mut closed = session
+        .session
+        .receive_closed()
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut disabled = session
+        .portal
+        .receive_disabled()
+        .await
+        .map_err(|e| e.to_string())?;
+    on_notice(CaptureNotice::Lifecycle {
+        phase: *phase,
+        detail: "subscribed Activated, Deactivated, ZonesChanged, Disabled and Session.Closed; connecting EIS before barriers/Enable".into(),
+    });
     // ConnectToEIS must precede Enable. Keep the EI receiver alive throughout
     // every enabled/active cycle of this portal session.
     let fd = capture_setup(
@@ -784,13 +820,21 @@ where
             decision.rejected
         ));
     }
-    *phase = phase.advance(CapturePhase::WaitingForBarrier)?;
+    on_notice(CaptureNotice::Lifecycle {
+        phase: *phase,
+        detail: format!("SetPointerBarriers response received: zone_set={}, {} barriers; requesting Enable (portal acceptance is not proof of compositor activation)", zone_set.id, requested.len()),
+    });
     capture_setup(
         session.portal.enable(&session.session, Default::default()),
         hooks.is_healthy,
         Duration::from_secs(10),
     )
     .await?;
+    *phase = phase.advance(CapturePhase::WaitingForBarrier)?;
+    on_notice(CaptureNotice::Lifecycle {
+        phase: *phase,
+        detail: "Enable completed; waiting for portal Activated and EI start_emulating".into(),
+    });
     on_notice(CaptureNotice::Enabled);
     let mut summary = CaptureSummary::default();
     let deadline = tokio::time::sleep(timing.duration);
@@ -825,6 +869,10 @@ where
             _ = tokio::signal::ctrl_c() => break,
             signal = activated.next() => {
                 let Some(signal) = signal else { abort_reason = Some("InputCapture Activated signal stream closed".into()); break; };
+                on_notice(CaptureNotice::Lifecycle {
+                    phase: *phase,
+                    detail: format!("portal Activated: activation_id={:?}, barrier={:?}, cursor={:?}", signal.activation_id(), signal.barrier_id(), signal.cursor_position()),
+                });
                 portal_active = true;
                 activation_id = signal.activation_id();
                 triggered_barrier = match signal.barrier_id() {
@@ -835,11 +883,7 @@ where
                 if *phase == CapturePhase::Captured { abort_reason = Some("duplicate InputCapture activation".into()); break; }
                 *phase = phase.advance(CapturePhase::Captured)?;
                 active_until = timing.active_duration.map(|duration| tokio::time::Instant::now() + duration);
-                let edge_fraction = signal.cursor_position().and_then(|position| {
-                    triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id))
-                        .and_then(|item| EdgeSpan::new(&requested.iter().map(|item| item.segment).collect::<Vec<_>>(), item.segment.edge).ok().map(|span| span.cursor_fraction(item.segment, position)))
-                }).unwrap_or(0.5);
-                let edge = triggered_barrier.and_then(|id| requested.iter().find(|item| item.id == id)).map(|item| item.segment.edge);
+                let (edge, edge_fraction) = activation_geometry(&requested, triggered_barrier, signal.cursor_position());
                 on_notice(CaptureNotice::Activated { activation_id, barrier_id: triggered_barrier, edge_fraction, edge });
             }
             signal = deactivated.next() => {
@@ -864,6 +908,19 @@ where
                 abort_reason = Some("display zones changed; capture stopped so barriers can be rebuilt".to_string());
                 break;
             }
+            signal = closed.next() => {
+                let Some(details) = signal else { abort_reason = Some("InputCapture Session.Closed signal stream ended".into()); break; };
+                abort_reason = Some(portal_closed_reason(&details));
+                break;
+            }
+            signal = disabled.next() => {
+                abort_reason = Some(if signal.is_some() {
+                    "portal Disabled: capture no longer enabled".into()
+                } else {
+                    "InputCapture Disabled signal stream ended".into()
+                });
+                break;
+            }
             event = events.next() => {
                 let event = match event {
                     Some(Ok(event)) => event,
@@ -882,7 +939,14 @@ where
                         button: device.device.has_capability(DeviceCapability::Button),
                         scroll: device.device.has_capability(DeviceCapability::Scroll),
                     }),
-                    EiEvent::Disconnected(_) => { abort_reason = Some("EIS disconnected".into()); break; },
+                    EiEvent::Disconnected(disconnected) => {
+                        abort_reason = Some(eis_disconnect_reason(&disconnected, *phase, portal_active, eis_active));
+                        break;
+                    },
+                    EiEvent::DeviceRemoved(_) => on_notice(CaptureNotice::Lifecycle { phase: *phase, detail: "EI device removed".into() }),
+                    EiEvent::DevicePaused(_) => on_notice(CaptureNotice::Lifecycle { phase: *phase, detail: "EI device paused".into() }),
+                    EiEvent::DeviceResumed(_) => on_notice(CaptureNotice::Lifecycle { phase: *phase, detail: "EI device resumed".into() }),
+                    EiEvent::SeatRemoved(_) => on_notice(CaptureNotice::Lifecycle { phase: *phase, detail: "EI seat removed".into() }),
                     EiEvent::DeviceStartEmulating(start) => {
                         eis_active = true;
                         summary.eis_starts += 1;
@@ -978,6 +1042,79 @@ where
     } else {
         Ok(summary)
     }
+}
+
+/// Use the compositor-selected ID, never infer a different edge from cursor position.
+fn activation_geometry(
+    requested: &[BarrierRequest],
+    barrier_id: Option<u32>,
+    cursor: Option<(f32, f32)>,
+) -> (Option<Edge>, f32) {
+    let Some(item) = barrier_id.and_then(|id| requested.iter().find(|item| item.id == id)) else {
+        return (None, 0.5);
+    };
+    let segments = requested
+        .iter()
+        .map(|item| item.segment)
+        .collect::<Vec<_>>();
+    let fraction = cursor
+        .and_then(|cursor| {
+            EdgeSpan::new(&segments, item.segment.edge)
+                .ok()
+                .map(|span| span.cursor_fraction(item.segment, cursor))
+        })
+        .unwrap_or(0.5);
+    (Some(item.segment.edge), fraction)
+}
+
+fn lifecycle_text(text: &str) -> String {
+    text.chars()
+        .take(256)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+fn portal_closed_reason(
+    details: &std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+) -> String {
+    let mut keys = details
+        .keys()
+        .map(|key| lifecycle_text(key))
+        .collect::<Vec<_>>();
+    keys.sort();
+    let reason = ["reason", "message", "error"]
+        .iter()
+        .filter_map(|key| {
+            details
+                .get(*key)
+                .and_then(|value| value.downcast_ref::<&str>().ok())
+                .map(|value| format!("{key}={}", lifecycle_text(value)))
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "portal Session.Closed; detail keys={keys:?}; {}",
+        if reason.is_empty() {
+            "no reason supplied (Session.Closed defines no standardized reason)".into()
+        } else {
+            reason.join("; ")
+        }
+    )
+}
+
+fn eis_disconnect_reason(
+    disconnected: &reis::event::Disconnected,
+    phase: CapturePhase,
+    portal_active: bool,
+    eis_active: bool,
+) -> String {
+    // This is backend lifecycle metadata, not EI wire tracing (which can expose input).
+    let explanation = lifecycle_text(
+        disconnected
+            .explanation
+            .as_deref()
+            .unwrap_or("not supplied"),
+    );
+    format!("EIS disconnected: reason={:?}, last_serial={}, explanation={explanation}; phase={phase:?}, portal_active={portal_active}, eis_active={eis_active}. Check portal/compositor logs for an asynchronous barrier rejection or backend restart", disconnected.reason, disconnected.last_serial)
 }
 
 fn emergency_modifiers_held(keys: &HashSet<u32>) -> bool {
@@ -1160,5 +1297,130 @@ mod tests {
             phase.advance(CapturePhase::Closed).unwrap(),
             CapturePhase::Closed
         );
+    }
+}
+
+#[cfg(test)]
+mod capture_lifecycle_tests {
+    use super::*;
+
+    fn spectrum_barriers() -> Vec<BarrierRequest> {
+        select_barriers(
+            &[
+                Zone {
+                    x: -3840,
+                    y: 0,
+                    width: 3840,
+                    height: 2160,
+                },
+                Zone {
+                    x: -5760,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+            ],
+            Edge::Left,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn both_negative_left_barriers_have_inclusive_endpoints_and_distinct_ids() {
+        let barriers = spectrum_barriers();
+        assert_eq!(barriers.len(), 2);
+        assert_eq!(
+            (
+                barriers[0].id,
+                barriers[0].segment.start,
+                barriers[0].segment.end
+            ),
+            (1, (-3840, 1080), (-3840, 2159))
+        );
+        assert_eq!(
+            (
+                barriers[1].id,
+                barriers[1].segment.start,
+                barriers[1].segment.end
+            ),
+            (2, (-5760, 0), (-5760, 1079))
+        );
+        assert_eq!(
+            validate_barriers(&barriers, &[]).unwrap().accepted,
+            vec![1, 2]
+        );
+        assert_eq!(
+            validate_barriers(&barriers, &[1]).unwrap().rejected,
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn activation_routes_both_barrier_ids_without_guessing_unknown_ids() {
+        let barriers = spectrum_barriers();
+        let (edge, fraction) = activation_geometry(&barriers, Some(1), Some((-3841.0, 1500.0)));
+        assert_eq!(edge, Some(Edge::Left));
+        assert!((fraction - 1500.0 / 2159.0).abs() < 0.001);
+        let (edge, fraction) = activation_geometry(&barriers, Some(2), Some((-5761.0, 500.0)));
+        assert_eq!(edge, Some(Edge::Left));
+        assert!((fraction - 500.0 / 2159.0).abs() < 0.001);
+        assert_eq!(
+            activation_geometry(&barriers, Some(0), Some((-5761.0, 500.0))).0,
+            None
+        );
+        assert_eq!(activation_geometry(&barriers, Some(99), None).0, None);
+        assert_eq!(activation_geometry(&barriers, None, None).0, None);
+    }
+
+    #[test]
+    fn configuring_failure_has_valid_cleanup_path_without_enable_or_activation() {
+        let phase = CapturePhase::Configuring
+            .advance(CapturePhase::Releasing)
+            .unwrap();
+        assert_eq!(
+            phase.advance(CapturePhase::Closed).unwrap(),
+            CapturePhase::Closed
+        );
+        assert!(CapturePhase::Configuring
+            .advance(CapturePhase::Captured)
+            .is_err());
+    }
+
+    #[test]
+    fn ei_disconnect_preserves_backend_reason_and_waiting_state() {
+        let reason = eis_disconnect_reason(
+            &reis::event::Disconnected {
+                last_serial: 7,
+                reason: ei::connection::DisconnectReason::Protocol,
+                explanation: Some("invalid barrier\nbackend exited".into()),
+            },
+            CapturePhase::WaitingForBarrier,
+            false,
+            false,
+        );
+        assert!(reason.contains("reason=Protocol"));
+        assert!(reason.contains("last_serial=7"));
+        assert!(reason.contains("invalid barrier backend exited"));
+        assert!(reason.contains("phase=WaitingForBarrier, portal_active=false, eis_active=false"));
+        assert!(!reason.contains('\n'));
+        assert_eq!(lifecycle_text(&"a".repeat(1000)).len(), 256);
+    }
+
+    #[test]
+    fn portal_closed_reports_optional_reason_without_dumping_other_values() {
+        let mut details = std::collections::HashMap::new();
+        assert!(portal_closed_reason(&details).contains("no reason supplied"));
+        details.insert(
+            "reason".into(),
+            zbus::zvariant::OwnedValue::from(zbus::zvariant::Str::from("backend vanished")),
+        );
+        details.insert(
+            "other".into(),
+            zbus::zvariant::OwnedValue::from(zbus::zvariant::Str::from("do not log")),
+        );
+        let message = portal_closed_reason(&details);
+        assert!(message.contains("reason=backend vanished"));
+        assert!(!message.contains("do not log"));
     }
 }

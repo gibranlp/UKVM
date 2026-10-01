@@ -275,12 +275,15 @@ pub(super) async fn capture_topology(
     edges: &[linux_wayland::Edge],
 ) -> Result<(), String> {
     let path = Mutex::new(Path::default());
-    let mut notice = |notice| match notice {
+    let mut notice = |notice| {
+        match notice {
         CaptureNotice::Activated {
             edge,
             edge_fraction,
-            ..
+            activation_id,
+            barrier_id,
         } => {
+            context.log(format!("InputCapture Activated: activation_id={activation_id:?}, barrier_id={barrier_id:?}, direction={edge:?}, fraction={edge_fraction:.4}"));
             let mut path = path.lock().unwrap();
             let Some(edge) = edge else {
                 path.failure = Some("activation lacks an identifiable launching edge".into());
@@ -332,10 +335,23 @@ pub(super) async fn capture_topology(
             "barriers accepted {:?}; rejected {:?}",
             decision.accepted, decision.rejected
         )),
+        CaptureNotice::Lifecycle { phase, detail } => context.log(format!("InputCapture {phase:?}: {detail}")),
+        CaptureNotice::SessionCreated { version, keyboard_granted } => context.log(format!("InputCapture session created: portal v{version}, keyboard_granted={keyboard_granted}")),
+        CaptureNotice::EisSocketAcquired => context.log("InputCapture EIS socket acquired"),
+        CaptureNotice::EisContextConnected => context.log("InputCapture EI context connected (receiver)"),
+        CaptureNotice::EisHandshakeComplete => context.log("InputCapture EI handshake complete"),
+        CaptureNotice::SeatAvailable => context.log("InputCapture EI seat announced; capture capabilities bound and flushed"),
+        CaptureNotice::DeviceAvailable { pointer, keyboard, button, scroll } => context.log(format!("InputCapture EI device announced: pointer={pointer}, keyboard={keyboard}, button={button}, scroll={scroll}")),
+        CaptureNotice::Deactivated { activation_id } => context.log(format!("InputCapture Deactivated: activation_id={activation_id:?}")),
+        CaptureNotice::ZonesChanged { zone_set } => context.log(format!("InputCapture ZonesChanged: invalidated zone_set={zone_set:?}; rebuilding capture")),
+        CaptureNotice::EisStarted { sequence } => context.log(format!("InputCapture EI start_emulating: sequence={sequence}")),
+        CaptureNotice::EisStopped => context.log("InputCapture EI stop_emulating"),
         CaptureNotice::Enabled => context.log(format!("InputCapture edges enabled: {edges:?}")),
-        CaptureNotice::ReleaseResult(_) => context.log("InputCapture Release completed"),
-        CaptureNotice::Closed(_) => context.log("InputCapture closed"),
+        CaptureNotice::ReleaseRequested { activation_id, cursor_position } => context.log(format!("InputCapture Release requested: activation_id={activation_id:?}, cursor_position={cursor_position:?}")),
+        CaptureNotice::ReleaseResult(result) => context.log(format!("InputCapture Release result: {result:?}")),
+        CaptureNotice::Closed(result) => context.log(format!("InputCapture closed: {result:?}")),
         _ => {}
+    }
     };
     let mut event = |event| {
         let mut path = path.lock().unwrap();

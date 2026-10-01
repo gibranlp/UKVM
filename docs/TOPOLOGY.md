@@ -128,10 +128,38 @@ For each ready direction, subtract overlapping/shared monitor edges and install 
 
 Entry and ReturnControl use a consistent normalized orthogonal span across all segments in the selected direction. Receiver geometry comes from its legitimate EI regions. A return position is clamped to the actual source launch segment rather than a desktop bounding rectangle or a gap. Emergency release uses that same launch segment for the existing 32-logical-pixel inward rearm guard; normal return and disconnect recovery remain unchanged. Requested EI positions and portal release positions remain subject to compositor behavior.
 
-Automated coverage includes side-by-side and stacked outputs, unequal sizes, negative/offset origins, multiple segments, internal seams, empty edges, cross-output returns and emergency rearming. The user confirmed spectrum's right transition worked but its left transition failed before this fix. Physical acceptance of this geometry fix is pending.
+Automated coverage includes side-by-side and stacked outputs, unequal sizes, negative/offset origins, multiple segments, internal seams, empty edges, cross-output returns and emergency rearming. The user physically confirmed spectrum's portal rectangles and both left segments are correct after the geometry fix. Left capture still fails on the installed Hyprland backend: see the lifecycle investigation below. Right switching was previously physically successful; acceptance of both left segments remains blocked.
 
 ### Spectrum geometry retest
 
 Keep io configured at `(-1,0)`. Pull and build this commit on both machines, start `ukvm run --verbose` on io, then spectrum. Confirm spectrum logs its actual portal zones and accepted left boundary segments. Cross internal monitor seams without handing off; cross each listed external left segment at several heights and return through io's right edge. Confirm return lands on the launching monitor. Repeat at least ten times.
 
 Exercise Ctrl+Alt+Shift+Escape with held keys/buttons: local input must return immediately, the launching direction must remain disarmed until 32 logical pixels of inward movement, and another intentional crossing must work. Stop io and test the left edge remains usable; restart io and confirm recovery. If practical, change an output offset/scale while idle and confirm fresh geometry is logged before the next switch. Record only the configurations physically tested.
+
+
+## Left-capture lifecycle investigation
+
+On spectrum, Hyprland 0.56.2 (`efb50993780079460b0cbed1363e2166a2de1d9f`) reports DP-1 at `(-3840,0)` with size `3840x2160` and HDMI-A-1 at `(-5760,0)` with size `1920x1080`. Permissioned portal zones agree. The valid left barriers are DP-1's exposed lower-left `(-3840,1080) → (-3840,2159)` and HDMI's far-left `(-5760,0) → (-5760,1079)`. These are inclusive endpoint coordinates, as specified by the portal API; internal seams must remain excluded.
+
+The user reports both barriers are accepted by the portal and Enable succeeds, but neither activates; EI disconnects and capture is recreated. The local user journal shows repeated `hyprland_input_capture_v1: error 1: The barrier id 1 is invalid`, followed by the Hyprland portal process restarting. The [exact installed compositor validator](https://github.com/hyprwm/Hyprland/blob/efb50993780079460b0cbed1363e2166a2de1d9f/src/protocols/InputCapture.cpp) (`isBarrierValidAgainstMonitor` / `isBarrierValid`) accepts only a full monitor side and requires exactly one VALID match with no PARTIAL matches. DP-1's external segment is PARTIAL against DP-1 and overlaps HDMI's right-edge endpoint by that validator's test. Thus barrier 1 triggers a fatal Wayland protocol error before either segment can activate. The compositor already reinterprets negative coordinates correctly. This differs from the previously working full right edge, which satisfies that validator. Multiple barriers are supported by the portal API and UKVM retains distinct IDs in a single session; there is no evidence that their number causes this failure.
+
+A SetPointerBarriers success response is the portal's acknowledgement, not proof that the downstream compositor installed every barrier. UKVM must keep the correct external segments. Expanding DP-1's barrier to a full side would include an internal seam and still fail that validator; skipping it would remove a requested reachable transition. Disabling barrier validation, changing monitor placement automatically, or patching the compositor is outside this fix. Both requested segments require a standards-compliant compositor/backend correction before physical acceptance can pass. No UKVM-only capture fix is claimed.
+
+Verbose capture diagnostics now show subscription/setup/Enable ordering, session state, raw Activated barrier/activation IDs and cursor, selected direction/fraction, EI seat/device/pause/resume/start/stop, invalidated zone sets, Disabled/Session.Closed, EI disconnect reason/serial/explanation, and actual Release/Disable/Close cleanup outcomes. Optional string reason/message/error fields from Session.Closed are shown when available; that API defines no standardized reason. Backend explanatory strings are bounded and control characters removed; individual input events are not logged. Setup failure now explicitly passes through Releasing and Closed as well. The existing pinned networking, topology, consent, return, emergency guard and reconnect behavior are preserved. Input Protocol 1.3 and Pairing Protocol 2 are unchanged.
+
+### Retest both segments
+
+On both machines, pull the published fix and build; with io still at `(-1,0)`, start io first, then spectrum:
+
+```sh
+git pull --ff-only origin main
+cargo build --workspace
+./target/debug/ukvm run --verbose
+```
+
+1. On HDMI-A-1, move through its far-left edge at an interior height such as y=500. Look for Activated with barrier ID 2, then the outgoing topology entry. Return through io's right edge.
+2. On DP-1, move through its exposed lower-left edge at y=1500. Look for Activated with barrier ID 1, then the outgoing topology entry. Return through io's right edge.
+3. Cross the DP-1/HDMI seam at y=500: input must stay local. Exercise emergency release at each working segment, move inward 32 logical pixels, and recross. Verify stop/restart of io and ordinary return as usual.
+4. If no activation occurs, retain spectrum's lifecycle log and run `journalctl --user -u xdg-desktop-portal-hyprland -n 120 --no-pager`. A portal invalid-barrier error/restart confirms the backend blocker; do not count either segment as passed. With the currently inspected compositor, that failure remains expected until its validator is corrected.
+
+Automated regression tests cover the exact two negative-coordinate segments, inclusive endpoints, independent activation IDs and common edge fractions, unknown-ID refusal, backend disconnect details, portal Closed reasons, and cleanup from setup failure. No physical activation, ReturnControl or emergency-release success on these left segments is claimed in this investigation.
