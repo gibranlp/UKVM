@@ -8,6 +8,17 @@ trial_dir=$runtime_dir/ukvm-xdph-trial
 frontend_override=$runtime_dir/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf
 backend_override=$runtime_dir/systemd/user/xdg-desktop-portal-hyprland.service.d/ukvm-trial.conf
 
+unit_path() {
+    local value=$1
+    [[ $value != *[$'\001'-$'\037'$'\177']* ]] || {
+        printf 'Control characters are not allowed in trial paths.\n' >&2
+        return 1
+    }
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '"%s"' "${value//%/%%}"
+}
+
 usage() {
     printf 'Usage: %s start SOURCE_DIR BUILD_DIR | stop | status\n' "$0" >&2
     exit 2
@@ -18,6 +29,11 @@ case ${1:-} in
         [[ $# == 3 ]] || usage
         source_dir=$(realpath "$2")
         build_dir=$(realpath "$3")
+        helper=${UKVM_TRIAL_HELPER:-$(dirname "$(realpath "$0")")/../target/debug/ukvm-portal-trial-session}
+        [[ -x $helper && -x /usr/lib/xdg-desktop-portal ]] || {
+            printf 'Run cargo build --workspace first; trial session helper or portal frontend is missing.\n' >&2
+            exit 1
+        }
         [[ $(git -C "$source_dir" rev-parse HEAD) == "$revision" ]] || {
             printf 'Wrong upstream revision. Expected %s\n' "$revision" >&2
             exit 1
@@ -34,9 +50,6 @@ case ${1:-} in
             printf 'Trial or conflicting override already exists; inspect with status.\n' >&2
             exit 1
         }
-        mkdir -p "$trial_dir/portals" "$(dirname "$frontend_override")" "$(dirname "$backend_override")"
-        cp /usr/share/xdg-desktop-portal/portals/*.portal "$trial_dir/portals/"
-        cp "$source_dir/hyprland.portal" "$trial_dir/portals/hyprland.portal"
         # Match the effective Hyprland-specific or generic config precedence.
         config_source=
         for candidate in \
@@ -51,22 +64,63 @@ case ${1:-} in
             fi
         done
         [[ -n $config_source ]] || { printf 'No effective portal configuration found.\n' >&2; exit 1; }
+        helper_exec=$(unit_path "$trial_dir/session-helper")
+        backend_exec=$(unit_path "$build_dir/xdg-desktop-portal-hyprland")
+        portal_env=$(unit_path "XDG_DESKTOP_PORTAL_DIR=$trial_dir/portals")
+        picker_env=$(unit_path "PATH=$build_dir/hyprland-share-picker:/usr/local/bin:/usr/bin")
+        mkdir -p "$trial_dir/portals" "$(dirname "$frontend_override")" "$(dirname "$backend_override")"
+        printf '%s\n' "$revision" > "$trial_dir/owned-by-ukvm-trial"
+        trap '"$0" stop >/dev/null || true' ERR
+        cp "$helper" "$trial_dir/session-helper"
+        chmod 700 "$trial_dir/session-helper"
+        cp /usr/share/xdg-desktop-portal/portals/*.portal "$trial_dir/portals/"
+        cp "$source_dir/hyprland.portal" "$trial_dir/portals/hyprland.portal"
         cp "$config_source" "$trial_dir/portals/hyprland-portals.conf"
         printf 'Copied portal configuration from %s\n' "$config_source"
         cat > "$frontend_override" <<EOF
+[Unit]
+BindsTo=graphical-session.target xdg-desktop-portal-hyprland.service
+PartOf=graphical-session.target xdg-desktop-portal-hyprland.service
+After=xdg-desktop-portal-hyprland.service
+ConditionEnvironment=
+StartLimitIntervalSec=60
+StartLimitBurst=20
+
 [Service]
-Environment=XDG_DESKTOP_PORTAL_DIR=$trial_dir/portals
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=$portal_env
+ExecStart=
+ExecStart=:$helper_exec frontend /usr/lib/xdg-desktop-portal
+ExecStartPost=:$helper_exec check-frontend
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
 EOF
         cat > "$backend_override" <<EOF
+[Unit]
+BindsTo=graphical-session.target
+PartOf=graphical-session.target
+Wants=xdg-desktop-portal.service
+ConditionEnvironment=
+StartLimitIntervalSec=60
+StartLimitBurst=20
+
 [Service]
 ExecStart=
-ExecStart=$build_dir/xdg-desktop-portal-hyprland
-Environment=PATH=$build_dir/hyprland-share-picker:/usr/local/bin:/usr/bin
+ExecStart=:$helper_exec backend $backend_exec
+ExecStartPost=:$helper_exec check-backend
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=$picker_env
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
 EOF
-        printf '%s\n' "$revision" > "$trial_dir/owned-by-ukvm-trial"
-        trap '"$0" stop >/dev/null || true' ERR
         systemctl --user daemon-reload
-        systemctl --user restart xdg-desktop-portal-hyprland.service
+        systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service
+        systemctl --user reset-failed xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
+        # El frontend arranca después del backend y sus comprobaciones de capacidades.
         systemctl --user restart xdg-desktop-portal.service
         trap - ERR
         printf 'Trial active. Verify with ukvm doctor. Roll back: %s stop\n' "$0"
@@ -80,22 +134,40 @@ EOF
             printf 'Unknown trial marker; inspect manually.\n' >&2
             exit 1
         }
+        systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service
         rm -f "$frontend_override" "$backend_override"
         rm -f "$trial_dir/portals/"*.portal "$trial_dir/portals/"*portals.conf "$trial_dir/owned-by-ukvm-trial"
+        rm -f "$trial_dir/session-helper"
         rmdir "$trial_dir/portals" "$trial_dir"
         rmdir "$(dirname "$frontend_override")" "$(dirname "$backend_override")" 2>/dev/null || true
         systemctl --user daemon-reload
+        systemctl --user reset-failed xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
         systemctl --user restart xdg-desktop-portal-hyprland.service
         systemctl --user restart xdg-desktop-portal.service
         printf 'Packaged portal restored. Verify InputCapture and RemoteDesktop with ukvm doctor.\n'
         ;;
     status)
         if [[ -f $trial_dir/owned-by-ukvm-trial ]]; then
-            printf 'UKVM runtime portal trial active: %s\n' "$(cat "$trial_dir/owned-by-ukvm-trial")"
+            printf 'UKVM runtime portal trial installed: %s\n' "$(cat "$trial_dir/owned-by-ukvm-trial")"
+            systemctl --user show xdg-desktop-portal-hyprland.service xdg-desktop-portal.service \
+                -p Id -p ActiveState -p SubState -p Result -p MainPID -p NRestarts \
+                -p BindsTo -p PartOf -p After -p DropInPaths
+            if [[ ! -x $trial_dir/session-helper ]]; then
+                printf 'Legacy/incomplete trial: stop, build UKVM, and start the trial again.\n' >&2
+                exit 1
+            fi
+            failed=0
+            "$trial_dir/session-helper" check-backend || failed=1
+            "$trial_dir/session-helper" check-frontend || failed=1
+            if (( failed )); then
+                printf 'Trial not ready for this login. Inspect journalctl --user -u xdg-desktop-portal-hyprland -u xdg-desktop-portal.\n' >&2
+                exit 1
+            fi
+            printf 'Both trial portals belong to the current Hyprland session and advertise keyboard/pointer.\n'
         else
             printf 'No UKVM runtime portal trial marker.\n'
+            systemctl --user cat xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
         fi
-        systemctl --user cat xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
         ;;
     *) usage ;;
 esac

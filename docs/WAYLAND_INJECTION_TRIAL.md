@@ -54,14 +54,54 @@ The source build is not installed system-wide. Inspect the pinned revision and b
 
 ```sh
 cd ~/UKVM
+cargo build --workspace
 scripts/wayland-portal-trial start /tmp/ukvm-xdph-pr426 /tmp/ukvm-xdph-pr426-build
 scripts/wayland-portal-trial status
 target/debug/ukvm doctor
 ```
 
-The script copies the installed portal descriptors and the effective `hyprland-portals.conf` into `$XDG_RUNTIME_DIR/ukvm-xdph-trial/portals`, replacing only that **copy** of `hyprland.portal` with the pinned draft. It adds two runtime systemd user drop-ins: `xdg-desktop-portal.service` gets `XDG_DESKTOP_PORTAL_DIR` pointing to the copied descriptors/configuration; `xdg-desktop-portal-hyprland.service` runs the built draft and puts its consent picker on `PATH`. It restarts those two user services. No packaged binary, system portal configuration, user trust record, private key, or permanent portal override is edited. The unchanged copied `hyprland-portals.conf` continues routing InputCapture to Hyprland. On reboot, runtime drop-ins disappear.
+The script copies the installed portal descriptors and the effective `hyprland-portals.conf` into `$XDG_RUNTIME_DIR/ukvm-xdph-trial/portals`, replacing only that **copy** of `hyprland.portal` with the pinned draft. It copies the development `ukvm-portal-trial-session` helper into the marked runtime directory and adds two runtime systemd user drop-ins. The frontend gets `XDG_DESKTOP_PORTAL_DIR` pointing to the copied descriptors/configuration; the backend runs the built draft and puts its consent picker on `PATH`. Both use the helper to resolve the current Hyprland session before replacing themselves with the actual portal executable. The helper is not installed by `ukvm install`; this remains development tooling. An alternate Cargo target directory can be selected with `UKVM_TRIAL_HELPER=/absolute/path/to/ukvm-portal-trial-session`.
+
+The script stops both old portal processes, clears prior failures, then starts the frontend through its backend dependency. The frontend is ordered after the backend, including its `ExecStartPost` capability check. Both units are bound to the graphical-session target; the frontend also follows backend stop/restart. Backend start/retry pulls the frontend back in. The packaged backend's early `ConditionEnvironment` is cleared only for the trial. Unavailable sessions/interfaces fail and retry with systemd's five-second restart delay; no readiness sleeps or restart logic are added to UKVM.
+
+The helper reuses the read-only current-session resolver, requiring one active logind Wayland login and a current native Hyprland instance. It validates owned live sockets and compositor age, recovers the current display and instance signature from Hyprland runtime state, uses `%t` and its per-user D-Bus, and removes inherited `WAYLAND_SOCKET`. Old manager values are not authoritative. Readiness checks use the unique D-Bus owner's process environment, including the instance signature, so a reused display name cannot make an old portal process pass. InputCapture v1+ and RemoteDesktop v2+ must both advertise keyboard/pointer. These property queries request no grants and inject no input.
+
+`status` reports unit dependencies, PID, restart count and result, then checks both current portal owners and capabilities without activating either service. A legacy trial without the helper is reported explicitly: stop it, build UKVM and start the trial again. Runtime overrides survive graphical logout only while the user runtime directory survives. No packaged binary, system portal configuration, user trust record, private key, or permanent portal override is edited. The unchanged copied `hyprland-portals.conf` continues routing InputCapture to Hyprland. On reboot, runtime drop-ins disappear.
 
 Before continuing, `doctor` must still show InputCapture with pointer capture and must now show RemoteDesktop v2, pointer, keyboard, and `ConnectToEIS`. If InputCapture disappears or the services fail, roll back immediately.
+
+## M15 logout/login lifecycle regression
+
+UKVM commit `79d088ef0f996e159b8f6b9e9fb80bde790e5f00` physically starts automatically and remains active after Hyprland logout/login. The separate pinned portal trial could omit RemoteDesktop or advertise zero input devices until both portal services were restarted manually. Trial integration now binds both processes to the graphical session, rebuilds their environment at each launch and orders verified backend initialization before frontend interface caching. The pinned upstream revision and UKVM runtime startup fix are unchanged.
+
+Automated coverage uses private buses with installed service activation disabled, checks missing/zero/ready backend interfaces, rejects stale process environments despite reused display names, and exercises late Hyprland readiness without inherited Wayland environment. Script tests use a systemctl shim, verify generated units with systemd-analyze, check quoted paths, report failed/legacy status and preserve unrelated overrides during rollback. Validation passed: workspace fmt, check, test (179 passed, five opt-in tests ignored), Clippy with warnings denied and build, plus Bash syntax, ShellCheck and isolated systemd unit verification. No host portal services are operated by these tests. Physical logout/login validation of this trial fix remains pending.
+
+On io, with the previously built pinned source and build directories present:
+
+```sh
+cd ~/UKVM
+git pull --ff-only origin main
+cargo build --workspace
+ukvm service stop
+scripts/wayland-portal-trial stop
+scripts/wayland-portal-trial start /tmp/ukvm-xdph-pr426 /tmp/ukvm-xdph-pr426-build
+scripts/wayland-portal-trial status
+ukvm doctor
+ukvm service enable
+hyprctl dispatch exit
+```
+
+Log back into Hyprland normally, without importing environment, restarting portals or manually starting UKVM. Run:
+
+```sh
+cd ~/UKVM
+scripts/wayland-portal-trial status
+ukvm doctor
+ukvm service status
+ukvm status
+```
+
+Expect keyboard/pointer on both interfaces, RemoteDesktop v2/ConnectToEIS and an automatically running UKVM service. Approve normal consent and physically repeat spectrum ⇄ io control. Repeat logout/login to test a surviving user manager. M16 remains unstarted.
 
 ## Local injection proof, then remote proof
 
@@ -103,6 +143,6 @@ scripts/wayland-portal-trial stop
 target/debug/ukvm doctor
 ```
 
-The script removes only its marked runtime directory and named runtime drop-ins, reloads the user service manager, and restarts the packaged portal backend and frontend. Confirm that InputCapture remains available and RemoteDesktop returns to unavailable. The `control-this-node` permission is separate persistent UKVM trust state; if no longer wanted, run `target/debug/ukvm peer deny spectrum control-this-node` on io. No package uninstall or system configuration restoration is needed because none was changed.
+The script removes only its marked runtime directory and named runtime drop-ins and copied session helper, reloads the user service manager, and restarts the packaged portal backend and frontend. Confirm that InputCapture remains available and RemoteDesktop returns to unavailable. The `control-this-node` permission is separate persistent UKVM trust state; if no longer wanted, run `target/debug/ukvm peer deny spectrum control-this-node` on io. No package uninstall or system configuration restoration is needed because none was changed.
 
 If the script cannot finish rollback, inspect `systemctl --user cat xdg-desktop-portal-hyprland.service xdg-desktop-portal.service` and remove only the two `ukvm-trial.conf` runtime drop-ins shown by `scripts/wayland-portal-trial status`, then `systemctl --user daemon-reload` and restart those two services. Reboot also clears runtime overrides.

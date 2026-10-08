@@ -384,3 +384,43 @@ async fn another_wayland_desktop_rechecks_late_manager_environment_and_cleans_up
         .any(|v| v.starts_with("HYPRLAND_INSTANCE_SIGNATURE=")));
     fixture.terminate(child).await;
 }
+
+#[tokio::test]
+async fn trial_helper_uses_new_hyprland_session_without_inherited_wayland_environment() {
+    let mut fixture = Fixture::new().await;
+    let mut command = fixture.command();
+    command = {
+        let mut helper = Command::new(env!("CARGO_BIN_EXE_ukvm-portal-trial-session"));
+        helper.envs(command.get_envs().filter_map(|(k, v)| v.map(|v| (k, v))));
+        helper
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE");
+        helper
+    };
+    command
+        .args(["backend", "/usr/bin/env"])
+        .env("WAYLAND_SOCKET", "999");
+    let (mut command, missing) = tokio::task::spawn_blocking(move || {
+        let output = command.output().unwrap();
+        (command, output)
+    })
+    .await
+    .unwrap();
+    assert_eq!(missing.status.code(), Some(75));
+    fixture.hyprland();
+    let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let env = String::from_utf8(output.stdout).unwrap();
+    assert!(env.lines().any(|v| v == "WAYLAND_DISPLAY=wayland-current"));
+    assert!(env
+        .lines()
+        .any(|v| v == "HYPRLAND_INSTANCE_SIGNATURE=current_1"));
+    assert!(!env.lines().any(|v| v.starts_with("WAYLAND_SOCKET=")));
+    assert!(!fixture.dir.path().join("ukvm/runtime.lock").exists());
+}
