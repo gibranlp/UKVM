@@ -408,6 +408,31 @@ async fn trial_helper_uses_new_hyprland_session_without_inherited_wayland_enviro
     .unwrap();
     assert_eq!(missing.status.code(), Some(75));
     fixture.hyprland();
+    let mut prepare = Command::new(env!("CARGO_BIN_EXE_ukvm-portal-trial-session"));
+    for (key, value) in command.get_envs() {
+        if let Some(value) = value {
+            prepare.env(key, value);
+        } else {
+            prepare.env_remove(key);
+        }
+    }
+    prepare.arg("prepare-environment");
+    let prepared = tokio::task::spawn_blocking(move || prepare.output().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        prepared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepared.stderr)
+    );
+    let manager_env = fixture.state.lock().unwrap().environment.clone();
+    assert!(manager_env
+        .iter()
+        .any(|v| v == "WAYLAND_DISPLAY=wayland-current"));
+    assert!(manager_env
+        .iter()
+        .any(|v| v == "HYPRLAND_INSTANCE_SIGNATURE=current_1"));
+    assert!(!fixture.dir.path().join("ukvm/runtime.lock").exists());
     let output = tokio::task::spawn_blocking(move || command.output().unwrap())
         .await
         .unwrap();

@@ -41,6 +41,62 @@ async fn connection(env: &ServiceEnvironment) -> Result<zbus::Connection, String
         .map_err(|e| e.to_string())
 }
 
+/// Prepare only the current graphical environment; do not activate any portals.
+pub async fn prepare_environment() -> Result<(), String> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let env = environment().await?;
+        let connection = connection(&env).await?;
+        let manager = zbus::Proxy::new(
+            &connection,
+            "org.freedesktop.systemd1",
+            "/org/freedesktop/systemd1",
+            "org.freedesktop.systemd1.Manager",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        let keys = [
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "HYPRLAND_INSTANCE_SIGNATURE",
+            "XDG_SESSION_TYPE",
+            "XDG_CURRENT_DESKTOP",
+            "XDG_SESSION_DESKTOP",
+        ];
+        let activation: std::collections::HashMap<_, _> = keys
+            .iter()
+            .filter_map(|key| env.get(*key).map(|value| (*key, value.as_str())))
+            .collect();
+        let values: Vec<_> = activation
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect();
+        manager
+            .call::<_, _, ()>("UnsetEnvironment", &(vec!["WAYLAND_SOCKET"],))
+            .await
+            .map_err(|e| e.to_string())?;
+        manager
+            .call::<_, _, ()>("SetEnvironment", &(values,))
+            .await
+            .map_err(|e| e.to_string())?;
+        let daemon = zbus::Proxy::new(
+            &connection,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        daemon
+            .call::<_, _, ()>("UpdateActivationEnvironment", &(activation,))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "trial graphical environment preparation timed out".to_string())?
+}
+
 async fn interfaces(
     connection: &zbus::Connection,
     owner: &str,

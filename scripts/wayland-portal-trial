@@ -7,6 +7,93 @@ runtime_dir=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR must be set in the graphical user
 trial_dir=$runtime_dir/ukvm-xdph-trial
 frontend_override=$runtime_dir/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf
 backend_override=$runtime_dir/systemd/user/xdg-desktop-portal-hyprland.service.d/ukvm-trial.conf
+units=(xdg-desktop-portal-hyprland.service xdg-desktop-portal.service)
+helper=${UKVM_TRIAL_HELPER:-$(dirname "$(realpath "$0")")/../target/debug/ukvm-portal-trial-session}
+
+clear_failures() {
+    local unit state
+    for unit in "${units[@]}"; do
+        state=$(systemctl --user show --property=ActiveState --value "$unit") || return 1
+        # Las unidades D-Bus estáticas pueden descargarse al detenerlas; no hay fallo que borrar.
+        if [[ $state == failed ]]; then
+            systemctl --user reset-failed "$unit" || return 1
+        fi
+    done
+}
+
+portals_active() {
+    local unit
+    for unit in "${units[@]}"; do
+        systemctl --user is-active --quiet "$unit" || return 1
+    done
+}
+
+owned_trial() {
+    [[ -d $trial_dir && ! -L $trial_dir && -f $trial_dir/owned-by-ukvm-trial && ! -L $trial_dir/owned-by-ukvm-trial ]] &&
+        [[ $(cat "$trial_dir/owned-by-ukvm-trial") == "$revision" ]] || {
+        printf 'No valid UKVM trial ownership marker; refusing to remove unrelated overrides.\n' >&2
+        return 1
+    }
+    local path expected role helper_exec
+    helper_exec=$(unit_path "$trial_dir/session-helper") || return 1
+    for role in frontend backend; do
+        if [[ $role == frontend ]]; then path=$frontend_override; else path=$backend_override; fi
+        [[ -e $path || -L $path ]] || continue
+        [[ -f $path && ! -L $path ]] || return 1
+        expected=$trial_dir/$role.conf
+        if [[ -e $expected || -L $expected ]]; then
+            [[ -f $expected && ! -L $expected ]] || return 1
+            cmp -s "$expected" "$path" || {
+                printf 'Trial override was modified; refusing to remove %s\n' "$path" >&2
+                return 1
+            }
+        elif [[ -e $trial_dir/state ]] || ! grep -Fq -- "ExecStart=:$helper_exec $role " "$path"; then
+            printf 'Unrecognized legacy override; refusing to remove %s\n' "$path" >&2
+            return 1
+        fi
+    done
+}
+
+restore_portals() {
+    owned_trial || return 1
+    printf 'restoring\n' > "$trial_dir/state" || return 1
+    # Intentar ambos reinicios aunque uno falle; conservar los datos de recuperación si no arrancan.
+    local failed=0
+    systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service || failed=1
+    rm -f "$frontend_override" "$backend_override" || return 1
+    systemctl --user daemon-reload || return 1
+    if [[ -x $helper ]]; then
+        "$helper" prepare-environment || failed=1
+    fi
+    clear_failures || failed=1
+    systemctl --user restart xdg-desktop-portal-hyprland.service || failed=1
+    systemctl --user restart xdg-desktop-portal.service || failed=1
+    portals_active || failed=1
+    if (( failed )); then
+        printf 'broken\n' > "$trial_dir/state"
+        printf 'Portal restoration failed; recovery marker retained. Inspect status/journal and retry stop.\n' >&2
+        return 1
+    fi
+    rm -f "$trial_dir/portals/"*.portal "$trial_dir/portals/"*portals.conf \
+        "$trial_dir/session-helper" "$trial_dir/frontend.conf" "$trial_dir/backend.conf" || return 1
+    rmdir "$trial_dir/portals" || return 1
+    rm -f "$trial_dir/state" "$trial_dir/owned-by-ukvm-trial" || return 1
+    rmdir "$trial_dir" || return 1
+    rmdir "$(dirname "$frontend_override")" "$(dirname "$backend_override")" 2>/dev/null || true
+    printf 'Packaged portal services restored and active. Verify with ukvm doctor.\n'
+}
+
+rollback_start() {
+    local result=$?
+    trap - EXIT HUP INT TERM
+    if (( result != 0 )); then
+        printf 'Trial setup failed; restoring packaged portals.\n' >&2
+        if ! restore_portals; then
+            printf 'Automatic restoration did not complete; trial status contains recovery details.\n' >&2
+        fi
+    fi
+    exit "$result"
+}
 
 unit_path() {
     local value=$1
@@ -29,7 +116,6 @@ case ${1:-} in
         [[ $# == 3 ]] || usage
         source_dir=$(realpath "$2")
         build_dir=$(realpath "$3")
-        helper=${UKVM_TRIAL_HELPER:-$(dirname "$(realpath "$0")")/../target/debug/ukvm-portal-trial-session}
         [[ -x $helper && -x /usr/lib/xdg-desktop-portal ]] || {
             printf 'Run cargo build --workspace first; trial session helper or portal frontend is missing.\n' >&2
             exit 1
@@ -46,7 +132,7 @@ case ${1:-} in
             printf 'Pinned source is missing hyprland.portal.\n' >&2
             exit 1
         }
-        [[ ! -e $trial_dir && ! -e $frontend_override && ! -e $backend_override ]] || {
+        [[ ! -e $trial_dir && ! -L $trial_dir && ! -e $frontend_override && ! -L $frontend_override && ! -e $backend_override && ! -L $backend_override ]] || {
             printf 'Trial or conflicting override already exists; inspect with status.\n' >&2
             exit 1
         }
@@ -68,16 +154,22 @@ case ${1:-} in
         backend_exec=$(unit_path "$build_dir/xdg-desktop-portal-hyprland")
         portal_env=$(unit_path "XDG_DESKTOP_PORTAL_DIR=$trial_dir/portals")
         picker_env=$(unit_path "PATH=$build_dir/hyprland-share-picker:/usr/local/bin:/usr/bin")
-        mkdir -p "$trial_dir/portals" "$(dirname "$frontend_override")" "$(dirname "$backend_override")"
+        "$helper" prepare-environment
+        mkdir -m 700 "$trial_dir"
         printf '%s\n' "$revision" > "$trial_dir/owned-by-ukvm-trial"
-        trap '"$0" stop >/dev/null || true' ERR
+        trap rollback_start EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        printf 'preparing\n' > "$trial_dir/state"
+        mkdir -p "$trial_dir/portals" "$(dirname "$frontend_override")" "$(dirname "$backend_override")"
         cp "$helper" "$trial_dir/session-helper"
         chmod 700 "$trial_dir/session-helper"
         cp /usr/share/xdg-desktop-portal/portals/*.portal "$trial_dir/portals/"
         cp "$source_dir/hyprland.portal" "$trial_dir/portals/hyprland.portal"
         cp "$config_source" "$trial_dir/portals/hyprland-portals.conf"
         printf 'Copied portal configuration from %s\n' "$config_source"
-        cat > "$frontend_override" <<EOF
+        cat > "$trial_dir/frontend.conf" <<EOF
 [Unit]
 BindsTo=graphical-session.target xdg-desktop-portal-hyprland.service
 PartOf=graphical-session.target xdg-desktop-portal-hyprland.service
@@ -97,7 +189,7 @@ Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
 EOF
-        cat > "$backend_override" <<EOF
+        cat > "$trial_dir/backend.conf" <<EOF
 [Unit]
 BindsTo=graphical-session.target
 PartOf=graphical-session.target
@@ -117,56 +209,70 @@ Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
 EOF
+        cp "$trial_dir/frontend.conf" "$frontend_override"
+        cp "$trial_dir/backend.conf" "$backend_override"
+        owned_trial
         systemctl --user daemon-reload
         systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service
-        systemctl --user reset-failed xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
+        clear_failures
         # El frontend arranca después del backend y sus comprobaciones de capacidades.
         systemctl --user restart xdg-desktop-portal.service
-        trap - ERR
+        portals_active
+        "$trial_dir/session-helper" check-backend
+        "$trial_dir/session-helper" check-frontend
+        printf 'active\n' > "$trial_dir/state"
+        trap - EXIT HUP INT TERM
         printf 'Trial active. Verify with ukvm doctor. Roll back: %s stop\n' "$0"
         ;;
     stop)
-        [[ -f $trial_dir/owned-by-ukvm-trial ]] || {
-            printf 'No UKVM trial marker; refusing to remove unrelated overrides.\n' >&2
-            exit 1
-        }
-        [[ $(cat "$trial_dir/owned-by-ukvm-trial") == "$revision" ]] || {
-            printf 'Unknown trial marker; inspect manually.\n' >&2
-            exit 1
-        }
-        systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service
-        rm -f "$frontend_override" "$backend_override"
-        rm -f "$trial_dir/portals/"*.portal "$trial_dir/portals/"*portals.conf "$trial_dir/owned-by-ukvm-trial"
-        rm -f "$trial_dir/session-helper"
-        rmdir "$trial_dir/portals" "$trial_dir"
-        rmdir "$(dirname "$frontend_override")" "$(dirname "$backend_override")" 2>/dev/null || true
-        systemctl --user daemon-reload
-        systemctl --user reset-failed xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
-        systemctl --user restart xdg-desktop-portal-hyprland.service
-        systemctl --user restart xdg-desktop-portal.service
-        printf 'Packaged portal restored. Verify InputCapture and RemoteDesktop with ukvm doctor.\n'
+        restore_portals
         ;;
     status)
         if [[ -f $trial_dir/owned-by-ukvm-trial ]]; then
             printf 'UKVM runtime portal trial installed: %s\n' "$(cat "$trial_dir/owned-by-ukvm-trial")"
+            printf 'Last setup/restoration state: %s\n' "$(cat "$trial_dir/state" 2>/dev/null || printf legacy)"
             systemctl --user show xdg-desktop-portal-hyprland.service xdg-desktop-portal.service \
                 -p Id -p ActiveState -p SubState -p Result -p MainPID -p NRestarts \
                 -p BindsTo -p PartOf -p After -p DropInPaths
+            owned_trial || { printf 'Trial state: broken (ownership/configuration mismatch).\n' >&2; exit 1; }
             if [[ ! -x $trial_dir/session-helper ]]; then
-                printf 'Legacy/incomplete trial: stop, build UKVM, and start the trial again.\n' >&2
+                printf 'Trial state: broken. Legacy/incomplete trial: stop, build UKVM, and start the trial again.\n' >&2
+                exit 1
+            fi
+            phase=$(cat "$trial_dir/state" 2>/dev/null || printf legacy)
+            if [[ $phase != active && $phase != legacy ]]; then
+                printf 'Trial state: broken (incomplete setup/restoration: %s).\n' "$phase" >&2
+                exit 1
+            fi
+            backend_state=$(systemctl --user show --property=ActiveState --value "${units[0]}")
+            frontend_state=$(systemctl --user show --property=ActiveState --value "${units[1]}")
+            if [[ $backend_state == inactive && $frontend_state == inactive ]]; then
+                printf 'Trial state: inactive (both portal services stopped).\n'
+                exit 1
+            fi
+            if [[ $backend_state != active || $frontend_state != active ]]; then
+                printf 'Trial state: broken (backend=%s, frontend=%s).\n' "$backend_state" "$frontend_state" >&2
                 exit 1
             fi
             failed=0
             "$trial_dir/session-helper" check-backend || failed=1
             "$trial_dir/session-helper" check-frontend || failed=1
             if (( failed )); then
-                printf 'Trial not ready for this login. Inspect journalctl --user -u xdg-desktop-portal-hyprland -u xdg-desktop-portal.\n' >&2
+                printf 'Trial state: broken; not ready for this login. Inspect journalctl --user -u xdg-desktop-portal-hyprland -u xdg-desktop-portal.\n' >&2
                 exit 1
             fi
-            printf 'Both trial portals belong to the current Hyprland session and advertise keyboard/pointer.\n'
+            printf 'Trial state: active. Both portals belong to the current Hyprland session and advertise keyboard/pointer.\n'
         else
-            printf 'No UKVM runtime portal trial marker.\n'
-            systemctl --user cat xdg-desktop-portal-hyprland.service xdg-desktop-portal.service
+            if [[ -e $trial_dir || -e $frontend_override || -e $backend_override || -L $frontend_override || -L $backend_override ]]; then
+                printf 'Trial state: broken/unowned assets; refusing automatic cleanup.\n' >&2
+                exit 1
+            fi
+            printf 'No UKVM runtime portal trial marker. Trial state: not installed.\n'
+            systemctl --user show "${units[@]}" -p Id -p LoadState -p ActiveState -p SubState -p Result
+            if ! portals_active; then
+                printf 'Portal stack inactive/broken; a validated trial start can establish it from this state.\n' >&2
+                exit 1
+            fi
         fi
         ;;
     *) usage ;;

@@ -11,6 +11,7 @@ impl Fixture {
         for path in [
             "bin",
             "runtime",
+            "unit-state",
             "source",
             "build % quoted\"/hyprland-share-picker",
             "config/xdg-desktop-portal",
@@ -23,17 +24,65 @@ impl Fixture {
         )
         .unwrap();
         let fixture = Self { dir };
-        fixture.executable(
-            "bin/systemctl",
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$UKVM_TEST_LOG\"\n",
-        );
+        fixture.executable("bin/systemctl", r#"#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$UKVM_TEST_LOG"
+shift
+action=$1
+shift
+backend=xdg-desktop-portal-hyprland.service
+frontend=xdg-desktop-portal.service
+state() { cat "$UKVM_TEST_STATE/$1" 2>/dev/null || printf unloaded; }
+put() { printf '%s\n' "$2" > "$UKVM_TEST_STATE/$1"; }
+case $action in
+    daemon-reload) ;;
+    stop)
+        for unit in "$@"; do
+            if [[ ${UKVM_TEST_KEEP_FAILED:-0} == 1 && $(state "$unit") == failed ]]; then continue; fi
+            put "$unit" unloaded
+        done ;;
+    show)
+        if [[ $1 == --property=ActiveState ]]; then
+            value=$(state "${@: -1}")
+            [[ $value != unloaded ]] || value=inactive
+            printf '%s\n' "$value"
+        else
+            for unit in "$backend" "$frontend"; do printf 'Id=%s\nActiveState=%s\n' "$unit" "$(state "$unit")"; done
+        fi ;;
+    reset-failed)
+        for unit in "$@"; do
+            if [[ $(state "$unit") == unloaded || ${UKVM_TEST_RESET_FAIL:-0} == 1 ]]; then
+                printf 'Failed to reset failed state: Unit %s not loaded or manager error.\n' "$unit" >&2
+                exit 1
+            fi
+            put "$unit" inactive
+        done ;;
+    restart)
+        if [[ -f $XDG_RUNTIME_DIR/systemd/user/$frontend.d/ukvm-trial.conf ]]; then
+            case ${UKVM_TEST_TRIAL_START:-ok} in
+                fail) put "$backend" failed; exit 1;;
+                skip) exit 0;;
+                backend-only) put "$backend" active; exit 0;;
+            esac
+            put "$backend" active
+            put "$frontend" active
+        elif [[ ${UKVM_TEST_RESTORE_FAIL:-0} == 1 && $1 == "$backend" ]]; then
+            put "$backend" failed
+            exit 1
+        else
+            put "$1" active
+        fi ;;
+    is-active) [[ $(state "${@: -1}") == active ]];;
+    *) printf 'Unexpected systemctl action: %s\n' "$action" >&2; exit 2;;
+esac
+"#);
         fixture.executable(
             "bin/git",
             "#!/bin/sh\nprintf '%s\\n' \"${UKVM_TEST_REVISION}\"\n",
         );
         fixture.executable(
             "helper",
-            "#!/bin/sh\nexit \"${UKVM_TEST_HELPER_FAIL:-0}\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$UKVM_TEST_HELPER_LOG\"\ncase $1 in \"${UKVM_TEST_HELPER_FAIL_ACTION:-never}\") exit 75;; esac\nexit \"${UKVM_TEST_HELPER_FAIL:-0}\"\n",
         );
         fixture.executable(
             "build % quoted\"/xdg-desktop-portal-hyprland",
@@ -77,6 +126,8 @@ impl Fixture {
             .env("XDG_CONFIG_HOME", self.path("config"))
             .env("UKVM_TRIAL_HELPER", self.path("helper"))
             .env("UKVM_TEST_LOG", self.path("systemctl.log"))
+            .env("UKVM_TEST_STATE", self.path("unit-state"))
+            .env("UKVM_TEST_HELPER_LOG", self.path("helper.log"))
             .env("UKVM_TEST_REVISION", REVISION);
         if action == "start" {
             command
@@ -87,6 +138,21 @@ impl Fixture {
     }
     fn run(&self, action: &str) -> std::process::Output {
         self.command(action).output().unwrap()
+    }
+    fn assert_stock_restored(&self) {
+        assert!(!self.path("runtime/ukvm-xdph-trial").exists());
+        for unit in [
+            "xdg-desktop-portal-hyprland.service",
+            "xdg-desktop-portal.service",
+        ] {
+            assert_eq!(
+                fs::read_to_string(self.path(&format!("unit-state/{unit}"))).unwrap(),
+                "active\n"
+            );
+            assert!(!self
+                .path(&format!("runtime/systemd/user/{unit}.d/ukvm-trial.conf"))
+                .exists());
+        }
     }
 }
 
@@ -122,7 +188,15 @@ fn trial_units_order_fresh_backend_before_frontend_and_rollback_keeps_other_over
         assert!(text.contains("RestartSec=5"));
     }
     let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
-    assert_eq!(log, "--user daemon-reload\n--user stop xdg-desktop-portal.service xdg-desktop-portal-hyprland.service\n--user reset-failed xdg-desktop-portal-hyprland.service xdg-desktop-portal.service\n--user restart xdg-desktop-portal.service\n");
+    assert!(
+        !log.contains("reset-failed"),
+        "unloaded/static units need no failure reset: {log}"
+    );
+    assert!(log.contains("--user restart xdg-desktop-portal.service"));
+    assert_eq!(
+        fs::read_to_string(fixture.path("runtime/ukvm-xdph-trial/state")).unwrap(),
+        "active\n"
+    );
     assert!(fixture.run("status").status.success());
     let bad = fixture
         .command("status")
@@ -184,7 +258,14 @@ fn trial_refuses_other_revision_and_unowned_rollback() {
     fs::create_dir_all(unit.parent().unwrap()).unwrap();
     fs::write(&unit, "unrelated").unwrap();
     assert!(!fixture.run("stop").status.success());
-    assert_eq!(fs::read_to_string(unit).unwrap(), "unrelated");
+    assert_eq!(fs::read_to_string(&unit).unwrap(), "unrelated");
+    fs::remove_file(&unit).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/ukvm-unrelated-override", &unit).unwrap();
+    assert!(!fixture.run("start").status.success());
+    assert!(fs::symlink_metadata(&unit)
+        .unwrap()
+        .file_type()
+        .is_symlink());
 }
 
 #[test]
@@ -198,4 +279,124 @@ fn legacy_trial_can_be_removed_without_new_helper() {
     assert!(String::from_utf8_lossy(&status.stderr).contains("Legacy/incomplete"));
     assert!(fixture.run("stop").status.success());
     assert!(!trial.exists());
+}
+
+#[test]
+fn unloaded_dbus_units_and_partial_trial_failures_restore_both_stock_services() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    for mode in ["fail", "skip", "backend-only", "capability-failure"] {
+        let fixture = Fixture::new();
+        let mut command = fixture.command("start");
+        if mode == "capability-failure" {
+            command.env("UKVM_TEST_HELPER_FAIL_ACTION", "check-frontend");
+        } else {
+            command.env("UKVM_TEST_TRIAL_START", mode);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{mode} must fail instead of reporting trial success"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Trial active."));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Trial setup failed"));
+        fixture.assert_stock_restored();
+        let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
+        assert!(!log.contains("reset-failed"), "{mode}: {log}");
+        assert!(log.contains("--user restart xdg-desktop-portal-hyprland.service"));
+        assert!(fixture.run("status").status.success());
+    }
+}
+
+#[test]
+fn restoration_errors_keep_recovery_state_and_attempt_both_services() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let output = fixture
+        .command("start")
+        .env("UKVM_TEST_TRIAL_START", "fail")
+        .env("UKVM_TEST_RESTORE_FAIL", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        fs::read_to_string(fixture.path("runtime/ukvm-xdph-trial/state")).unwrap(),
+        "broken\n"
+    );
+    let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
+    assert!(log.contains("--user restart xdg-desktop-portal-hyprland.service\n--user restart xdg-desktop-portal.service"));
+    assert!(!fixture.run("status").status.success());
+    assert!(fixture.run("stop").status.success());
+    fixture.assert_stock_restored();
+}
+
+#[test]
+fn genuine_reset_failure_is_reported_and_can_be_recovered() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.path("unit-state/xdg-desktop-portal-hyprland.service"),
+        "failed\n",
+    )
+    .unwrap();
+    let output = fixture
+        .command("start")
+        .env("UKVM_TEST_KEEP_FAILED", "1")
+        .env("UKVM_TEST_RESET_FAIL", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("manager error"));
+    assert!(fixture
+        .path("runtime/ukvm-xdph-trial/owned-by-ukvm-trial")
+        .exists());
+    assert!(fixture.run("stop").status.success());
+    fixture.assert_stock_restored();
+}
+
+#[test]
+fn status_detects_inactive_units_and_cleanup_refuses_modified_owned_paths() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    let fixture = Fixture::new();
+    let initial = fixture.run("status");
+    assert!(!initial.status.success());
+    assert!(String::from_utf8_lossy(&initial.stderr).contains("Portal stack inactive/broken"));
+    assert!(fixture.run("start").status.success());
+    fs::write(
+        fixture.path("unit-state/xdg-desktop-portal.service"),
+        "inactive\n",
+    )
+    .unwrap();
+    let partial = fixture.run("status");
+    assert!(!partial.status.success());
+    assert!(String::from_utf8_lossy(&partial.stderr).contains("Trial state: broken"));
+    fs::write(
+        fixture.path("unit-state/xdg-desktop-portal-hyprland.service"),
+        "inactive\n",
+    )
+    .unwrap();
+    let inactive = fixture.run("status");
+    assert!(!inactive.status.success());
+    assert!(String::from_utf8_lossy(&inactive.stdout).contains("Trial state: inactive"));
+    let path = fixture.path("runtime/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
+    fs::write(&path, "[Service]\nExecStart=/unrelated\n").unwrap();
+    let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
+    let output = fixture.run("stop");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("override was modified"));
+    assert_eq!(
+        fs::read_to_string(path).unwrap(),
+        "[Service]\nExecStart=/unrelated\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.path("systemctl.log")).unwrap(),
+        log
+    );
 }

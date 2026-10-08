@@ -13,7 +13,8 @@ fn main() -> std::process::ExitCode {
                 [action, binary] if action == "backend" || action == "frontend" => portal_trial::launch(binary, action == "backend").await,
                 [action] if action == "check-backend" => portal_trial::check(true).await,
                 [action] if action == "check-frontend" => portal_trial::check(false).await,
-                _ => Err("usage: ukvm-portal-trial-session backend|frontend EXECUTABLE | check-backend | check-frontend".into()),
+                [action] if action == "prepare-environment" => portal_trial::prepare_environment().await,
+                _ => Err("usage: ukvm-portal-trial-session backend|frontend EXECUTABLE | check-backend | check-frontend | prepare-environment".into()),
             }
         });
         match result {
