@@ -1,4 +1,4 @@
-//! Development helper, copied into the reversible portal trial's runtime directory.
+//! Development helper, copied into the reversible portal trial's private user data directory.
 fn main() -> std::process::ExitCode {
     #[cfg(target_os = "linux")]
     {

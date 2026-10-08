@@ -58,7 +58,7 @@ case $action in
             put "$unit" inactive
         done ;;
     restart)
-        if [[ -f $XDG_RUNTIME_DIR/systemd/user/$frontend.d/ukvm-trial.conf ]]; then
+        if [[ -f $XDG_CONFIG_HOME/systemd/user/$frontend.d/ukvm-trial.conf ]]; then
             case ${UKVM_TEST_TRIAL_START:-ok} in
                 fail) put "$backend" failed; exit 1;;
                 skip) exit 0;;
@@ -124,6 +124,7 @@ esac
             )
             .env("XDG_RUNTIME_DIR", self.path("runtime"))
             .env("XDG_CONFIG_HOME", self.path("config"))
+            .env("XDG_DATA_HOME", self.path("data"))
             .env("UKVM_TRIAL_HELPER", self.path("helper"))
             .env("UKVM_TEST_LOG", self.path("systemctl.log"))
             .env("UKVM_TEST_STATE", self.path("unit-state"))
@@ -140,7 +141,7 @@ esac
         self.command(action).output().unwrap()
     }
     fn assert_stock_restored(&self) {
-        assert!(!self.path("runtime/ukvm-xdph-trial").exists());
+        assert!(!self.path("data/ukvm/portal-trial").exists());
         for unit in [
             "xdg-desktop-portal-hyprland.service",
             "xdg-desktop-portal.service",
@@ -150,7 +151,7 @@ esac
                 "active\n"
             );
             assert!(!self
-                .path(&format!("runtime/systemd/user/{unit}.d/ukvm-trial.conf"))
+                .path(&format!("config/systemd/user/{unit}.d/ukvm-trial.conf"))
                 .exists());
         }
     }
@@ -168,7 +169,7 @@ fn trial_units_order_fresh_backend_before_frontend_and_rollback_keeps_other_over
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let units = fixture.path("runtime/systemd/user");
+    let units = fixture.path("config/systemd/user");
     let backend =
         fs::read_to_string(units.join("xdg-desktop-portal-hyprland.service.d/ukvm-trial.conf"))
             .unwrap();
@@ -177,7 +178,8 @@ fn trial_units_order_fresh_backend_before_frontend_and_rollback_keeps_other_over
     assert!(backend.contains("ConditionEnvironment=\n"));
     assert!(backend.contains("Wants=xdg-desktop-portal.service"));
     assert!(backend.contains("check-backend"));
-    assert!(backend.contains("build %% quoted\\\"/xdg-desktop-portal-hyprland"));
+    assert!(backend.contains("data/ukvm/portal-trial/xdg-desktop-portal-hyprland"));
+    assert!(!backend.contains("build %% quoted"));
     assert!(
         frontend.contains("BindsTo=graphical-session.target xdg-desktop-portal-hyprland.service")
     );
@@ -194,7 +196,7 @@ fn trial_units_order_fresh_backend_before_frontend_and_rollback_keeps_other_over
     );
     assert!(log.contains("--user restart xdg-desktop-portal.service"));
     assert_eq!(
-        fs::read_to_string(fixture.path("runtime/ukvm-xdph-trial/state")).unwrap(),
+        fs::read_to_string(fixture.path("data/ukvm/portal-trial/state")).unwrap(),
         "active\n"
     );
     assert!(fixture.run("status").status.success());
@@ -235,7 +237,7 @@ fn trial_units_order_fresh_backend_before_frontend_and_rollback_keeps_other_over
     fs::write(&unrelated, "[Service]\nUMask=0077\n").unwrap();
     assert!(fixture.run("stop").status.success());
     assert!(unrelated.exists());
-    assert!(!fixture.path("runtime/ukvm-xdph-trial").exists());
+    assert!(!fixture.path("data/ukvm/portal-trial").exists());
     assert!(!units
         .join("xdg-desktop-portal.service.d/ukvm-trial.conf")
         .exists());
@@ -253,8 +255,8 @@ fn trial_refuses_other_revision_and_unowned_rollback() {
         .output()
         .unwrap();
     assert!(!output.status.success());
-    assert!(!fixture.path("runtime/ukvm-xdph-trial").exists());
-    let unit = fixture.path("runtime/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
+    assert!(!fixture.path("data/ukvm/portal-trial").exists());
+    let unit = fixture.path("config/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
     fs::create_dir_all(unit.parent().unwrap()).unwrap();
     fs::write(&unit, "unrelated").unwrap();
     assert!(!fixture.run("stop").status.success());
@@ -323,7 +325,7 @@ fn restoration_errors_keep_recovery_state_and_attempt_both_services() {
         .unwrap();
     assert!(!output.status.success());
     assert_eq!(
-        fs::read_to_string(fixture.path("runtime/ukvm-xdph-trial/state")).unwrap(),
+        fs::read_to_string(fixture.path("data/ukvm/portal-trial/state")).unwrap(),
         "broken\n"
     );
     let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
@@ -353,7 +355,7 @@ fn genuine_reset_failure_is_reported_and_can_be_recovered() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("manager error"));
     assert!(fixture
-        .path("runtime/ukvm-xdph-trial/owned-by-ukvm-trial")
+        .path("data/ukvm/portal-trial/owned-by-ukvm-trial")
         .exists());
     assert!(fixture.run("stop").status.success());
     fixture.assert_stock_restored();
@@ -385,7 +387,7 @@ fn status_detects_inactive_units_and_cleanup_refuses_modified_owned_paths() {
     let inactive = fixture.run("status");
     assert!(!inactive.status.success());
     assert!(String::from_utf8_lossy(&inactive.stdout).contains("Trial state: inactive"));
-    let path = fixture.path("runtime/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
+    let path = fixture.path("config/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
     fs::write(&path, "[Service]\nExecStart=/unrelated\n").unwrap();
     let log = fs::read_to_string(fixture.path("systemctl.log")).unwrap();
     let output = fixture.run("stop");
@@ -399,4 +401,124 @@ fn status_detects_inactive_units_and_cleanup_refuses_modified_owned_paths() {
         fs::read_to_string(fixture.path("systemctl.log")).unwrap(),
         log
     );
+}
+
+#[test]
+fn persistent_trial_survives_runtime_and_manager_recreation_without_original_build() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    for manager_state in ["inactive", "unloaded"] {
+        let fixture = Fixture::new();
+        assert!(fixture.run("start").status.success());
+        let trial = fixture.path("data/ukvm/portal-trial");
+        let backend_override = fixture
+            .path("config/systemd/user/xdg-desktop-portal-hyprland.service.d/ukvm-trial.conf");
+        let definition = fs::read(&backend_override).unwrap();
+        for (installed, original) in [
+            ("session-helper", "helper"),
+            (
+                "xdg-desktop-portal-hyprland",
+                "build % quoted\"/xdg-desktop-portal-hyprland",
+            ),
+            (
+                "hyprland-share-picker",
+                "build % quoted\"/hyprland-share-picker/hyprland-share-picker",
+            ),
+        ] {
+            assert_eq!(
+                fs::read(trial.join(installed)).unwrap(),
+                fs::read(fixture.path(original)).unwrap()
+            );
+        }
+        fs::remove_dir_all(fixture.path("runtime")).unwrap();
+        fs::create_dir(fixture.path("new-runtime")).unwrap();
+        fs::remove_dir_all(fixture.path("source")).unwrap();
+        fs::remove_dir_all(fixture.path("build % quoted\"")).unwrap();
+        fs::remove_file(fixture.path("helper")).unwrap();
+        for unit in [
+            "xdg-desktop-portal-hyprland.service",
+            "xdg-desktop-portal.service",
+        ] {
+            fs::write(fixture.path(&format!("unit-state/{unit}")), manager_state).unwrap();
+        }
+        let status = fixture
+            .command("status")
+            .env("XDG_RUNTIME_DIR", fixture.path("new-runtime"))
+            .output()
+            .unwrap();
+        assert!(!status.status.success());
+        let text = String::from_utf8_lossy(&status.stdout);
+        assert!(text.contains("installed (persistent)"), "{text}");
+        assert!(text.contains("Trial state: inactive"), "{text}");
+        assert_eq!(fs::read(&backend_override).unwrap(), definition);
+        let activation = Command::new(fixture.path("bin/systemctl"))
+            .args(["--user", "restart", "xdg-desktop-portal.service"])
+            .env("XDG_CONFIG_HOME", fixture.path("config"))
+            .env("XDG_RUNTIME_DIR", fixture.path("new-runtime"))
+            .env("UKVM_TEST_STATE", fixture.path("unit-state"))
+            .env("UKVM_TEST_LOG", fixture.path("systemctl.log"))
+            .output()
+            .unwrap();
+        assert!(activation.status.success());
+        let status = fixture
+            .command("status")
+            .env("XDG_RUNTIME_DIR", fixture.path("new-runtime"))
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "{}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(String::from_utf8_lossy(&status.stdout).contains("Trial state: active"));
+        fs::write(fixture.path("helper.log"), "").unwrap();
+        let stop = fixture
+            .command("stop")
+            .env("XDG_RUNTIME_DIR", fixture.path("new-runtime"))
+            .output()
+            .unwrap();
+        assert!(
+            stop.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stop.stderr)
+        );
+        assert!(fs::read_to_string(fixture.path("helper.log"))
+            .unwrap()
+            .contains("prepare-environment"));
+        fixture.assert_stock_restored();
+    }
+}
+
+#[test]
+fn missing_persistent_integration_is_broken_and_legacy_orphans_are_preserved() {
+    if !std::path::Path::new("/usr/lib/xdg-desktop-portal").exists() {
+        return;
+    }
+    for missing in [
+        "data/ukvm/portal-trial/xdg-desktop-portal-hyprland",
+        "data/ukvm/portal-trial/hyprland-share-picker",
+        "config/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf",
+    ] {
+        let fixture = Fixture::new();
+        assert!(fixture.run("start").status.success());
+        fs::remove_file(fixture.path(missing)).unwrap();
+        let status = fixture.run("status");
+        assert!(!status.status.success());
+        assert!(String::from_utf8_lossy(&status.stderr)
+            .contains("persistent integration/assets missing"));
+        assert!(fixture.run("stop").status.success());
+        fixture.assert_stock_restored();
+    }
+    let fixture = Fixture::new();
+    let orphan = fixture.path("runtime/systemd/user/xdg-desktop-portal.service.d/ukvm-trial.conf");
+    fs::create_dir_all(orphan.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/unrelated", &orphan).unwrap();
+    for action in ["start", "status", "stop"] {
+        assert!(!fixture.run(action).status.success());
+        assert!(fs::symlink_metadata(&orphan)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 }
