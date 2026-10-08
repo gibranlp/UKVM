@@ -31,7 +31,7 @@ ukvm peers
 journalctl --user -u ukvm
 ```
 
-Install does not enable/start. The service uses the existing runtime and normal portal consent, with per-user single-instance ownership and cooperative shutdown. Use `ukvm service stop`, `restart`, `disable`, `status` or `uninstall` as needed. Desktop systemd graphical-session integration is required; see [installed paths, lifecycle and acceptance](docs/SERVICE.md). The Hyprland partial-edge validator blocker remains unchanged; neither service installation nor M15 resolves it.
+Install does not enable/start. The service uses the existing runtime and normal portal consent, with per-user single-instance ownership and cooperative shutdown. Use `ukvm service stop`, `restart`, `disable`, `status` or `uninstall` as needed. Login startup retries session/backend readiness and validates current compositor sockets, including native Hyprland environment recovery. Desktop systemd graphical-session integration is required; see [installed paths, lifecycle and acceptance](docs/SERVICE.md). The Hyprland partial-edge validator blocker remains unchanged; neither service installation nor M15 resolves it.
 
 ## Build and inspect
 
@@ -61,7 +61,7 @@ For guided first-run configuration, run `ukvm setup` while the other node is in 
 
 ## Design
 
-The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linux installation, a systemd user service and daily status/peers commands are available in M15; physical service acceptance is pending. See [service setup](docs/SERVICE.md). Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
+The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linux installation, a systemd user service and daily status/peers commands are available in M15; normal service operation, switching, single-instance protection and restart recovery are physically confirmed. The login-autostart fix awaits physical retesting. See [service setup](docs/SERVICE.md). Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
 
 ## License
 

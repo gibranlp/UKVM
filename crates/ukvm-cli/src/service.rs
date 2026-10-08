@@ -6,17 +6,8 @@ use std::{
 };
 const TEMPLATE: &str = include_str!("../../../assets/systemd/ukvm.service.in");
 const MARKER: &str = "# UKVM managed user service (M15)\n";
-const SESSION_ENV: &[&str] = &[
-    "WAYLAND_DISPLAY",
-    "XDG_SESSION_TYPE",
-    "XDG_CURRENT_DESKTOP",
-    "XDG_SESSION_DESKTOP",
-    "DBUS_SESSION_BUS_ADDRESS",
-    "HYPRLAND_INSTANCE_SIGNATURE",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
-];
+#[cfg(target_os = "linux")]
+use ukvm_platform::linux_wayland::SESSION_ENV;
 
 pub fn unit(binary: &Path, verbose: bool) -> Result<String, String> {
     if !binary.is_absolute() {
@@ -103,6 +94,7 @@ fn systemctl(args: &[&str]) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn prepare_session() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if !ukvm_platform::linux_wayland::SessionInfo::detect().wayland_socket_reachable {
@@ -147,12 +139,33 @@ pub fn command(args: &[String]) -> ExitCode {
     }
     #[cfg(target_os = "linux")]
     {
-        let result = (|| -> Result<(), String> {
+        let result = (|| -> Result<ExitCode, String> {
             match args {
+                [action, rest @ ..] if action == "run" => {
+                    use std::os::unix::process::CommandExt;
+                    let verbose = match rest { [] => false, [flag] if flag == "--verbose" => true, _ => return Err("usage: ukvm service run [--verbose]".into()) };
+                    let environment = super::with_runtime(async {
+                        let env = ukvm_platform::linux_wayland::service_environment().await?;
+                        ukvm_platform::linux_wayland::service_portal_ready(&env).await?;
+                        Ok::<_, String>(env)
+                    });
+                    let environment = match environment {
+                        Ok(env) => env,
+                        Err(error) => {
+                            eprintln!("Graphical session not ready: {error}; systemd will retry.");
+                            return Ok(ExitCode::from(75));
+                        }
+                    };
+                    let mut runtime = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+                    runtime.arg("run");
+                    if verbose { runtime.arg("--verbose"); }
+                    for key in SESSION_ENV { runtime.env_remove(key); }
+                    runtime.envs(environment);
+                    // exec conserva PID, señales de systemd y el único dueño del runtime.
+                    return Err(format!("cannot execute service runtime: {}", runtime.exec()));
+                }
                 [action] if action == "check-session" => {
-                    if !ukvm_platform::linux_wayland::SessionInfo::detect().wayland_socket_reachable {
-                        return Err("no reachable native Wayland graphical session; service startup skipped".into());
-                    }
+                    super::with_runtime(ukvm_platform::linux_wayland::service_environment())?;
                 }
                 [action] if action == "--help" || action == "help" => println!("Usage: ukvm service install [--verbose]|enable|start|stop|restart|status|disable|uninstall\nInstall does not enable or start. Start/restart require the graphical session."),
                 [action, rest @ ..] if action == "install" => {
@@ -168,7 +181,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
                 [action] if action == "uninstall" => {
                     let path = path()?;
-                    if !managed(&path)? { println!("No UKVM-managed user unit at {}. Packaged units are removed by their package/install owner.", path.display()); return Ok(()); }
+                    if !managed(&path)? { println!("No UKVM-managed user unit at {}. Packaged units are removed by their package/install owner.", path.display()); return Ok(ExitCode::SUCCESS); }
                     systemctl(&["disable", "--now", "ukvm.service"])?;
                     fs::remove_file(&path).map_err(|e| e.to_string())?;
                     systemctl(&["daemon-reload"])?;
@@ -176,10 +189,10 @@ pub fn command(args: &[String]) -> ExitCode {
                 }
                 _ => return Err("usage: ukvm service install [--verbose]|enable|start|stop|restart|status|disable|uninstall".into()),
             }
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         })();
         match result {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(code) => code,
             Err(error) => super::fail(&error),
         }
     }
@@ -231,11 +244,12 @@ mod tests {
     #[test]
     fn generated_service_is_user_graphical_explicit_and_safely_quoted() {
         let text = unit(Path::new("/tmp/a b%$\\\"/ukvm"), true).unwrap();
-        assert!(text.contains("ExecStart=:\"/tmp/a b%%$\\\\\\\"/ukvm\" run --verbose"));
+        assert!(text.contains("ExecStart=:\"/tmp/a b%%$\\\\\\\"/ukvm\" service run --verbose"));
         for directive in [
             "PartOf=graphical-session.target",
             "After=graphical-session-pre.target",
-            "ExecCondition=",
+            "Environment=XDG_RUNTIME_DIR=%t",
+            "Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus",
             "WantedBy=graphical-session.target",
             "Restart=on-failure",
             "KillSignal=SIGINT",
@@ -244,6 +258,8 @@ mod tests {
             assert!(text.contains(directive));
         }
         assert!(!text.contains("User=root"));
+        assert!(!text.contains("ConditionEnvironment="));
+        assert!(!text.contains("ExecCondition="));
         assert!(!text.contains("default.target"));
         assert!(unit(Path::new("relative"), false).is_err());
         assert!(unit(Path::new("/tmp/bad\nExecStart=x"), false).is_err());

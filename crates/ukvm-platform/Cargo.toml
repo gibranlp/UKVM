@@ -15,6 +15,7 @@ futures-util = "0.3"
 reis = { version = "0.7.1", features = ["tokio"] }
 tokio = { version = "1", features = ["rt", "time", "signal", "net", "macros", "io-util"] }
 zbus = "5.18"
+rustix = { version = "1", features = ["net", "process", "param"] }
 
 [dev-dependencies]
 tempfile = "3"

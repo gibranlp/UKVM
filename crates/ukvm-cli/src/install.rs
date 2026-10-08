@@ -136,7 +136,7 @@ mod tests {
         );
         let text =
             fs::read_to_string(dir.path().join("usr/lib/systemd/user/ukvm.service")).unwrap();
-        assert!(text.contains("ExecStart=:\"/usr/bin/ukvm\" run"));
+        assert!(text.contains("ExecStart=:\"/usr/bin/ukvm\" service run"));
         assert!(dir.path().join("usr/share/doc/ukvm/SERVICE.md").exists());
         assert!(stage(Path::new("/usr/../etc"), None).is_err());
         assert!(stage(Path::new("/usr"), Some(Path::new("relative"))).is_err());

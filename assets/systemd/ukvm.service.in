@@ -4,15 +4,15 @@ Description=UniversalKVM graphical user runtime
 Documentation=https://github.com/gibranlp/UKVM
 After=graphical-session-pre.target
 PartOf=graphical-session.target
-ConditionEnvironment=WAYLAND_DISPLAY
 ConditionUser=!root
 StartLimitIntervalSec=60
-StartLimitBurst=5
+StartLimitBurst=20
 
 [Service]
 Type=simple
-ExecCondition=:@UKVM_EXEC@ service check-session
-ExecStart=:@UKVM_EXEC@ run@UKVM_OPTIONS@
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+ExecStart=:@UKVM_EXEC@ service run@UKVM_OPTIONS@
 Restart=on-failure
 RestartSec=5
 KillSignal=SIGINT

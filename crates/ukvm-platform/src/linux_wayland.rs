@@ -20,11 +20,15 @@ mod geometry;
 mod pointer_position;
 mod rearm;
 mod return_edge;
+mod service_session;
 pub use geometry::{
     all_outer_segments, outer_segments, Edge, EdgeSpan, OuterSegment, Zone, ZoneSet,
 };
 pub use pointer_position::local_pointer_position;
 pub use rearm::{EmergencyRearmGuard, EMERGENCY_REARM_DISTANCE};
+pub use service_session::{
+    service_environment, service_portal_ready, ServiceEnvironment, SESSION_ENV,
+};
 
 #[derive(Clone, Debug)]
 pub struct SessionInfo {

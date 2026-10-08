@@ -1601,6 +1601,7 @@ dependencies = [
  "ukvm-platform",
  "ukvm-protocol",
  "ukvm-runtime",
+ "zbus",
 ]
 
 [[package]]
@@ -1658,6 +1659,7 @@ dependencies = [
  "ashpd",
  "futures-util",
  "reis",
+ "rustix",
  "tempfile",
  "tokio",
  "ukvm-core",

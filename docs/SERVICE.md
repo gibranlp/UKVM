@@ -42,11 +42,17 @@ ukvm service uninstall
 
 Enable schedules future graphical-session startup; it does not start now. Disable removes future startup; it does not stop a running service. Uninstall explicitly disables/stops and removes the managed user unit, retaining the binary and all private identity/config/trust data. Packaged vendor units may remain.
 
-The unit is WantedBy/PartOf the graphical-session target, ordered after graphical-session-pre.target. It never starts either target itself or runs on a boot/lingering-user default target. Its ExecCondition checks a reachable native Wayland socket without requesting consent, so stale manager environment cannot launch the input runtime outside a real graphical session. The CLI start/restart wrapper additionally requires graphical-session.target to be active. Start/restart must be invoked from a native Wayland graphical terminal. They import a fixed allowlist of graphical/session and XDG preference variables into the user manager, including the Hyprland instance signature used by the read-only emergency observer; absent values from that list are cleared to avoid importing stale session values. No arbitrary environment or secrets are imported. Root is excluded by the unit's ConditionUser.
+The unit is WantedBy/PartOf `graphical-session.target`, ordered after `graphical-session-pre.target`. It never starts either target itself or runs on a boot/lingering-user default target. Root is excluded by `ConditionUser`. There is no `ConditionEnvironment=WAYLAND_DISPLAY` or `ExecCondition`: early session/backend unavailability exits with a retryable failure instead of permanently skipping that login. systemd retries after five seconds; twenty starts per minute allow sustained readiness retries without a busy loop. Explicit stop and graphical-session teardown cancel restart.
 
-For automatic startup at subsequent graphical logins, the desktop/session manager must correctly manage `graphical-session.target` and import current Wayland/D-Bus/desktop environment before starting it. Bare compositor launches may lack that integration. UKVM reports an inactive target rather than creating a fake session or modifying desktop configuration. Configure the desktop's documented systemd session integration; this milestone does not autoconfigure it. Multiple simultaneous graphical seats for one user are not supported; ownership is per user runtime directory.
+The internal `service run` launcher queries the current user manager environment on every attempt. It requires one active logind Wayland session and a starting/active graphical-session target. It validates socket ownership, connectivity, compositor peer credentials and process age against the current login, rejecting stale sockets even when the user manager survives logout. Hyprland can recover missing/stale manager environment from its native runtime lock and control socket, with matching compositor PID and exactly one fresh instance. Other Wayland desktops use their current manager environment and retry until it becomes available. Ambiguous simultaneous graphical logins are refused.
 
-Crash restart is bounded by RestartSec=5 and five starts per minute. Stop sends SIGINT and allows 45 seconds for the existing cooperative capture, held-input, network and portal cleanup; SIGTERM is also handled cooperatively by the runtime. Restarting/crashing invalidates portal sessions and requires normal consent again; restore tokens are not saved. No service action bypasses consent. The journal receives ordinary runtime startup/shutdown lines and errors; verbose mode adds lifecycle metadata, never individual input events. systemd being active is not proof of authenticated peer or portal readiness.
+The unit supplies `XDG_RUNTIME_DIR=%t` and the canonical per-user D-Bus address. The launcher publishes only validated Wayland/desktop variables to systemd and D-Bus activation before checking portal availability. It does not replace arbitrary manager variables or import secrets. Readiness requires the portal frontend and at least one input portal interface; this check requests no consent. Only then does the launcher replace itself with the existing runtime, preserving PID, signal delivery and single-instance ownership. Normal portal authorization and consent still happen in the runtime; no restore tokens are saved.
+
+`ukvm service check-session` performs the same read-only current-session/socket validation without publishing environment, activating portals, creating identity or taking runtime ownership. Manual start/restart still require a native Wayland graphical terminal and import a fixed allowlist of session/XDG preference variables automatically; users need no manual `systemctl import-environment` command.
+
+The desktop must manage `graphical-session.target` with its documented systemd session integration and register a Wayland login with logind. Hyprland with UWSM is supported; bare compositor launches without that lifecycle are reported rather than creating a fake session or modifying desktop configuration. No shell-profile hooks or SpectrumOS configuration are installed. Other desktops still need to publish their session environment eventually. Multiple simultaneous graphical seats for one user are not supported; ownership is per user runtime directory.
+
+Stop sends SIGINT and allows 45 seconds for cooperative capture, held-input, network and portal cleanup; SIGTERM is also handled cooperatively. Restarting/crashing invalidates portal sessions and requires normal consent again. The journal receives startup/shutdown lines and readiness failures; verbose mode adds lifecycle metadata, never individual input events. systemd being active is not proof of authenticated peer or portal readiness.
 
 ## Ownership and status
 
@@ -58,6 +64,29 @@ The owner atomically writes a private, bounded `status.toml` snapshot once per s
 
 ## Acceptance
 
-Automated tests cover unit rendering/escaping and refusal to overwrite custom units, distro staging, exclusive runtime ownership, stale/malformed/symlink state, service command selection, status/peers offline output, and clean SIGINT/SIGTERM shutdown with reacquisition. All required workspace checks passed locally: fmt, check, test (170 passed, five opt-in tests ignored), Clippy with warnings denied, and build. A real temporary installation and systemd-analyze --user verify of its unit also passed; no real user service was installed/enabled/started during validation. Physical systemd/portal acceptance is pending; no unattended login, service switching or crash recovery is claimed as physically tested yet.
+Automated tests cover unit rendering/escaping and refusal to overwrite custom units, distro staging, exclusive runtime ownership, stale/malformed/symlink state, service command selection, status/peers offline output, and clean SIGINT/SIGTERM shutdown with reacquisition. Login regressions exercise the real launcher against private D-Bus/session/portal doubles: initially absent Wayland environment, late Hyprland/socket/portal readiness, late generic desktop environment, stale live compositor and dead socket rejection, single-instance ownership, inactive graphical-session refusal, and SIGTERM cleanup/restart. The private bus disables installed service activation. Full workspace fmt, check, test (173 passed, five opt-in tests ignored), Clippy with warnings denied, build and staged-unit verification passed.
 
-On spectrum and io, use a previously working full-edge topology (do not try to bypass Hyprland's partial-edge blocker): install, explicitly enable/start, approve consent, inspect status/peers and journal. Attempt `ukvm run` while the service owns it: it must refuse without opening portals. Repeat normal switching/return and emergency inward rearm, then stop/restart a receiver and verify recovery. Stop a service during held remote input and check local restoration/held-state cleanup. Send SIGTERM and verify cooperative stop; deliberately kill only UKVM in a controlled test and check bounded crash restart plus fresh consent. Log out/in and verify service follows the graphical session, with correct environment; disable must prevent the next login's automatic start. Finally stop/disable/uninstall and confirm foreground development still works and identities/trust persist. Record only what was actually tested.
+User physical testing from `9207ab8e8781ca69389734913b9ef41dfbd44885` passed normal service operation, switching, single-instance protection, service restart recovery and logout cleanup. Login autostart failed because the old environment condition was evaluated too early. This follow-up fixes that path; physical login retesting remains pending. The read-only session check passes on the development PC's actual Hyprland/UWSM login. No real UKVM user service was installed/enabled/started during automated validation.
+
+### Login regression retest
+
+On io, update and regenerate the managed unit, then enable it:
+
+```sh
+cd ~/UKVM
+git pull --ff-only origin main
+cargo build --release --workspace
+./target/release/ukvm install
+~/.local/bin/ukvm service install --verbose
+~/.local/bin/ukvm service enable
+```
+
+Log out of Hyprland completely, then log back in normally. Do not manually import environment or run `service start/restart`. Approve normal portal consent if requested. Check:
+
+```sh
+~/.local/bin/ukvm service status
+~/.local/bin/ukvm status
+journalctl --user -u ukvm -b --no-pager -n 50
+```
+
+Expect an enabled, active/running service and a current runtime snapshot, with no unmet Wayland condition. Brief readiness retries may precede runtime startup. Verify normal switching on the previously working full-edge topology. Log out again to verify cleanup and repeat login to check that lingering manager environment does not select an old socket. Disable must prevent the next login's automatic start. M14's partial-edge blocker remains unchanged; M16 has not begun.
