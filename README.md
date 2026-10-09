@@ -87,3 +87,5 @@ The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linu
 ## License
 
 Licensed under [MIT](LICENSE).
+
+Persistent desktop authorization on supported Linux portals is documented in [PORTAL_PERSISTENCE.md](docs/PORTAL_PERSISTENCE.md). Inspect safe state with `ukvm authorization status`; explicitly forget remembered approval with `ukvm authorization reset`. Peer trust and control permissions remain separate. Unattended physical acceptance of this persistence change is pending.

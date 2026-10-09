@@ -495,6 +495,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "desktop_authorization": {
+          "$ref": "#/$defs/desktop_authorization"
         }
       },
       "required": [
@@ -627,6 +630,9 @@
             "backend_missing",
             "incompatible_backend"
           ]
+        },
+        "desktop_authorization": {
+          "$ref": "#/$defs/desktop_authorization"
         }
       },
       "required": [
@@ -773,7 +779,8 @@
             "apply",
             "service",
             "pair",
-            "setup"
+            "setup",
+            "authorization"
           ]
         },
         "ok": {
@@ -1105,6 +1112,32 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "authorization"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/desktop_authorization"
+                  },
+                  {
+                    "$ref": "#/$defs/authorization_reset"
+                  }
+                ]
+              }
+            }
+          }
         }
       ]
     },
@@ -1323,6 +1356,97 @@
         "consent_requested",
         "service_started",
         "trust_changed"
+      ],
+      "additionalProperties": true
+    },
+    "desktop_authorization": {
+      "type": "object",
+      "properties": {
+        "remote_desktop": {
+          "$ref": "#/$defs/authorization_state"
+        },
+        "input_capture": {
+          "$ref": "#/$defs/authorization_state"
+        }
+      },
+      "required": [
+        "remote_desktop",
+        "input_capture"
+      ],
+      "additionalProperties": true
+    },
+    "authorization_state": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "persistent",
+            "active",
+            "needs_approval",
+            "unsupported",
+            "unavailable"
+          ]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "remembered": {
+          "type": "boolean"
+        },
+        "persistence_api_supported": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "active",
+        "remembered",
+        "persistence_api_supported",
+        "reason"
+      ],
+      "additionalProperties": true
+    },
+    "authorization_reset": {
+      "type": "object",
+      "properties": {
+        "reset": {
+          "const": true
+        },
+        "service_stopped": {
+          "type": "boolean"
+        },
+        "service_restarted": {
+          "const": false
+        },
+        "trust_changed": {
+          "const": false
+        },
+        "control_permissions_changed": {
+          "const": false
+        },
+        "desktop_authorization": {
+          "$ref": "#/$defs/desktop_authorization"
+        }
+      },
+      "required": [
+        "reset",
+        "service_stopped",
+        "service_restarted",
+        "trust_changed",
+        "control_permissions_changed",
+        "desktop_authorization"
       ],
       "additionalProperties": true
     }

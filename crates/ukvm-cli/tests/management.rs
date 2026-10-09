@@ -496,3 +496,194 @@ fn packaged_portal_launcher_refuses_unready_session_without_executing_portal() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("Portal not ready"));
     }
 }
+
+fn remembered_portal(profile: &Profile, secret: &str) -> std::path::PathBuf {
+    let dir = profile.dir.path().join("state/ukvm/portal-authorization");
+    fs::create_dir_all(&dir).unwrap();
+    for path in [dir.parent().unwrap(), dir.as_path()] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let path = dir.join("remote-desktop.json");
+    fs::write(&path, serde_json::to_vec(&json!({"format_version":1,"context":{"desktop":std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase(),"version":2},"token":secret,"authorized":false,"reason":"remembered"})).unwrap()).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    path
+}
+
+#[test]
+fn desktop_authorization_status_and_reset_are_safe_and_keep_peer_policy() {
+    let profile = Profile::new();
+    let peer = profile.add_peer("independent-peer");
+    profile.json(&["peer", "allow", &peer, "control-this-node"], true);
+    let before = profile.json(&["peers"], true);
+    let path = remembered_portal(&profile, "never-print-this-restore-token");
+    let state = profile.json(&["authorization", "status"], true);
+    assert_eq!(state["data"]["remote_desktop"]["state"], "persistent");
+    assert!(!state.to_string().contains("never-print-this-restore-token"));
+    let status = profile.json(&["status"], true);
+    assert_eq!(
+        status["data"]["desktop_authorization"]["remote_desktop"]["remembered"],
+        true
+    );
+    assert!(!status
+        .to_string()
+        .contains("never-print-this-restore-token"));
+    let human = profile
+        .command()
+        .args(["authorization", "status"])
+        .output()
+        .unwrap();
+    assert!(human.status.success());
+    assert!(!String::from_utf8_lossy(&human.stdout).contains("never-print-this-restore-token"));
+    assert!(!String::from_utf8_lossy(&human.stderr).contains("never-print-this-restore-token"));
+    profile.json(&["authorization", "reset"], false);
+    assert!(path.exists());
+    let reset = profile.json(&["authorization", "reset", "--yes"], true);
+    assert_eq!(reset["data"]["trust_changed"], false);
+    assert_eq!(reset["data"]["service_restarted"], false);
+    assert_eq!(
+        reset["data"]["desktop_authorization"]["remote_desktop"]["state"],
+        "needs_approval"
+    );
+    assert!(!path.exists());
+    assert_eq!(before, profile.json(&["peers"], true));
+    assert!(fs::read_to_string(profile.dir.path().join("systemctl.log"))
+        .unwrap()
+        .lines()
+        .all(|line| line.contains("show")));
+}
+
+#[test]
+fn remembered_portal_never_grants_an_unpermissioned_peer_control() {
+    let profile = Profile::new();
+    let peer = profile.add_peer("trusted-without-control");
+    remembered_portal(&profile, "desktop-grant-is-not-peer-trust");
+    let value = profile.json(&["peer", "permissions", &peer], true);
+    assert_eq!(value["data"]["permissions"]["control_this_node"], false);
+    let status = profile.json(&["status"], true);
+    assert_eq!(
+        status["data"]["desktop_authorization"]["remote_desktop"]["remembered"],
+        true
+    );
+    assert_eq!(
+        status["data"]["peers"][0]["permissions"]["control_this_node"],
+        false
+    );
+}
+
+#[test]
+fn corrupt_portal_state_reports_safe_status_and_resets_without_other_changes() {
+    let profile = Profile::new();
+    let path = remembered_portal(&profile, "private-token");
+    fs::write(&path, "private-token invalid json").unwrap();
+    let value = profile.json(&["authorization", "status"], true);
+    assert_eq!(value["data"]["remote_desktop"]["reason"], "corrupt");
+    assert!(!value.to_string().contains("private-token"));
+    profile.json(&["authorization", "reset", "--yes"], true);
+    assert!(!path.exists());
+}
+
+#[test]
+fn reset_refuses_foreground_runtime_instead_of_leaving_an_active_grant() {
+    let profile = Profile::new();
+    let path = remembered_portal(&profile, "private-token");
+    let runtime = profile.dir.path().join("ukvm");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock_path = runtime.join("runtime.lock");
+    fs::write(&lock_path, "").unwrap();
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut holder = Command::new("flock")
+        .args(["-x", "-n"])
+        .arg(&lock_path)
+        .args(["sh", "-c", "printf ready; cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut bytes = [0; 5];
+    std::io::Read::read_exact(holder.stdout.as_mut().unwrap(), &mut bytes).unwrap();
+    let result = profile.json(&["authorization", "reset", "--yes"], false);
+    holder.stdin.take();
+    holder.wait().unwrap();
+    assert!(result["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("ownership is uncertain"));
+    assert!(path.exists());
+    assert!(!profile.dir.path().join("systemctl.log").exists());
+}
+
+#[test]
+fn reset_stops_only_the_owned_managed_runtime_without_restarting_or_changing_trust() {
+    let profile = Profile::new();
+    profile.add_peer("retained-peer");
+    let before = profile.json(&["peers"], true);
+    let path = remembered_portal(&profile, "private-managed-token");
+    let runtime = profile.dir.path().join("ukvm");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock_path = runtime.join("runtime.lock");
+    fs::write(&lock_path, "").unwrap();
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut holder = Command::new("flock")
+        .args(["-F", "-x", "-n"])
+        .arg(&lock_path)
+        .args(["sh", "-c", "printf ready; read ignored"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut bytes = [0; 5];
+    std::io::Read::read_exact(holder.stdout.as_mut().unwrap(), &mut bytes).unwrap();
+    let snapshot = ukvm_runtime::ownership::RuntimeSnapshot {
+        pid: holder.id(),
+        updated: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        ..Default::default()
+    };
+    fs::write(
+        runtime.join("status.toml"),
+        toml::to_string(&snapshot).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        runtime.join("status.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    fs::write(profile.dir.path().join("bin/systemctl"), r#"#!/bin/sh
+printf '%s\n' "$*" >> "$UKVM_TEST_LOG"
+case "$*" in
+  *show*) printf 'LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nMainPID=%s\n' "$UKVM_TEST_HOLDER_PID";;
+  *stop*) kill -TERM "$UKVM_TEST_HOLDER_PID";;
+esac
+"#).unwrap();
+    let output = profile
+        .command()
+        .env("UKVM_TEST_HOLDER_PID", holder.id().to_string())
+        .args(["authorization", "reset", "--yes", "--json"])
+        .output()
+        .unwrap();
+    holder.stdin.take();
+    holder.wait().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["data"]["service_stopped"], true);
+    assert_eq!(value["data"]["service_restarted"], false);
+    assert!(!path.exists());
+    assert_eq!(before, profile.json(&["peers"], true));
+    let log = fs::read_to_string(profile.dir.path().join("systemctl.log")).unwrap();
+    assert_eq!(
+        log.lines().filter(|line| line.contains(" stop ")).count(),
+        1
+    );
+    assert!(log
+        .lines()
+        .all(|line| line.contains("show") || line.contains(" stop ")));
+}

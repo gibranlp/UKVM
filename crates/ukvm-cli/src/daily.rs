@@ -102,6 +102,7 @@ pub fn peers(args: &[String]) -> ExitCode {
     }
 }
 pub fn status() -> ExitCode {
+    super::authorization::print_status(&super::authorization::status(None, None));
     let result = (|| -> Result<(), String> {
         let (config, store) = context()?;
         let id = match std::fs::read(default_state_dir()?.join("node.der")) {

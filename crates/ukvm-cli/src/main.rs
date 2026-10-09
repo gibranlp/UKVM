@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+mod authorization;
 mod daily;
 mod discovery;
 #[cfg(target_os = "linux")]
@@ -23,6 +24,7 @@ Commands:\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
+  authorization [status|reset --yes] [--json]  Inspect/forget remembered desktop portal consent\n\
   doctor [--json]  Probe the current graphical session and portal capabilities\n\
   platform wayland zones               Request capture permission and list zones\n\
   platform wayland capture <edge> [zone] [--verbose]  Test local capture\n\
@@ -387,6 +389,10 @@ fn doctor() -> ExitCode {
             "    Keyboard advertised: {}",
             yes_no(injection.keyboard_advertised)
         );
+        authorization::print_status(&authorization::status(
+            report.remote.version,
+            report.capture.version,
+        ));
         println!(
             "    EIS sender: {}",
             if injection.eis_api_available {

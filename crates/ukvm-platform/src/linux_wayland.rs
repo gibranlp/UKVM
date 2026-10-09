@@ -7,7 +7,7 @@ use ashpd::desktop::input_capture::{
     CreateSession2Options, CreateSessionOptions, InputCapture, StartOptions,
 };
 use ashpd::desktop::remote_desktop::{DeviceType, RemoteDesktop};
-use ashpd::desktop::Session;
+use ashpd::desktop::{PersistMode, Session};
 use futures_util::StreamExt;
 use reis::{
     ei::{self, button::ButtonState, keyboard::KeyState},
@@ -16,6 +16,7 @@ use reis::{
 use std::{collections::HashSet, os::unix::net::UnixStream, path::PathBuf, time::Duration};
 use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
+pub mod authorization;
 mod geometry;
 mod pointer_position;
 pub mod portal_session;
@@ -239,6 +240,7 @@ async fn capture_setup<T, E: std::fmt::Display, H: FnMut() -> bool>(
 struct CaptureSession {
     portal: InputCapture,
     session: Session<InputCapture>,
+    _authorization: authorization::Authorization,
     keyboard_granted: bool,
     bus: zbus::Connection,
 }
@@ -274,6 +276,10 @@ impl CaptureSession {
         let portal = InputCapture::with_connection(bus.clone())
             .await
             .map_err(|e| e.to_string())?;
+        let mut authorization = authorization::Authorization::begin(
+            authorization::Kind::InputCapture,
+            authorization::Context::current(portal.version()),
+        )?;
         let requested = CaptureFlags::Keyboard | CaptureFlags::Pointer;
         let (session, flags) = if portal.version() >= 2 {
             let session = portal
@@ -284,15 +290,25 @@ impl CaptureSession {
                 .start(
                     &session,
                     None,
-                    StartOptions::default().set_capabilities(requested),
+                    StartOptions::default()
+                        .set_capabilities(requested)
+                        .set_persist_mode(PersistMode::ExplicitlyRevoked)
+                        .set_restore_token(authorization.restore_token().map(str::to_owned)),
                 )
                 .await
-                .and_then(|request| request.response().map(|r| r.capabilities()));
+                .and_then(|request| request.response());
             let flags = match result {
-                Ok(flags) => flags,
+                Ok(response) => {
+                    if let Err(error) = authorization.granted(response.restore_token()) {
+                        let _ = session.close().await;
+                        return Err(error);
+                    }
+                    response.capabilities()
+                }
                 Err(err) => {
                     let _ = session.close().await;
-                    return Err(format!("InputCapture permission/start failed: {err}"));
+                    let _ = err;
+                    return Err("InputCapture permission/start failed; retry normal portal approval (any restore token was consumed)".into());
                 }
             };
             (session, flags)
@@ -304,6 +320,10 @@ impl CaptureSession {
                 )
                 .await
                 .map_err(|e| format!("InputCapture permission/session failed: {e}"))?;
+            if let Err(error) = authorization.granted(None) {
+                let _ = session.close().await;
+                return Err(error);
+            }
             (session, flags)
         };
         if !flags.contains(CaptureFlags::Pointer) {
@@ -313,6 +333,7 @@ impl CaptureSession {
         Ok(Self {
             portal,
             session,
+            _authorization: authorization,
             keyboard_granted: flags.contains(CaptureFlags::Keyboard),
             bus,
         })

@@ -15,7 +15,10 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
     let command = args.first()?;
     let json_output = args.iter().any(|arg| arg == "--json");
     if !json_output
-        && !matches!(command.as_str(), "layout" | "unpair" | "apply")
+        && !matches!(
+            command.as_str(),
+            "layout" | "unpair" | "apply" | "authorization"
+        )
         && !(command == "peer" && args.get(1).is_some_and(|a| a == "remove"))
     {
         return None;
@@ -36,7 +39,9 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         .filter(|arg| arg.as_str() != "--json")
         .cloned()
         .collect();
-    let needs_confirmation = (command == "unpair"
+    let needs_confirmation = (command == "authorization"
+        && rest.first().is_some_and(|arg| arg == "reset")
+        || command == "unpair"
         || command == "peer" && rest.first().is_some_and(|arg| arg == "remove")
         || command == "layout"
             && rest
@@ -47,6 +52,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         println!("{}", match command.as_str() {
             "layout" => "Usage: ukvm layout [show|place X Y PEER|move PEER X Y|remove PEER [--yes]|remove-position X Y [--yes]|set EDGE PEER] [--json]\nCoordinates are cardinal distance 1-2 from local (0,0); outer nodes require an inner neighbor. Save changes, then run ukvm apply.",
             "unpair" => "Usage: ukvm unpair PEER [--yes] [--json]\nRemoves local trust and its topology branch. Remote trust is unchanged.",
+            "authorization" => "Usage: ukvm authorization [status|reset [--yes]] [--json]\nReset stops the managed runtime and forgets both remembered portal grants. Peer trust/permissions stay unchanged; Start requests normal consent again.",
             "apply" => "Usage: ukvm apply [--json]\nValidate configuration and restart the managed user service; normal portal consent may be required.",
             _ => "Usage: ukvm peer remove PEER [--yes]",
         });
@@ -183,6 +189,7 @@ fn layout(config: &Config, store: &TrustStore) -> Value {
 fn execute(command: &str, args: &[String]) -> Result<Value, String> {
     match command {
         "doctor" if args.is_empty() => doctor(),
+        "authorization" => authorization_command(args),
         "setup" => initialize_local(args),
         "pair" if args == ["status"] => {
             let dir = default_trust_dir()?;
@@ -203,7 +210,7 @@ fn execute(command: &str, args: &[String]) -> Result<Value, String> {
                 return Ok(json!({"peers": peers}));
             }
             Ok(
-                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
+                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "desktop_authorization": super::authorization::status(None, None), "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
             )
         }
         "layout" => edit_layout(args),
@@ -273,7 +280,7 @@ pub fn doctor() -> Result<Value, String> {
             "backend_ready"
         };
         Ok(
-            json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
+            json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "desktop_authorization": super::authorization::status(report.remote.version, report.capture.version), "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -529,7 +536,12 @@ fn service_command(args: &[String]) -> Result<Value, String> {
 }
 
 fn print_human(command: &str, data: &Value) {
-    if command == "layout" {
+    if command == "authorization" {
+        if data["reset"] == true {
+            println!("Remembered desktop authorization forgotten. UKVM remains stopped; start it to request normal consent. Peer trust and control permissions are unchanged.");
+        }
+        super::authorization::print_status(data.get("desktop_authorization").unwrap_or(data));
+    } else if command == "layout" {
         let layout = if data.get("layout").is_some() {
             &data["layout"]
         } else {
@@ -563,4 +575,61 @@ fn print_human(command: &str, data: &Value) {
     } else {
         println!("Unpaired {} locally. Remote trust is unchanged. Run `ukvm apply` to refresh outgoing topology.", data["name"].as_str().unwrap_or("peer"));
     }
+}
+
+fn authorization_command(args: &[String]) -> Result<Value, String> {
+    if args.is_empty() || args == ["status"] {
+        return Ok(super::authorization::status(None, None));
+    }
+    let yes = match args {
+        [action] if action == "reset" => false,
+        [action, flag] if action == "reset" && flag == "--yes" => true,
+        _ => return Err("usage: ukvm authorization [status|reset [--yes]] [--json]".into()),
+    };
+    confirm("Stop UKVM and forget remembered desktop input authorization? Normal portal approval will be required again; peer trust/permissions are unchanged.", yes)?;
+    #[cfg(target_os = "linux")]
+    {
+        use ukvm_runtime::ownership::{self, RuntimeStatus};
+        let mut stopped = false;
+        match ownership::status()? {
+            RuntimeStatus::Stopped => {}
+            RuntimeStatus::Running(snapshot) => {
+                let properties = super::service::properties()?;
+                let pid = properties
+                    .get("MainPID")
+                    .and_then(|v| v.parse::<u32>().ok());
+                if pid != Some(snapshot.pid) {
+                    return Err(
+                        "stop the foreground runtime before resetting desktop authorization".into(),
+                    );
+                }
+                service_command(&["stop".into()])?;
+                stopped = true;
+                if !matches!(ownership::status()?, RuntimeStatus::Stopped) {
+                    return Err(
+                        "UKVM has not finished stopping; retry authorization reset after shutdown"
+                            .into(),
+                    );
+                }
+            }
+            _ => return Err(
+                "runtime ownership is uncertain; stop UKVM before resetting desktop authorization"
+                    .into(),
+            ),
+        }
+        ukvm_platform::linux_wayland::authorization::reset().map_err(|error| {
+            if stopped {
+                format!("UKVM was stopped, but authorization reset failed: {error}")
+            } else {
+                error
+            }
+        })?;
+        Ok(
+            json!({"reset": true, "service_stopped": stopped, "service_restarted": false,
+            "trust_changed": false, "control_permissions_changed": false,
+            "desktop_authorization": super::authorization::status(None, None)}),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("desktop portal authorization currently requires Linux".into())
 }

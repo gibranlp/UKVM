@@ -1671,9 +1671,13 @@ name = "ukvm-platform"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "dirs",
+ "fs2",
  "futures-util",
  "reis",
  "rustix",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "ukvm-core",

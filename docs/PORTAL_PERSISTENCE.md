@@ -1,0 +1,46 @@
+# Persistent desktop input authorization
+
+UKVM peer trust and desktop portal approval are independent. Pairing never requests portal consent or grants `control-this-node`. A receiver still authenticates each peer, checks its pinned identity and local control permission, and checks permission throughout control. A remembered portal grant only lets UKVM obtain the same local desktop input session without asking again; it never authorizes a peer or opens an input API to the network.
+
+## Official protocol and capability limits
+
+RemoteDesktop v2 supports `persist_mode = 2` and `restore_token` on SelectDevices. UKVM requests keyboard/pointer as before and asks the portal to remember consent. The portal user must explicitly approve both control and remembering it. On Start, UKVM stores the returned replacement restore token before connecting to EIS. Subsequent sessions present that token, still request the same devices, and still validate the portal's returned device grants. Tokens are single-use: a token is removed from durable state before an attempt, and a successful response replaces it atomically. Cancellation, rejection, timeout or process loss cannot cause UKVM to reuse a consumed token. A missing, expired or revoked token follows normal portal consent; an outright failed request returns a safe error and the next attempt uses normal consent.
+
+InputCapture v2 supports the corresponding Start options and replacement token. UKVM uses them consistently. InputCapture v1 retains its normal permissioned CreateSession behavior and reports persistent authorization as unavailable. API support is determined from the interface version; actual permission to persist is determined only by a returned token. A v2 portal can decline persistence or omit a token: this is an active session grant, not a promise of unattended restoration.
+
+Official specifications: [RemoteDesktop](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.RemoteDesktop.html), [InputCapture](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.InputCapture.html).
+
+SpectrumOS's pinned XDPH PR #426 revision `0204ffbbcb3cef72af76804cdf59f114f2e2f6d9` already implements persistent RemoteDesktop restore data and a consent checkbox labelled “Allow … to skip this prompt in the future,” unchecked by default. UKVM does not select that checkbox. The backend's own grant storage and the portal frontend's token storage remain authoritative. No XDPH revision, trial script, compositor barrier behavior or production session helper is changed. Its InputCapture interface is v1, so controller-side persistent capture approval is unavailable there.
+
+## Private state, ownership and reset
+
+Credentials live in `$XDG_STATE_HOME/ukvm/portal-authorization/`, defaulting to `~/.local/state/ukvm/portal-authorization/`. UKVM requires owned 0700 directories, owned regular 0600 files, and refuses symlink state/lock files. Records are bounded and malformed records require normal consent. Replacements use private temporary files, atomic rename and file/directory synchronization. A permanent per-interface lock inode serializes single-use consumption and remains owned for the portal session's lifetime. Read-only status does not create credentials or sessions. Secrets have no Debug representation and are never included in public status, JSON, normal/verbose logs, or widget responses; credential-bearing request failures use fixed safe messages.
+
+State is scoped to the interface, current desktop identity and portal API version. Desktop/API changes discard the application-side restore attempt and require normal consent. Backend vendor and restore-data version are validated by the official portal/backend protocol; UKVM does not pretend that a frontend interface version identifies a particular backend build, pin transient D-Bus owners, or invalidate grants merely because a package patch version changes. Incompatible backend changes may trigger normal consent even when the desktop/API labels remain unchanged.
+
+```sh
+ukvm authorization status
+ukvm authorization status --json
+ukvm authorization reset --yes --json
+```
+
+Reset requires terminal confirmation or explicit `--yes` after frontend confirmation. It verifies runtime ownership, cooperatively stops the managed UKVM user service, requires the runtime to have released ownership, then forgets both interface credentials. A foreground/unknown runtime or another diagnostic portal session blocks reset. UKVM stays stopped; the service's enabled setting is unchanged. Start explicitly to request normal consent again. Reset does not edit peer pins, control permissions, identity or topology, and does not auto-start a new permission prompt. Partial storage failures return nonzero, explaining if the service was already stopped. This is forgetting UKVM's credentials and closing its active grant, not a desktop-wide revocation tool for other applications or copies of credentials; revoke desktop-wide permissions through the desktop's portal controls when available.
+
+## Status and frontend contract
+
+Schema version 1 gains `desktop_authorization` on status and doctor, with `remote_desktop` and `input_capture` entries. Each has `state` (`persistent`, `active`, `needs_approval`, `unsupported`, `unavailable`), `active`, `remembered`, nullable `persistence_api_supported`, safe `reason`, and optional safe `error`. `persistent` means a token is remembered, not proof it will restore or that physical input worked. `active` requires the current authorization lock plus a successfully granted portal response. A crash-released lock cannot claim a stale grant is active. Doctor remains read-only and its legacy `authorization: not_tested` / `physical_input: not_tested` fields retain their meaning. Frontends must continue checking peer permissions and backend/service health independently.
+
+SpectrumOS shows Remote control authorization and a confirmed **Details → Forget approval** action. It invokes the documented CLI, never edits credentials or reads tokens. InputCapture persistence availability is shown under Details.
+
+## Physical acceptance (not yet performed for this change)
+
+The user reports production packages, pairing, RemoteDesktop consent, physical control and post-reboot recovery passed on a new SpectrumOS laptop before this persistence change. That does not establish unattended restoration. Keep the existing trusted relationship and full external-edge topology intact.
+
+1. Install the updated UKVM package/CLI on both nodes through the managed package path. The existing pinned portal package remains unchanged. Open the widget and inspect health, permissions and authorization state.
+2. On the controlled node run `ukvm service restart`. Initiate control from the already trusted, permitted peer. Explicitly approve the portal and select its remember/skip-future-prompts checkbox. Confirm keyboard, pointer, buttons, scroll and ReturnControl. `ukvm authorization status --json` must report RemoteDesktop `persistent` with `remembered: true`; a missing token is a failure of persistence acceptance even if current control works.
+3. Run `ukvm service restart` again on the controlled node. Initiate control without interacting locally with a portal dialog. Confirm the same input functions, ReturnControl and emergency release. Re-query status; credentials must remain remembered after rotation. Never inspect or print the credential files.
+4. Log out completely, log back into the supported graphical session, and initiate control again without approving another portal dialog. Repeat after reboot. A supported logged-in graphical user session is still required; this change does not control the display-manager greeter or configure automatic login. To test a machine without attached input after reboot, use an already explicitly configured graphical auto-login test machine.
+5. Restart the backend through its normal user service: `systemctl --user restart xdg-desktop-portal-hyprland.service`. Reconnect and confirm restoration, cleanup, input and ReturnControl. The managed package orders the frontend; no UKVM portal restart workaround is added.
+6. Test reset deliberately: `ukvm authorization reset --yes --json`. Verify UKVM is stopped, no remembered grants remain, and peer permission/topology views are unchanged. Run `ukvm service start`, initiate control, and verify normal portal approval is required again. Reject once and confirm no input occurs; approve/remember only if desired. On a disposable profile additionally test portal-side revocation/expiry and incompatible backend changes; they must prompt normally or report safe failure, never inject without consent.
+
+Automated coverage includes private permissions and symlink refusal, bounded/corrupt/missing records, desktop/API changes, token creation/consumption/rotation, invalid rotation, rejected restoration, crash/restart semantics, confirmed reset/ownership refusal, actual SelectDevices/Start D-Bus options, returned device denial, JSON/log redaction, independent peer policy and widget confirmation. Actual unattended logout/login/reboot behavior awaits this procedure.

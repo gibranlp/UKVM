@@ -11,7 +11,7 @@ use ashpd::desktop::{
     remote_desktop::{
         ConnectToEISOptions, DeviceType, RemoteDesktop, SelectDevicesOptions, StartOptions,
     },
-    CreateSessionOptions, Session,
+    CreateSessionOptions, PersistMode, Session,
 };
 use futures_util::StreamExt;
 use reis::{
@@ -293,6 +293,7 @@ impl PlatformInputInjector for WaylandInputInjector {
 
 struct PortalEisSession {
     portal_session: Session<RemoteDesktop>,
+    _authorization: super::authorization::Authorization,
     connection: Connection,
     events: reis::tokio::EiConvertEventStream,
     pointer: Device,
@@ -368,47 +369,20 @@ impl PortalEisSession {
         verbose: bool,
     ) -> Result<Self, PlatformError> {
         let mut pending = PendingPortalSession(Some(session));
+        let mut authorization = super::authorization::Authorization::begin(
+            super::authorization::Kind::RemoteDesktop,
+            super::authorization::Context::current(portal.version()),
+        )
+        .map_err(PlatformError::Backend)?;
         let result = async {
-            let requested = if request_keyboard {
-                DeviceType::Pointer | DeviceType::Keyboard
-            } else {
-                DeviceType::Pointer.into()
-            };
-            if verbose {
-                eprintln!("[wayland] RemoteDesktop: SelectDevices");
-            }
-            portal
-                .select_devices(
-                    pending.0.as_ref().expect("pending portal session"),
-                    SelectDevicesOptions::default().set_devices(requested),
-                )
-                .await
-                .and_then(|request| request.response().map(|_| ()))
-                .map_err(|err| PlatformError::Backend(format!("SelectDevices failed: {err}")))?;
-            if verbose {
-                eprintln!("[wayland] RemoteDesktop: Start pending; consent picker may appear");
-            }
-            let selected = portal
-                .start(
-                    pending.0.as_ref().expect("pending portal session"),
-                    None,
-                    StartOptions::default(),
-                )
-                .await
-                .and_then(|request| request.response())
-                .map_err(|err| {
-                    PlatformError::Backend(format!("RemoteDesktop Start denied or failed: {err}"))
-                })?;
-            if !selected.devices().contains(DeviceType::Pointer) {
-                return Err(PlatformError::PermissionDenied(
-                    "RemoteDesktop did not grant pointer control",
-                ));
-            }
-            if request_keyboard && !selected.devices().contains(DeviceType::Keyboard) {
-                return Err(PlatformError::PermissionDenied(
-                    "RemoteDesktop did not grant keyboard control",
-                ));
-            }
+            authorize_devices(
+                portal,
+                pending.0.as_ref().expect("pending portal session"),
+                request_keyboard,
+                verbose,
+                &mut authorization,
+            )
+            .await?;
             if verbose {
                 eprintln!("[wayland] RemoteDesktop: consent granted; ConnectToEIS");
             }
@@ -526,6 +500,7 @@ impl PortalEisSession {
         match result {
             Ok((connection, events, pointer, keyboard)) => Ok(Self {
                 portal_session: pending.0.take().expect("pending portal session"),
+                _authorization: authorization,
                 connection,
                 events,
                 pointer,
@@ -914,5 +889,317 @@ async fn run_actor(
     healthy.store(false, Ordering::Release);
     if let Some(active) = session.take() {
         let _ = active.close().await;
+    }
+}
+
+async fn authorize_devices(
+    portal: &RemoteDesktop,
+    session: &Session<RemoteDesktop>,
+    request_keyboard: bool,
+    verbose: bool,
+    authorization: &mut super::authorization::Authorization,
+) -> Result<(), PlatformError> {
+    let requested = if request_keyboard {
+        DeviceType::Pointer | DeviceType::Keyboard
+    } else {
+        DeviceType::Pointer.into()
+    };
+    if verbose {
+        eprintln!("[wayland] RemoteDesktop: SelectDevices");
+    }
+    portal
+        .select_devices(
+            session,
+            SelectDevicesOptions::default().set_devices(requested)
+                .set_persist_mode(PersistMode::ExplicitlyRevoked)
+                .set_restore_token(authorization.restore_token()),
+        )
+        .await
+        .and_then(|request| request.response().map(|_| ()))
+        .map_err(|_| PlatformError::Backend("RemoteDesktop SelectDevices rejected; retry normal portal approval (any restore token was consumed)".into()))?;
+    if verbose {
+        eprintln!("[wayland] RemoteDesktop: Start pending; consent picker may appear");
+    }
+    let selected = portal
+        .start(
+            session,
+            None,
+            StartOptions::default(),
+        )
+        .await
+        .and_then(|request| request.response())
+        .map_err(|_| PlatformError::Backend("RemoteDesktop Start denied or failed; retry normal portal approval (any restore token was consumed)".into()))?;
+    authorization
+        .granted(selected.restore_token())
+        .map_err(PlatformError::Backend)?;
+    if !selected.devices().contains(DeviceType::Pointer) {
+        return Err(PlatformError::PermissionDenied(
+            "RemoteDesktop did not grant pointer control",
+        ));
+    }
+    if request_keyboard && !selected.devices().contains(DeviceType::Keyboard) {
+        return Err(PlatformError::PermissionDenied(
+            "RemoteDesktop did not grant keyboard control",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::super::authorization::{Authorization, Context, Kind};
+    use super::*;
+    use std::{
+        collections::HashMap,
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+        sync::atomic::AtomicU32,
+    };
+    use zbus::{
+        message::Header,
+        zvariant::{OwnedObjectPath, OwnedValue, Str},
+    };
+
+    struct Bus(Child);
+    impl Drop for Bus {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn value(text: &str) -> OwnedValue {
+        OwnedValue::from(Str::from(text))
+    }
+    async fn response(
+        connection: &zbus::Connection,
+        header: &Header<'_>,
+        options: &HashMap<String, OwnedValue>,
+        code: u32,
+        results: HashMap<String, OwnedValue>,
+    ) -> OwnedObjectPath {
+        let sender = header.sender().unwrap();
+        let token = <&str>::try_from(&options["handle_token"])
+            .unwrap()
+            .to_owned();
+        let path = OwnedObjectPath::try_from(format!(
+            "/org/freedesktop/portal/desktop/request/{}/{}",
+            sender.as_str().trim_start_matches(':').replace('.', "_"),
+            token
+        ))
+        .unwrap();
+        connection
+            .emit_signal(
+                Some(sender.as_str()),
+                &path,
+                "org.freedesktop.portal.Request",
+                "Response",
+                &(code, results),
+            )
+            .await
+            .unwrap();
+        path
+    }
+    type Selections = Arc<Mutex<Vec<(u32, Option<String>)>>>;
+    struct Portal {
+        selections: Selections,
+        starts: AtomicU32,
+        reject: bool,
+        devices: u32,
+    }
+    #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
+    impl Portal {
+        #[zbus(property, name = "version")]
+        fn version(&self) -> u32 {
+            2
+        }
+        #[zbus(property)]
+        fn available_device_types(&self) -> u32 {
+            3
+        }
+        async fn create_session(
+            &self,
+            options: HashMap<String, OwnedValue>,
+            #[zbus(header)] header: Header<'_>,
+            #[zbus(connection)] connection: &zbus::Connection,
+        ) -> OwnedObjectPath {
+            let sender = header
+                .sender()
+                .unwrap()
+                .as_str()
+                .trim_start_matches(':')
+                .replace('.', "_");
+            let token = <&str>::try_from(&options["session_handle_token"])
+                .unwrap()
+                .to_owned();
+            let mut results = HashMap::new();
+            results.insert(
+                "session_handle".into(),
+                value(&format!(
+                    "/org/freedesktop/portal/desktop/session/{sender}/{token}"
+                )),
+            );
+            response(connection, &header, &options, 0, results).await
+        }
+        async fn select_devices(
+            &self,
+            _session: OwnedObjectPath,
+            options: HashMap<String, OwnedValue>,
+            #[zbus(header)] header: Header<'_>,
+            #[zbus(connection)] connection: &zbus::Connection,
+        ) -> OwnedObjectPath {
+            let mode = u32::try_from(&options["persist_mode"]).unwrap();
+            let token = options
+                .get("restore_token")
+                .map(|value| <&str>::try_from(value).unwrap().to_owned());
+            self.selections.lock().unwrap().push((mode, token));
+            response(
+                connection,
+                &header,
+                &options,
+                if self.reject { 2 } else { 0 },
+                HashMap::new(),
+            )
+            .await
+        }
+        async fn start(
+            &self,
+            _session: OwnedObjectPath,
+            _parent: String,
+            options: HashMap<String, OwnedValue>,
+            #[zbus(header)] header: Header<'_>,
+            #[zbus(connection)] connection: &zbus::Connection,
+        ) -> OwnedObjectPath {
+            let index = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut results = HashMap::new();
+            results.insert("devices".into(), OwnedValue::from(self.devices));
+            results.insert(
+                "restore_token".into(),
+                value(&format!("private-token-{index}")),
+            );
+            response(connection, &header, &options, 0, results).await
+        }
+    }
+    async fn fixture(
+        reject: bool,
+        devices: u32,
+    ) -> (
+        tempfile::TempDir,
+        Bus,
+        zbus::Connection,
+        RemoteDesktop,
+        Selections,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut address = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let bus = Bus(child);
+        let selections = Arc::new(Mutex::new(Vec::new()));
+        let server = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .name("org.freedesktop.portal.Desktop")
+            .unwrap()
+            .serve_at(
+                "/org/freedesktop/portal/desktop",
+                Portal {
+                    selections: selections.clone(),
+                    starts: AtomicU32::new(0),
+                    reject,
+                    devices,
+                },
+            )
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let client = zbus::connection::Builder::address(address.trim())
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+        let portal = RemoteDesktop::with_connection(client).await.unwrap();
+        (dir, bus, server, portal, selections)
+    }
+    #[tokio::test]
+    async fn official_select_start_options_rotate_tokens_across_service_sessions() {
+        let (dir, _bus, _server, portal, selections) = fixture(false, 3).await;
+        let state = dir.path().join("ukvm/portal-authorization");
+        for _ in 0..2 {
+            let mut authorization =
+                Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+            let session = portal
+                .create_session(CreateSessionOptions::default())
+                .await
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                authorize_devices(&portal, &session, true, false, &mut authorization),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        assert_eq!(
+            *selections.lock().unwrap(),
+            vec![(2, None), (2, Some("private-token-1".into()))]
+        );
+        let authorization =
+            Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+        assert_eq!(authorization.restore_token(), Some("private-token-2"));
+    }
+    #[tokio::test]
+    async fn rejected_restore_does_not_leak_or_reuse_token() {
+        let (dir, _bus, _server, portal, _selections) = fixture(true, 3).await;
+        let state = dir.path().join("ukvm/portal-authorization");
+        let mut first =
+            Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+        first.granted(Some("expired-private-token")).unwrap();
+        drop(first);
+        let mut authorization =
+            Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+        let session = portal
+            .create_session(CreateSessionOptions::default())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            authorize_devices(&portal, &session, true, false, &mut authorization),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(!format!("{error:?}").contains("expired-private-token"));
+        drop(authorization);
+        let next =
+            Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+        assert!(next.restore_token().is_none());
+    }
+    #[tokio::test]
+    async fn remembered_token_does_not_replace_required_device_authorization() {
+        let (dir, _bus, _server, portal, _selections) = fixture(false, 1).await;
+        let mut authorization = Authorization::begin_in(
+            &dir.path().join("ukvm/portal-authorization"),
+            Kind::RemoteDesktop,
+            Context::current(2),
+        )
+        .unwrap();
+        let session = portal
+            .create_session(CreateSessionOptions::default())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            authorize_devices(&portal, &session, true, false, &mut authorization),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(matches!(error, PlatformError::PermissionDenied(_)));
     }
 }
