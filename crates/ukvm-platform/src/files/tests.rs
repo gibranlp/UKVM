@@ -137,3 +137,30 @@ fn sources_bound_metadata_and_detect_file_changes() {
     assert!(source.read_chunk(0).is_err());
     assert!(Source::new(&vec![p; 65], "a".repeat(32)).is_err());
 }
+
+#[test]
+fn collision_suffix_keeps_long_unicode_names_protocol_valid() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("received");
+    for name in [
+        format!("{}.txt", "a".repeat(236)),
+        format!("{}.bin", "é".repeat(118)),
+        format!("a.{}", "b".repeat(238)),
+    ] {
+        let mut first = Receiver::new(&root, offer(&name)).unwrap();
+        first.finish_file(0).unwrap();
+        assert_eq!(first.commit().unwrap(), name);
+        let mut second = Receiver::new(&root, offer(&name)).unwrap();
+        second.finish_file(0).unwrap();
+        let renamed = second.commit().unwrap();
+        assert_ne!(renamed, name);
+        assert!(renamed.len() <= 240);
+        assert!(ukvm_protocol::files::component(&renamed).is_ok());
+        assert!(ukvm_protocol::files::Message::Result {
+            destination: renamed.clone()
+        }
+        .validate()
+        .is_ok());
+        assert!(root.join(renamed).is_file());
+    }
+}

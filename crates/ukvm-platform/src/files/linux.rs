@@ -409,14 +409,21 @@ fn collision_name(name: &str, n: usize, file: bool) -> String {
     if n == 0 {
         return name.into();
     }
-    if file {
-        if let Some((stem, ext)) = name.rsplit_once('.') {
-            if !stem.is_empty() {
-                return format!("{stem} ({n}).{ext}");
-            }
-        }
+    let suffix = format!(" ({n})");
+    let (stem, extension) = if file {
+        name.rsplit_once('.')
+            .filter(|(stem, ext)| !stem.is_empty() && ext.len() + suffix.len() + 1 < 240)
+            .map(|(stem, ext)| (stem, format!(".{ext}")))
+            .unwrap_or((name, String::new()))
+    } else {
+        (name, String::new())
+    };
+    let limit = 240 - suffix.len() - extension.len();
+    let mut end = stem.len().min(limit);
+    while !stem.is_char_boundary(end) {
+        end -= 1;
     }
-    format!("{name} ({n})")
+    format!("{}{suffix}{extension}", &stem[..end])
 }
 impl Drop for Receiver {
     fn drop(&mut self) {
