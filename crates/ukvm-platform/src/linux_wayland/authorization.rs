@@ -327,9 +327,7 @@ impl Authorization {
         if token.is_some_and(|value| !valid_token(value)) {
             return Err("portal returned invalid persistent authorization state".into());
         }
-        if token.is_some() && token == self.restore_token.as_deref() {
-            return Err("portal did not rotate its single-use authorization credential".into());
-        }
+        // El portal puede renovar el mismo valor; solo se guarda lo devuelto tras Start exitoso.
         self.record.token = token.map(str::to_owned);
         self.record.authorized = true;
         self.record.reason = if token.is_some() {
@@ -577,13 +575,13 @@ mod tests {
         assert!(Authorization::begin_in(&dir, Kind::RemoteDesktop, context()).is_err());
     }
     #[test]
-    fn interface_version_changes_and_invalid_rotation_require_fresh_approval() {
+    fn interface_version_changes_and_invalid_credentials_require_fresh_approval() {
         let (_tmp, dir) = fixture();
         let mut first = Authorization::begin_in(&dir, Kind::InputCapture, context()).unwrap();
         first.granted(Some("single-use-secret")).unwrap();
         drop(first);
         let mut same = Authorization::begin_in(&dir, Kind::InputCapture, context()).unwrap();
-        assert!(same.granted(Some("single-use-secret")).is_err());
+        same.granted(Some("single-use-secret")).unwrap();
         assert!(same.granted(Some("bad\nsecret")).is_err());
         drop(same);
         let mut first = Authorization::begin_in(&dir, Kind::InputCapture, context()).unwrap();

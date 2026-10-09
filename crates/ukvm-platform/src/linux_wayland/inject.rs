@@ -907,7 +907,10 @@ async fn authorize_devices(
         DeviceType::Pointer.into()
     };
     if verbose {
-        eprintln!("[wayland] RemoteDesktop: SelectDevices");
+        eprintln!(
+            "[wayland] RemoteDesktop: SelectDevices persist_mode=2 restore_token_supplied={}",
+            authorization.restore_token().is_some()
+        );
     }
     portal
         .select_devices(
@@ -920,7 +923,7 @@ async fn authorize_devices(
         .and_then(|request| request.response().map(|_| ()))
         .map_err(|_| PlatformError::Backend("RemoteDesktop SelectDevices rejected; retry normal portal approval (any restore token was consumed)".into()))?;
     if verbose {
-        eprintln!("[wayland] RemoteDesktop: Start pending; consent picker may appear");
+        eprintln!("[wayland] RemoteDesktop: SelectDevices accepted; Start pending; portal may restore or request consent");
     }
     let selected = portal
         .start(
@@ -931,9 +934,20 @@ async fn authorize_devices(
         .await
         .and_then(|request| request.response())
         .map_err(|_| PlatformError::Backend("RemoteDesktop Start denied or failed; retry normal portal approval (any restore token was consumed)".into()))?;
+    let diagnostic = persistence_result(authorization.restore_token(), selected.restore_token());
+    if verbose {
+        eprintln!(
+            "[wayland] RemoteDesktop: Start succeeded pointer={} keyboard={} {diagnostic}",
+            selected.devices().contains(DeviceType::Pointer),
+            selected.devices().contains(DeviceType::Keyboard)
+        );
+    }
     authorization
         .granted(selected.restore_token())
         .map_err(PlatformError::Backend)?;
+    if verbose {
+        eprintln!("[wayland] RemoteDesktop: returned authorization state persisted; {diagnostic}");
+    }
     if !selected.devices().contains(DeviceType::Pointer) {
         return Err(PlatformError::PermissionDenied(
             "RemoteDesktop did not grant pointer control",
@@ -945,6 +959,11 @@ async fn authorize_devices(
         ));
     }
     Ok(())
+}
+
+fn persistence_result(submitted: Option<&str>, returned: Option<&str>) -> String {
+    format!("restore_attempted={} replacement_received={} replacement_same_value={} restoration_confirmation=not_exposed_by_portal",
+        submitted.is_some(), returned.is_some(), submitted.is_some() && submitted == returned)
 }
 
 #[cfg(test)]
@@ -1007,6 +1026,7 @@ mod persistence_tests {
         starts: AtomicU32,
         reject: bool,
         devices: u32,
+        reissue_same_value: bool,
     }
     #[zbus::interface(name = "org.freedesktop.portal.RemoteDesktop")]
     impl Portal {
@@ -1072,6 +1092,7 @@ mod persistence_tests {
             #[zbus(connection)] connection: &zbus::Connection,
         ) -> OwnedObjectPath {
             let index = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            let index = if self.reissue_same_value { 1 } else { index };
             let mut results = HashMap::new();
             results.insert("devices".into(), OwnedValue::from(self.devices));
             results.insert(
@@ -1084,6 +1105,7 @@ mod persistence_tests {
     async fn fixture(
         reject: bool,
         devices: u32,
+        reissue_same_value: bool,
     ) -> (
         tempfile::TempDir,
         Bus,
@@ -1114,6 +1136,7 @@ mod persistence_tests {
                     starts: AtomicU32::new(0),
                     reject,
                     devices,
+                    reissue_same_value,
                 },
             )
             .unwrap()
@@ -1130,7 +1153,7 @@ mod persistence_tests {
     }
     #[tokio::test]
     async fn official_select_start_options_rotate_tokens_across_service_sessions() {
-        let (dir, _bus, _server, portal, selections) = fixture(false, 3).await;
+        let (dir, _bus, _server, portal, selections) = fixture(false, 3, false).await;
         let state = dir.path().join("ukvm/portal-authorization");
         for _ in 0..2 {
             let mut authorization =
@@ -1157,7 +1180,7 @@ mod persistence_tests {
     }
     #[tokio::test]
     async fn rejected_restore_does_not_leak_or_reuse_token() {
-        let (dir, _bus, _server, portal, _selections) = fixture(true, 3).await;
+        let (dir, _bus, _server, portal, _selections) = fixture(true, 3, false).await;
         let state = dir.path().join("ukvm/portal-authorization");
         let mut first =
             Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
@@ -1184,7 +1207,7 @@ mod persistence_tests {
     }
     #[tokio::test]
     async fn remembered_token_does_not_replace_required_device_authorization() {
-        let (dir, _bus, _server, portal, _selections) = fixture(false, 1).await;
+        let (dir, _bus, _server, portal, _selections) = fixture(false, 1, false).await;
         let mut authorization = Authorization::begin_in(
             &dir.path().join("ukvm/portal-authorization"),
             Kind::RemoteDesktop,
@@ -1203,5 +1226,63 @@ mod persistence_tests {
         .unwrap()
         .unwrap_err();
         assert!(matches!(error, PlatformError::PermissionDenied(_)));
+    }
+
+    #[tokio::test]
+    async fn frontend_reissues_same_token_after_success_without_fresh_request() {
+        let (dir, _bus, _server, portal, selections) = fixture(false, 3, true).await;
+        let state = dir.path().join("ukvm/portal-authorization");
+        for attempt in 0..3 {
+            let mut authorization =
+                Authorization::begin_in(&state, Kind::RemoteDesktop, Context::current(2)).unwrap();
+            assert_eq!(
+                authorization.restore_token(),
+                if attempt == 0 {
+                    None
+                } else {
+                    Some("private-token-1")
+                }
+            );
+            let pending: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(state.join("remote-desktop.json")).unwrap())
+                    .unwrap();
+            assert!(pending["token"].is_null());
+            let session = portal
+                .create_session(CreateSessionOptions::default())
+                .await
+                .unwrap();
+            authorize_devices(&portal, &session, true, true, &mut authorization)
+                .await
+                .unwrap();
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(state.join("remote-desktop.json")).unwrap())
+                    .unwrap();
+            assert_eq!(saved["token"], "private-token-1");
+            drop(authorization);
+        }
+        assert_eq!(
+            *selections.lock().unwrap(),
+            vec![
+                (2, None),
+                (2, Some("private-token-1".into())),
+                (2, Some("private-token-1".into()))
+            ]
+        );
+    }
+    #[test]
+    fn restoration_diagnostics_never_include_credentials_or_claim_silent_restore() {
+        let secret = "never-expose-the-credential";
+        for (submitted, returned) in [
+            (None, Some(secret)),
+            (Some(secret), Some(secret)),
+            (Some(secret), None),
+        ] {
+            let diagnostic = persistence_result(submitted, returned);
+            assert!(!diagnostic.contains(secret));
+            assert!(diagnostic.contains("restoration_confirmation=not_exposed_by_portal"));
+        }
+        assert!(
+            persistence_result(Some(secret), Some(secret)).contains("replacement_same_value=true")
+        );
     }
 }
