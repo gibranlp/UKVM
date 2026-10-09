@@ -3,6 +3,7 @@
 use ukvm_core::controlled::{InputSink, SinkAction, SinkKind};
 use ukvm_protocol::{EdgePosition, InputEvent};
 
+pub mod clipboard;
 #[cfg(target_os = "linux")]
 pub mod linux_wayland;
 

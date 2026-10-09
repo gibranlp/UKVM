@@ -21,16 +21,16 @@ impl InputSink for Sink {
         Ok(())
     }
 }
-struct Fixture {
+pub(super) struct Fixture {
     _temp: tempfile::TempDir,
-    context: Context,
-    peer: Identity,
+    pub(super) context: Context,
+    pub(super) peer: Identity,
     peer_store: TrustStore,
     peer_trust: PathBuf,
     begins: Arc<AtomicUsize>,
 }
 impl Fixture {
-    fn new(allowed: bool) -> Self {
+    pub(super) fn new(allowed: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let local = Identity::load_or_create(&temp.path().join("a")).unwrap();
         let peer = Identity::load_or_create(&temp.path().join("b")).unwrap();
@@ -63,6 +63,7 @@ impl Fixture {
             )
             .unwrap();
         let context = Context {
+            clipboard: clipboard::Clipboard::new(&local.id).unwrap(),
             config: Config {
                 node: ukvm_config::Node {
                     name: "local".into(),

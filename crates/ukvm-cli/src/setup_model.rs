@@ -153,6 +153,7 @@ mod tests {
             address: Some("192.168.1.40:24800".into()),
             permissions: Permissions {
                 connect: true,
+                share_clipboard: false,
                 debug_input: false,
                 control_this_node: false,
             },

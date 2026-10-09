@@ -10,7 +10,7 @@ After InputCapture activates, the controller sends `RemoteEntry(EdgePosition)` b
 
 When the controlled node detects an intentional outward crossing of that same outer edge, it stops consuming input, releases held keys/buttons, closes its injector session, and sends `ReturnControl(EdgePosition)`. The controller accepts this message only from its authenticated active peer and only for the expected return edge. It stops forwarding, requests InputCapture `Release` with the returned fraction along the originating barrier, then closes the local capture session. Late input after return is ignored by the receiver. There is no permanent server/client product role; these are per-session directions.
 
-`SessionEnd` remains the normal explicit end when no natural return occurs. Emergency release, Ctrl+C, disconnect, permission loss and backend failure also end the session. `ControlEnter`, `ControlLeave` and `DisplayInfo` remain semantic scaffolding, not active wire messages. There is no remote shell, screen pixel stream, clipboard or arbitrary command message.
+`SessionEnd` remains the normal explicit end when no natural return occurs. Emergency release, Ctrl+C, disconnect, permission loss and backend failure also end the session. `ControlEnter`, `ControlLeave` and `DisplayInfo` remain semantic scaffolding, not active wire messages. There is no remote shell, screen pixel stream or arbitrary command message. Clipboard Protocol 1 is separately negotiated; it adds no input wire variants.
 
 ## Why version 1.2
 
@@ -33,3 +33,13 @@ Input 1.3 adds `TopologyEntry { entry, exits }` and `TopologyExits(exits)`. Both
 The EI receiver detects only configured outer exits, retains entry-edge inward hysteresis, releases held state and sends existing ReturnControl before ending the relationship. A routed sender validates the reported direction against its permitted exits and computes the next coordinate locally; the wire never selects an identity/address. A ready next node receives a fresh authorized entry while the source retains capture. A local destination releases capture. Failed handoff restores local input. Ready-exit refresh supports recovery while another receiver is active.
 
 These wire variants and changed routed ReturnControl semantics require Input Protocol 1.3 on all peers; 1.2 is intentionally rejected at Hello. Pairing Protocol 2, mTLS, pins, permission requirements and portal consent are unchanged. Existing trust needs no migration/re-pairing. See [topology](TOPOLOGY.md).
+
+## Clipboard Protocol 1 (M19)
+
+ALPN `ukvm-clipboard/1` selects a separate bounded text channel on the same pinned
+TLS listener. Version/type/limit Hello negotiation is required before payloads.
+Text includes byte length, authenticated origin, runtime epoch and logical generation;
+maximum UTF-8 text is 65,536 bytes. Input Protocol 1.3 and Pairing Protocol 2 are
+unchanged. Old nodes fail closed on clipboard ALPN while normal input remains compatible.
+Clipboard trust/permissions are separately enforced on both nodes; frames never enter
+the input receiver or discovery. See [CLIPBOARD.md](CLIPBOARD.md) for encoding and lifecycle.

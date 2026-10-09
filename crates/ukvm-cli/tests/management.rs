@@ -687,3 +687,82 @@ esac
         .lines()
         .all(|line| line.contains("show") || line.contains(" stop ")));
 }
+
+#[test]
+fn clipboard_defaults_off_and_permission_is_live_and_separate() {
+    let profile = Profile::new();
+    profile.add_peer("io");
+    let status = profile.json(&["status"], true);
+    assert_eq!(status["schema_version"], 1);
+    assert_eq!(
+        status["data"]["peers"][0]["permissions"]["share_clipboard"],
+        false
+    );
+    assert_eq!(status["data"]["clipboard"]["enabled"], false);
+    let result = profile.json(&["peer", "allow", "io", "share-clipboard"], true);
+    assert_eq!(result["data"]["permissions"]["share_clipboard"], true);
+    assert_eq!(result["data"]["permissions"]["control_this_node"], false);
+    assert_eq!(result["data"]["apply_required"], false);
+    assert!(result["data"]["apply_command"].is_null());
+    let status = profile.json(&["status"], true);
+    assert_eq!(status["data"]["clipboard"]["enabled"], true);
+    assert_eq!(status["data"]["clipboard"]["max_text_bytes"], 65536);
+    assert!(status["data"]["clipboard"].get("text").is_none());
+    assert!(status["data"]["clipboard"].get("contents").is_none());
+    profile.json(&["peer", "deny", "io", "share-clipboard"], true);
+    assert_eq!(
+        profile.json(&["status"], true)["data"]["clipboard"]["enabled"],
+        false
+    );
+}
+
+#[test]
+fn older_running_runtime_requires_restart_before_clipboard_permission_edits() {
+    let profile = Profile::new();
+    profile.add_peer("io");
+    let runtime = profile.dir.path().join("ukvm");
+    fs::create_dir_all(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let lock_path = runtime.join("runtime.lock");
+    fs::write(&lock_path, "").unwrap();
+    fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut holder = Command::new("flock")
+        .args(["-F", "-x", "-n"])
+        .arg(&lock_path)
+        .args(["sh", "-c", "printf ready; read ignored"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut bytes = [0; 5];
+    std::io::Read::read_exact(holder.stdout.as_mut().unwrap(), &mut bytes).unwrap();
+    let snapshot = ukvm_runtime::ownership::RuntimeSnapshot {
+        pid: holder.id(),
+        updated: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        ..Default::default()
+    };
+    fs::write(
+        runtime.join("status.toml"),
+        toml::to_string(&snapshot).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        runtime.join("status.toml"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        profile.json(&["status"], true)["data"]["clipboard"]["state"],
+        "restart_required"
+    );
+    profile.json(&["peer", "allow", "io", "share-clipboard"], false);
+    assert_eq!(
+        profile.json(&["peers"], true)["data"]["peers"][0]["permissions"]["share_clipboard"],
+        false
+    );
+    holder.stdin.take();
+    holder.wait().unwrap();
+}

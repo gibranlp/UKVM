@@ -163,6 +163,25 @@ fn availability(runtime: &Value, id: &str) -> Value {
     json!({"state": state, "runtime_state": observed, "source": if observed.is_some() {"runtime_snapshot"} else {"none"}})
 }
 
+fn clipboard_status(store: &TrustStore, runtime: &Value) -> Value {
+    let enabled = store
+        .peers
+        .iter()
+        .any(|p| p.permissions.connect && p.permissions.share_clipboard);
+    let mut value = runtime["snapshot"]["clipboard"].clone();
+    if !value.is_object() {
+        value = json!({"supported": null, "connected_peers": 0, "last_sync": null, "state": if enabled { "stopped" } else { "disabled" }, "error": null});
+    }
+    if runtime["state"] == "running" && value["state"] == "" {
+        value["state"] = json!("restart_required");
+        value["error"] = json!("Restart UKVM to load clipboard support");
+    }
+    value["enabled"] = json!(enabled);
+    value["protocol_version"] = json!(ukvm_protocol::clipboard::CLIPBOARD_VERSION);
+    value["max_text_bytes"] = json!(ukvm_protocol::clipboard::MAX_CLIPBOARD_BYTES);
+    value
+}
+
 fn peers(config: &Config, store: &TrustStore, runtime: &Value) -> Vec<Value> {
     let topology = config.layout.topology();
     store.peers.iter().map(|peer| {
@@ -210,7 +229,7 @@ fn execute(command: &str, args: &[String]) -> Result<Value, String> {
                 return Ok(json!({"peers": peers}));
             }
             Ok(
-                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "desktop_authorization": super::authorization::status(None, None), "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
+                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "clipboard": clipboard_status(&store, &runtime), "desktop_authorization": super::authorization::status(None, None), "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
             )
         }
         "layout" => edit_layout(args),
@@ -280,7 +299,7 @@ pub fn doctor() -> Result<Value, String> {
             "backend_ready"
         };
         Ok(
-            json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "desktop_authorization": super::authorization::status(report.remote.version, report.capture.version), "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
+            json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "desktop_authorization": super::authorization::status(report.remote.version, report.capture.version), "clipboard": {"supported": super::with_runtime(ukvm_platform::clipboard::wayland::supported()), "backend": "wayland_data_control", "protocol_version": ukvm_protocol::clipboard::CLIPBOARD_VERSION, "max_text_bytes": ukvm_protocol::clipboard::MAX_CLIPBOARD_BYTES, "contents_read": false}, "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
         )
     }
     #[cfg(not(target_os = "linux"))]
@@ -453,7 +472,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
                 (action, name, permission)
             }
             _ => return Err(
-                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node [--json]"
+                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node|share-clipboard [--json]"
                     .into(),
             ),
         };
@@ -461,14 +480,21 @@ fn permission(args: &[String]) -> Result<Value, String> {
         "connect" => SessionPermission::Connect,
         "debug-input" => SessionPermission::DebugInput,
         "control-this-node" => SessionPermission::ControlThisNode,
+        "share-clipboard" => SessionPermission::ShareClipboard,
         _ => return Err("unknown permission".into()),
     };
+    if permission == SessionPermission::ShareClipboard {
+        let live = runtime();
+        if live["state"] == "running" && live["snapshot"]["clipboard"]["state"] == "" {
+            return Err("Restart UKVM to load M19 before changing clipboard permissions".into());
+        }
+    }
     let _lock = edit_lock(&default_trust_dir()?)?;
     let mut store = TrustStore::load(&default_trust_dir()?)?;
     store.set_permission(&default_trust_dir()?, name, permission, action == "allow")?;
     let peer = store.find(name).ok_or("peer disappeared")?;
     Ok(
-        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_command": "ukvm apply"}),
+        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_required": permission != SessionPermission::ShareClipboard, "apply_command": if permission == SessionPermission::ShareClipboard { Value::Null } else { json!("ukvm apply") }}),
     )
 }
 

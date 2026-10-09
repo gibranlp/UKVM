@@ -22,6 +22,9 @@
         },
         "control_this_node": {
           "type": "boolean"
+        },
+        "share_clipboard": {
+          "type": "boolean"
         }
       },
       "required": [
@@ -498,6 +501,9 @@
         },
         "desktop_authorization": {
           "$ref": "#/$defs/desktop_authorization"
+        },
+        "clipboard": {
+          "$ref": "#/$defs/clipboard"
         }
       },
       "required": [
@@ -1451,6 +1457,46 @@
         "control_permissions_changed",
         "desktop_authorization"
       ],
+      "additionalProperties": true
+    },
+    "clipboard": {
+      "type": "object",
+      "properties": {
+        "supported": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "connected_peers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_sync": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "protocol_version": {
+          "const": 1
+        },
+        "max_text_bytes": {
+          "const": 65536
+        }
+      },
       "additionalProperties": true
     }
   }

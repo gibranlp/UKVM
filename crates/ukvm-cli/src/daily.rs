@@ -15,6 +15,7 @@ struct Live {
     capture: String,
     receiver: String,
     states: HashMap<String, String>,
+    clipboard: String,
 }
 fn live() -> Live {
     #[cfg(target_os = "linux")]
@@ -45,6 +46,14 @@ fn live() -> Live {
                 coordinate: snapshot.active_coordinate,
                 capture: snapshot.capture,
                 receiver: snapshot.receiver,
+                clipboard: format!(
+                    "state={} supported={:?} enabled={} connected-peers={} last-sync={:?}",
+                    snapshot.clipboard.state,
+                    snapshot.clipboard.supported,
+                    snapshot.clipboard.enabled,
+                    snapshot.clipboard.connected_peers,
+                    snapshot.clipboard.last_sync
+                ),
                 states: snapshot
                     .peers
                     .into_iter()
@@ -63,8 +72,8 @@ fn peer_lines(store: &TrustStore, live: &Live) -> String {
     if store.peers.is_empty() {
         return "No trusted peers.\n".into();
     }
-    store.peers.iter().map(|peer| format!("{}  pinned={}  connect={} debug-input={} control-this-node={}  availability={}  address={}\n",
-        peer.alias, peer.id, peer.permissions.connect, peer.permissions.debug_input, peer.permissions.control_this_node,
+    store.peers.iter().map(|peer| format!("{}  pinned={}  connect={} debug-input={} control-this-node={} share-clipboard={}  availability={}  address={}\n",
+        peer.alias, peer.id, peer.permissions.connect, peer.permissions.debug_input, peer.permissions.control_this_node, peer.permissions.share_clipboard,
         live.states.get(&peer.id).map(String::as_str).unwrap_or("unknown (no fresh configured runtime observation)"),
         peer.address.as_deref().unwrap_or("none"))).collect()
 }
@@ -141,6 +150,14 @@ pub fn status() -> ExitCode {
                 .unwrap_or("local/inbound/unknown")
         );
         println!(
+            "Clipboard: {}",
+            if live.clipboard.is_empty() {
+                "runtime not reporting; see ukvm status --json".to_string()
+            } else {
+                live.clipboard.clone()
+            }
+        );
+        println!(
             "Configured topology (loaded by runtime at startup):\n  (0,0): {} (local)",
             config.node.name
         );
@@ -213,6 +230,7 @@ mod tests {
             address: None,
             permissions: Permissions {
                 connect: true,
+                share_clipboard: false,
                 debug_input: false,
                 control_this_node: true,
             },

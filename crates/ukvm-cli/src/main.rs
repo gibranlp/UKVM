@@ -21,6 +21,7 @@ Commands:\n\
   config [path|check|show]  Inspect configuration\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
   layout [show|place X Y PEER|move PEER X Y|remove PEER] [--json]  Manage coordinate layout\n\
+  peer allow|deny PEER share-clipboard  Opt-in bilateral text sharing (both nodes)\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\

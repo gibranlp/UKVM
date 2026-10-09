@@ -57,3 +57,20 @@ JSON is a local presentation contract, never a remote control/trust channel. Dis
 ## Remembered portal consent (M18)
 
 Persistent portal credentials remain independent of peer trust and `control-this-node`. UKVM uses official RemoteDesktop/InputCapture v2 persistence only, requesting mode 2 after existing peer authorization checks. Portal approval and granted device masks remain required. Private, bounded, durable records consume single-use credentials before an attempt and atomically store the replacement before using input; failed/cancelled attempts do not replay old tokens. Desktop/API changes require new approval, while the portal/backend validates vendor restore data. Status exposes only safe state. Explicit confirmed reset stops the owned managed runtime, forgets both credentials and leaves peer permissions unchanged. It refuses foreground/unknown owners and does not automatically restart or approve consent. See [PORTAL_PERSISTENCE.md](PORTAL_PERSISTENCE.md); earlier milestone descriptions of fresh consent/no token storage are historical.
+
+## Clipboard boundary (M19)
+
+Clipboard shares UTF-8 text only after separate bilateral `share-clipboard` opt-in
+and pinned mutual TLS authentication. New/existing missing permissions default OFF;
+pairing, topology, input permission and portal restore tokens do not grant it.
+Clipboard Protocol 1 has separate ALPN and capability negotiation; Input Protocol 1.3
+is unchanged. Authenticated origin must match the certificate identity. Every send
+and final Wayland write rechecks permission under the trust-edit lock, including
+queued writes. Revocation closes idle links and prevents subsequent contents access.
+Bounded framing, size, queues, transfer deadlines and receive rates reject invalid
+data. Received text is never a command or relayed to an unauthorized third peer.
+Contents remain memory-only, with redacted Debug and safe status/JSON. Regular OS
+clipboard/history remains user-visible and may retain already shared text.
+Native data-control uses the compositor's sanctioned clipboard-manager interface,
+never input injection APIs, root, XWayland or portal-security bypasses.
+See [CLIPBOARD.md](CLIPBOARD.md).

@@ -29,6 +29,8 @@ pub struct RuntimeSnapshot {
     pub capture: String,
     pub receiver: String,
     pub peers: Vec<PeerStatus>,
+    #[serde(default)]
+    pub clipboard: crate::wayland::clipboard::ClipboardStatus,
 }
 #[derive(Debug)]
 pub enum RuntimeStatus {

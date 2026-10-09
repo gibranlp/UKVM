@@ -147,6 +147,7 @@ impl Fixture {
             });
         }
         let context = Context {
+            clipboard: clipboard::Clipboard::new(&identity.id).unwrap(),
             config,
             identity,
             trust_dir: trust,

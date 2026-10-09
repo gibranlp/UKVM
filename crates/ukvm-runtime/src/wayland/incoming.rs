@@ -3,6 +3,7 @@ use super::*;
 
 type Injector = RemoteInputSink<WaylandInputInjector>;
 struct Authority {
+    input_slots: tokio::sync::Semaphore,
     sink: Arc<Mutex<Option<Injector>>>,
     initialization: tokio::sync::Mutex<()>,
     status: Arc<Mutex<String>>,
@@ -147,6 +148,7 @@ async fn incoming(
             return;
         }
     };
+    let input_authority = Arc::clone(&authority);
     let mut sink = ExclusiveSink {
         inner: IncomingSink {
             session: SharedSession {
@@ -163,10 +165,23 @@ async fn incoming(
     };
     let connection = tokio::select! {
         _ = cancelled(&mut stop) => return,
-        result = transport::accept_remote_trusted(tcp, &context.identity, &store, &context.trust_dir, &context.config.node.name, &sink) => match result {
+        result = transport::accept_runtime(tcp, &context.identity, &store, &context.trust_dir, &context.config.node.name) => match result {
             Ok(connection) => connection,
             Err(error) => { context.log(format!("incoming authentication rejected: {error}")); return; }
         }
+    };
+    let connection = match connection {
+        transport::RuntimeConnection::Input(connection) => connection,
+        transport::RuntimeConnection::Clipboard { stream, peer_id } => {
+            if let Err(error) = super::clipboard::session(context, &peer_id, stream, stop).await {
+                context.log(format!("clipboard peer {peer_id}: {error}"));
+            }
+            return;
+        }
+    };
+    let Ok(_input_slot) = input_authority.input_slots.try_acquire() else {
+        context.log("incoming input capacity reached");
+        return;
     };
     let peer_id = connection.peer.id.clone();
     sink.inner.policy.1 = peer_id.clone();
@@ -226,6 +241,7 @@ pub(super) async fn receiver(
     mut stop: watch::Receiver<bool>,
 ) {
     let authority = Arc::new(Authority {
+        input_slots: tokio::sync::Semaphore::new(16),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),
@@ -233,7 +249,7 @@ pub(super) async fn receiver(
     let mut connections = FuturesUnordered::new();
     // Eight positions per source; a bounded number of readiness relationships
     // may coexist. Excess connections are closed without waiting for consent.
-    const MAX_INCOMING: usize = 16;
+    const MAX_INCOMING: usize = 80;
     loop {
         tokio::select! {
             _ = cancelled(&mut stop) => break,
@@ -260,6 +276,7 @@ pub(super) async fn receiver(
 #[cfg(test)]
 pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
     let authority = Arc::new(Authority {
+        input_slots: tokio::sync::Semaphore::new(16),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),

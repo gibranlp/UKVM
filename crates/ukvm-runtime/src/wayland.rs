@@ -33,7 +33,10 @@ enum PeerAvailability {
     Stopped,
 }
 
+pub(crate) mod clipboard;
+
 struct Context {
+    clipboard: clipboard::Clipboard,
     config: Config,
     identity: Identity,
     trust_dir: PathBuf,
@@ -101,7 +104,9 @@ pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Resul
     }
     let listener = transport::bind(&config.network.listen).await?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    let clipboard = clipboard::Clipboard::new(&identity.id)?;
     let context = Context {
+        clipboard,
         config,
         identity,
         trust_dir,
@@ -145,13 +150,14 @@ pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Resul
         let _ = stop_tx.send(true);
         result.map_err(|e| e.to_string())
     };
-    let (signal_result, (), (), (), (), (), ()) = tokio::join!(
+    let (signal_result, (), (), (), (), (), (), ()) = tokio::join!(
         signal,
         receiver(&context, listener, stop.clone()),
         controller(&context, stop.clone()),
         discovery(&context, port, stop.clone()),
         peers(&context, stop.clone()),
         rearm_observer(&context, stop.clone()),
+        clipboard::supervise(&context, stop.clone()),
         publish_status(&context, owner, stop),
     );
     for node in context.config.layout.topology() {
@@ -181,6 +187,7 @@ async fn publish_status(
                 let topology = context.config.layout.topology();
                 let states = context.availability.lock().unwrap();
                 let snapshot = ownership::RuntimeSnapshot {
+                    clipboard: context.clipboard.snapshot(),
                     name: context.config.node.name.clone(),
                     node_id: context.identity.id.clone(),
                     state: "running".into(),

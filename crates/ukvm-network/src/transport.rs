@@ -197,6 +197,67 @@ pub async fn accept_remote_trusted<S: InputSink>(
     accept_trusted_for(tcp, identity, store, state_dir, name, SinkKind::RemoteInput).await
 }
 
+pub enum RuntimeConnection {
+    Input(Connection),
+    Clipboard {
+        stream: TlsStream<TcpStream>,
+        peer_id: String,
+    },
+}
+
+pub async fn accept_runtime(
+    tcp: TcpStream,
+    identity: &Identity,
+    store: &TrustStore,
+    state_dir: &Path,
+    name: &str,
+) -> Result<RuntimeConnection, String> {
+    let certificates = store
+        .peers
+        .iter()
+        .filter(|p| p.permissions.connect)
+        .map(|p| load_peer_certificate(&cert_path(state_dir, &p.id)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut config = (*server_config_many(identity, certificates)?).clone();
+    config.alpn_protocols = vec![crate::clipboard::ALPN.to_vec()];
+    tcp.set_nodelay(true).map_err(|e| e.to_string())?;
+    let tls = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        TlsAcceptor::from(Arc::new(config)).accept(tcp),
+    )
+    .await
+    .map_err(|_| "TLS handshake timed out".to_string())?
+    .map_err(|_| "TLS peer authentication failed".to_string())?;
+    let mut stream = TlsStream::from(tls);
+    if stream.get_ref().1.alpn_protocol() == Some(crate::clipboard::ALPN) {
+        let certificate = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .ok_or("TLS peer certificate missing")?;
+        let peer_id = certificate_id(certificate.as_ref());
+        store.authorize(&peer_id, SessionPermission::ShareClipboard)?;
+        return Ok(RuntimeConnection::Clipboard { stream, peer_id });
+    }
+    let peer = exchange_hello(
+        &mut stream,
+        identity,
+        name,
+        false,
+        Some(SinkKind::RemoteInput),
+    )
+    .await?;
+    let trusted = store.authorize(&peer.id, SessionPermission::Connect)?;
+    Ok(RuntimeConnection::Input(Connection {
+        stream,
+        peer,
+        local_sink: SinkKind::RemoteInput,
+        allowed_debug: false,
+        allowed_remote: trusted.permissions.control_this_node,
+    }))
+}
+
 async fn accept_trusted_for(
     tcp: TcpStream,
     identity: &Identity,

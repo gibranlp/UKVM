@@ -46,7 +46,10 @@ fn permission(value: &str) -> Result<SessionPermission, String> {
         "connect" => Ok(SessionPermission::Connect),
         "debug-input" => Ok(SessionPermission::DebugInput),
         "control-this-node" => Ok(SessionPermission::ControlThisNode),
-        _ => Err("permission must be connect, debug-input, or control-this-node".into()),
+        "share-clipboard" => Ok(SessionPermission::ShareClipboard),
+        _ => Err(
+            "permission must be connect, debug-input, control-this-node, or share-clipboard".into(),
+        ),
     }
 }
 fn confirmation() -> Result<bool, String> {
@@ -67,7 +70,7 @@ pub fn peer(args: &[String]) -> ExitCode {
             [command] if command == "list" => { if store.peers.is_empty() { println!("No trusted peers."); } for peer in &store.peers { println!("{}  {}  {}",peer.alias,peer.id,peer.address.as_deref().unwrap_or("no address")); } }
             [command, name] if command == "show" || command == "permissions" => {
                 let peer = store.find(name).ok_or("unknown peer")?;
-                println!("Peer: {}\nNode ID / SHA-256 fingerprint: {}\nAddress: {}\nCertificate: {}\nPermissions:\n  connect: {}\n  debug-input: {}\n  control-this-node: {}",peer.alias,peer.id,peer.address.as_deref().unwrap_or("none"),ukvm_network::trust::cert_path(&state,&peer.id).display(),peer.permissions.connect,peer.permissions.debug_input,peer.permissions.control_this_node);
+                println!("Peer: {}\nNode ID / SHA-256 fingerprint: {}\nAddress: {}\nCertificate: {}\nPermissions:\n  connect: {}\n  debug-input: {}\n  control-this-node: {}\n  share-clipboard: {}",peer.alias,peer.id,peer.address.as_deref().unwrap_or("none"),ukvm_network::trust::cert_path(&state,&peer.id).display(),peer.permissions.connect,peer.permissions.debug_input,peer.permissions.control_this_node,peer.permissions.share_clipboard);
             }
             [command, name, permission_name] if command == "allow" || command == "deny" => { let p=permission(permission_name)?; store.set_permission(&state,name,p,command == "allow")?; println!("{} {} for {}",if command == "allow" { "Allowed" } else { "Denied" },permission_name,name); }
             [command, cert_path, rest @ ..] if command == "add" => {

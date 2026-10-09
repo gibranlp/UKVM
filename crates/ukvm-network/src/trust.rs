@@ -46,6 +46,23 @@ pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
+pub fn clipboard_guard(dir: &Path, id: &str) -> Result<fs::File, String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let guard = options
+        .open(dir.join(".edit.lock"))
+        .map_err(|_| "clipboard policy unavailable".to_string())?;
+    fs2::FileExt::try_lock_shared(&guard)
+        .map_err(|_| "clipboard policy edit in progress".to_string())?;
+    TrustStore::load(dir)?.authorize(id, SessionPermission::ShareClipboard)?;
+    Ok(guard)
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Permissions {
@@ -55,6 +72,8 @@ pub struct Permissions {
     pub debug_input: bool,
     #[serde(default)]
     pub control_this_node: bool,
+    #[serde(default)]
+    pub share_clipboard: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -79,6 +98,7 @@ pub enum SessionPermission {
     Connect,
     DebugInput,
     ControlThisNode,
+    ShareClipboard,
 }
 
 impl TrustStore {
@@ -136,6 +156,9 @@ impl TrustStore {
             .find_id(id)
             .ok_or("authenticated peer is not trusted")?;
         let allowed = match permission {
+            SessionPermission::ShareClipboard => {
+                peer.permissions.connect && peer.permissions.share_clipboard
+            }
             SessionPermission::Connect => peer.permissions.connect,
             SessionPermission::DebugInput => {
                 peer.permissions.connect && peer.permissions.debug_input
@@ -218,6 +241,7 @@ impl TrustStore {
             .find(|p| p.alias == name || p.id == name)
             .ok_or("unknown peer")?;
         match permission {
+            SessionPermission::ShareClipboard => peer.permissions.share_clipboard = allowed,
             SessionPermission::Connect => peer.permissions.connect = allowed,
             SessionPermission::DebugInput => peer.permissions.debug_input = allowed,
             SessionPermission::ControlThisNode => peer.permissions.control_this_node = allowed,

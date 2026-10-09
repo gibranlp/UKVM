@@ -99,3 +99,30 @@ The optional `ukvm-portal-session` executable is a distro-integration helper for
 RemoteDesktop v2 requests persistence, and InputCapture v2 uses its corresponding mechanism. Version 1 capture retains existing behavior and reports persistence unavailable. A v2 backend returning no token grants only the current session; it may have declined persistence or the user may not have selected remembering approval. Display **Active** rather than promising unattended restoration. See [portal persistence](PORTAL_PERSISTENCE.md) for security, backend identity, failure behavior and acceptance.
 
 Authorization state additionally includes `context_verified`: the running portal frontend desktop context was observed independently of the caller environment. False means read-only status could not check that context; remembered state still denotes saved credentials, not proof of restoration. Runtime restores only with a verified portal context and normal portal/backend compatibility checks.
+
+## M19 clipboard extension (additive schema 1)
+
+`permissions.share_clipboard` is a boolean, default false when absent. `connect`
+and clipboard permission must be allowed on both computers. This is bilateral
+text sharing, independent of control permission, topology and desktop input consent.
+Use `peer allow PEER share-clipboard --json` and `peer deny PEER share-clipboard --json`.
+Success returns the existing permission payload plus `apply_required:false` and
+`apply_command:null`; it applies live. Existing input/layout operations retain their
+normal Apply semantics. Re-query status after every change. Pairing never grants it.
+
+`status.data.clipboard` exposes only `supported` (boolean or null when unprobed),
+`enabled` (any locally authorized sharing peer), `connected_peers` (count),
+`last_sync` (Unix seconds or null), `state`, `error` (safe text/null),
+`protocol_version:1`, `max_text_bytes:65536`. States are `disabled`, `stopped`,
+`starting`, `ready`, `sharing`, `unavailable`, `restart_required` (older runtime still running). Runtime snapshots contain the same
+safe sampled state; unknown old-runtime fields are not evidence of support.
+`doctor.data.clipboard` adds `supported`, `backend:wayland_data_control`,
+`protocol_version`, `max_text_bytes`, `contents_read:false`. Its probe never creates
+a clipboard data device or requests text. Clipboard health is independent of portal
+input health. Peer/discovery permission objects include the new boolean; no contents,
+hashes, epochs or transfer frames are included in any frontend response.
+
+Frontends should explain sensitive text sharing, confirm grants explicitly, display
+its separate per-peer switch, and never request/parse clipboard contents. Ignore
+unknown/additional schema fields and disable clipboard actions on older UKVM versions.
+See [CLIPBOARD.md](CLIPBOARD.md) for protocol, lifecycle and physical acceptance.

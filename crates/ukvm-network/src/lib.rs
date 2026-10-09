@@ -1,5 +1,6 @@
 //! Authenticated TLS transport and bounded development wire protocol.
 
+pub mod clipboard;
 pub mod identity;
 pub mod pairing;
 pub mod pairing_state;

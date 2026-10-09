@@ -1,5 +1,7 @@
 //! Versioned semantic messages and the provisional development wire message set.
 
+pub mod clipboard;
+
 use serde::{Deserialize, Serialize};
 
 /// First protocol major version. Incompatible peers must fail closed.

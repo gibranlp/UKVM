@@ -1,5 +1,6 @@
 //! Platform and transport independent node policy.
 
+pub mod clipboard;
 use ukvm_protocol::PeerId;
 
 /// Permissions of this installation. A node can be both at once.

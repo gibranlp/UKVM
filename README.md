@@ -4,6 +4,16 @@ UniversalKVM (`ukvm`) is a planned cross-platform software KVM for moving keyboa
 
 **Current state:** Linux Wayland InputCapture, authenticated transport, pairing, discovery and real cross-PC input have been physically tested between `spectrum` and `io`. With a reversible consent-capable portal draft on io, the user confirmed pointer movement, clicks, keyboard, modifiers, scrolling, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 natural return by crossing io's left edge has been physically repeated three times on one listener, with local control restored. A timed abrupt sender stop while Shift and a mouse button were held left both PCs with normal local input and no held state. The packaged Hyprland portal lacks RemoteDesktop; see [Wayland injection trial](docs/WAYLAND_INJECTION_TRIAL.md). `ukvm run` now provides a foreground persistent runtime; M13 normal switching, 10+ round trips and receiver/network/active-disconnect recovery are user-confirmed; M13, including its emergency rearm fix, is complete and physically validated. M14 coordinate topology is implemented with automated tests; multi-node physical acceptance is pending.
 
+## Clipboard sharing
+
+M19 adds opt-in, bidirectional UTF-8 text sharing on Linux Wayland, independent of
+pointer focus and remote-control permission. On each trusted node run
+`ukvm peer allow OTHER_PEER share-clipboard --json`, or use the separate SpectrumOS
+widget control. New peers default OFF. Changes apply live; no contents appear in
+diagnostics. Read [clipboard design and acceptance](docs/CLIPBOARD.md).
+Spectrum ↔ Hellgen clipboard physical acceptance is pending; M18 Linux input and
+portal persistence are physically accepted.
+
 ## Continuous use
 
 With the existing identity, trusted peers, explicit `control-this-node` permission on io, and spectrum's right-edge layout, run this on **both** computers:
@@ -14,7 +24,7 @@ ukvm run --verbose
 
 The runtime listens, advertises/discovers endpoint hints, verifies pinned mTLS identities, obtains normal portal consent, and rearms after return or failure. It enables the local edge only after the remote injector accepts the session. Offline or rejected peers leave local input usable; reconnection retries automatically. Ctrl+Alt+Shift+Escape releases control; Ctrl+C shuts down. Normal `ukvm run` prints concise startup/shutdown output; verbose mode adds lifecycle events without individual input events. Existing diagnostic commands remain available.
 
-The first authorized incoming session requests RemoteDesktop consent. A valid portal/EI grant is reused until invalidated or shutdown; restarting asks again. The runtime supports Linux Wayland with up to eight cardinal positions at distance 1–2. See [topology configuration and physical test plan](docs/TOPOLOGY.md). Emergency release keeps the launching edge disarmed until the local pointer moves at least 32 logical pixels inward. Idle pointer observation currently requires Hyprland; unavailable observation keeps the edge disarmed. M13 is physically validated; M14 multi-node acceptance remains pending. See [runtime design and acceptance procedure](docs/RUNTIME.md).
+The first authorized incoming session requests RemoteDesktop consent. A valid portal/EI grant is reused until invalidated or shutdown; M18 restores remembered authorization through the official portal persistence API where supported. The runtime supports Linux Wayland with up to eight cardinal positions at distance 1–2. See [topology configuration and physical test plan](docs/TOPOLOGY.md). Emergency release keeps the launching edge disarmed until the local pointer moves at least 32 logical pixels inward. Idle pointer observation currently requires Hyprland; unavailable observation keeps the edge disarmed. M13 is physically validated; M14 multi-node acceptance remains pending. See [runtime design and acceptance procedure](docs/RUNTIME.md).
 
 ## Installation and background use
 
