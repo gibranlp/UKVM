@@ -5,7 +5,7 @@ use std::{
 use ukvm_discovery::{DiscoveryResult, DiscoveryService, DEFAULT_BROWSE};
 use ukvm_network::pairing::PAIRING_VERSION;
 
-const DISCOVER_HELP: &str = "Usage: ukvm discover [--interface NAME]\nBrowse for nearby pairing nodes for four seconds. Results are untrusted address hints.";
+const DISCOVER_HELP: &str = "Usage: ukvm discover [--interface NAME]\nBrowse nearby pairing and running nodes for four seconds. Results are untrusted address hints.";
 
 fn parse_discover_args(args: &[String]) -> Result<Option<&str>, &'static str> {
     match args {
@@ -23,7 +23,19 @@ pub async fn browse(interface: Option<&str>) -> Result<Vec<DiscoveryResult>, Str
         .map(|hints| hints.into_iter().filter(|h| h.pairing_available).collect())
 }
 
+pub async fn browse_all(interface: Option<&str>) -> Result<Vec<DiscoveryResult>, String> {
+    DiscoveryService::new(interface)?
+        .browse_for(DEFAULT_BROWSE)
+        .await
+}
+
 pub fn print_candidates(candidates: &[DiscoveryResult]) {
+    let store = ukvm_network::trust::default_trust_dir()
+        .and_then(|dir| ukvm_network::trust::TrustStore::load(&dir));
+    let config = ukvm_config::default_path()
+        .ok()
+        .and_then(|path| ukvm_config::load_or_default(&path).ok());
+
     println!("Found {} UniversalKVM node(s).", candidates.len());
     for (index, candidate) in candidates.iter().enumerate() {
         println!("\n[{}] {}", index + 1, candidate.display_name);
@@ -33,12 +45,47 @@ pub fn print_candidates(candidates: &[DiscoveryResult]) {
         println!(
             "    Pairing protocol: {}{}",
             candidate.pairing_version,
-            if candidate.compatible(PAIRING_VERSION) {
+            if !candidate.pairing_available {
+                " (not in pairing mode)"
+            } else if candidate.compatible(PAIRING_VERSION) {
                 ""
             } else {
                 " (incompatible)"
             }
         );
+        println!("    Advertised Node ID: {} (unverified)\n    Pairing available: {}\n    Control port: {}", candidate.advertised_node_id.as_deref().unwrap_or("unknown"), candidate.pairing_available, candidate.control_port.map(|p| p.to_string()).unwrap_or_else(|| "unknown".into()));
+        let pinned = store.as_ref().ok().and_then(|store| {
+            candidate
+                .advertised_node_id
+                .as_deref()
+                .and_then(|id| store.find_id(id))
+        });
+        println!(
+            "    Availability: discovered; live identity unverified\n    Trust: {}",
+            if pinned.is_some() {
+                "advertised ID matches a local pin; authentication still required"
+            } else {
+                "no verified trust from this advertisement"
+            }
+        );
+        if let Some(peer) = pinned {
+            println!(
+                "    Local control-this-node: {}",
+                peer.permissions.control_this_node
+            );
+            if let Some(position) = config.as_ref().and_then(|config| {
+                config
+                    .layout
+                    .topology()
+                    .into_iter()
+                    .find(|node| node.peer_id == peer.id)
+            }) {
+                println!("    Configured position: {}", position.coordinate());
+            }
+        }
+        if let Err(error) = &store {
+            println!("    Local trust state unavailable: {error}");
+        }
         if let Some((major, minor)) = candidate.input_version {
             println!("    Input protocol hint: {major}.{minor}");
         }
@@ -59,7 +106,7 @@ pub fn discover(args: &[String]) -> ExitCode {
             "Searching for UniversalKVM nodes for {} seconds...",
             DEFAULT_BROWSE.as_secs()
         );
-        match browse(interface).await {
+        match browse_all(interface).await {
             Ok(candidates) => {
                 print_candidates(&candidates);
                 if candidates.is_empty() {

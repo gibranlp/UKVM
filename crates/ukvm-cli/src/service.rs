@@ -78,7 +78,7 @@ fn write_unit(path: &Path, text: &str) -> Result<(), String> {
     }
     result.map_err(|e| e.to_string())
 }
-fn systemctl(args: &[&str]) -> Result<(), String> {
+pub(crate) fn systemctl(args: &[&str]) -> Result<(), String> {
     let status = Command::new("systemctl")
         .arg("--user")
         .args(args)
@@ -198,7 +198,7 @@ pub fn command(args: &[String]) -> ExitCode {
     }
 }
 /// Read-only manager state for `ukvm status`; a missing bus is reported, not fatal.
-pub fn summary() -> String {
+pub fn properties() -> Result<std::collections::BTreeMap<String, String>, String> {
     use std::{
         process::Stdio,
         time::{Duration, Instant},
@@ -216,7 +216,7 @@ pub fn summary() -> String {
         .spawn()
     {
         Ok(child) => child,
-        Err(error) => return format!("unavailable: {error}"),
+        Err(error) => return Err(format!("unavailable: {error}")),
     };
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -226,15 +226,28 @@ pub fn summary() -> String {
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return "unavailable (user manager query timed out/failed)".into();
+                return Err("unavailable (user manager query timed out/failed)".into());
             }
         }
     }
     match child.wait_with_output() {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .replace('\n', ", "),
-        _ => "unavailable (no loaded user unit or user manager)".into(),
+        Ok(output) if output.status.success() => Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()),
+        _ => Err("unavailable (no loaded user unit or user manager)".into()),
+    }
+}
+
+pub fn summary() -> String {
+    match properties() {
+        Ok(properties) => properties
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        Err(error) => error,
     }
 }
 

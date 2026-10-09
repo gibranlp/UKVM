@@ -4,6 +4,7 @@ mod daily;
 mod discovery;
 #[cfg(target_os = "linux")]
 mod install;
+mod management;
 mod network;
 mod pairing;
 #[cfg(target_os = "linux")]
@@ -18,11 +19,11 @@ Commands:\n\
   version   Show executable and protocol versions\n\
   config [path|check|show]  Inspect configuration\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
-  layout [place X Y PEER|remove-position X Y|set EDGE PEER|remove EDGE]  Inspect or edit layout\n\
+  layout [show|place X Y PEER|move PEER X Y|remove PEER] [--json]  Manage coordinate layout\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
-  doctor    Probe the current graphical session and portal capabilities\n\
+  doctor [--json]  Probe the current graphical session and portal capabilities\n\
   platform wayland zones               Request capture permission and list zones\n\
   platform wayland capture <edge> [zone] [--verbose]  Test local capture\n\
   platform wayland capture <edge> [zone] --send HOST --peer-cert PATH  Send to DebugSink\n\
@@ -32,23 +33,29 @@ Commands:\n\
   listen --remote [--bind ADDR] [--verbose]  Authorized RemoteDesktop/EIS input receiver\n\
   connect PEER [--peer-cert PATH] [--state-dir DIR]  Check peer connection\n\
   debug send-test-events HOST --peer-cert PATH  Send safe synthetic debug events\n\
-  status    Show node, runtime/service state, topology, peers and backend readiness\n\
-  peers     Show trusted pins, permissions and known availability\n\
+  unpair PEER [--yes]  Remove trust and topology placement\n\
+  apply     Validate and restart the managed service with saved configuration\n\
+  status [--json]  Show node, runtime/service state, topology, peers and backend readiness\n\
+  peers [--json]  Show trusted pins, permissions and known availability\n\
   service install [--verbose]|enable|start|stop|restart|status|disable|uninstall  Manage user service\n\
-  pair [HOST[:PORT]]  Temporarily pair (no input permission)\n\
+  service ACTION --json  Structured install/enable/disable/start/stop/restart/status\n\
+  pair [HOST[:PORT]] [--json]  Temporarily pair (no input permission)\n\
   pair --discover [--interface NAME]  Find and select a pairing node\n\
   pair --interface NAME [--debug]  Advertise pairing on one interface\n\
   pair --bind ADDR:PORT  Test with an explicit temporary pairing listener\n\
   pair status  Inspect pairing recovery records\n\
   pair recover [HOST[:PORT] [TRANSACTION_ID]]  Reconcile confirmed pairing\n\
   pair cleanup  Remove expired recovery records\n\
-  discover [--interface NAME]  Browse nearby pairing nodes for four seconds\n\
-  setup [--interface NAME] [--host HOST] [--debug]  Guide identity, trust, permissions, and layout\n\
+  discover [--interface NAME] [--json]  Browse nearby machines for four seconds\n\
+  setup [--interface NAME] [--host HOST] [--debug]  Guide identity, platform readiness, service, pairing, and layout\n\
   install [--prefix PATH] [--destdir PATH]  Install compiled binary and user-service assets\n\
   help      Show this help";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = management::dispatch(&args) {
+        return code;
+    }
     match args.as_slice() {
         [] => {
             println!("{HELP}");
@@ -73,7 +80,6 @@ fn main() -> ExitCode {
             fail("service/installation support currently requires Linux")
         }
         [command, rest @ ..] if command == "peer" => settings::peer(rest),
-        [command, rest @ ..] if command == "layout" => settings::layout(rest),
         [command, rest @ ..] if command == "pair" => pairing::pair(rest),
         [command, rest @ ..] if command == "discover" => discovery::discover(rest),
         [command, rest @ ..] if command == "setup" => setup::setup(rest),

@@ -279,7 +279,7 @@ pub fn pair(args: &[String]) -> ExitCode {
                 if !outcome.created {
                     println!("Existing trust record was preserved.");
                 }
-                println!("Remote input permissions remain denied. Set layout and permissions separately.");
+                println!("Local permissions: connect={} debug-input={} control-this-node={}. Configure layout and receiver permission separately.", outcome.peer.permissions.connect, outcome.peer.permissions.debug_input, outcome.peer.permissions.control_this_node);
                 ExitCode::SUCCESS
             }
             Err(e) => super::fail(&e),
@@ -582,5 +582,287 @@ mod tests {
             .unwrap()
             .find_id(&"0".repeat(64))
             .is_none());
+    }
+}
+
+fn json_event(event: &str, data: serde_json::Value) -> Result<(), String> {
+    println!(
+        "{}",
+        serde_json::json!({"schema_version": 1, "command": "pair", "event": event, "data": data})
+    );
+    io::stdout().flush().map_err(|e| e.to_string())
+}
+
+fn decode_confirmation(line: &str, offer: &PairOffer) -> Result<bool, String> {
+    let reply: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| format!("invalid pairing confirmation JSON: {e}"))?;
+    if reply["remote_node_id"] != offer.remote_id
+        || reply["verification_code"] != offer.verification_code
+    {
+        return Err("confirmation does not match the current peer and verification code".into());
+    }
+    reply["accept"]
+        .as_bool()
+        .ok_or_else(|| "confirmation requires a boolean accept field".into())
+}
+
+async fn confirm_json(offer: PairOffer) -> Result<bool, String> {
+    json_event(
+        "confirmation_required",
+        serde_json::json!({"remote_name": offer.remote_name, "remote_node_id": offer.remote_id, "address_hint": offer.address, "verification_code": offer.verification_code, "already_trusted_as": offer.already_trusted_as}),
+    )?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        use std::io::{BufRead, Read};
+        let mut line = String::new();
+        let result = io::stdin()
+            .lock()
+            .take(4097)
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())
+            .and_then(|count| {
+                if count == 0 {
+                    return Ok(false);
+                }
+                if count > 4096 || !line.ends_with('\n') {
+                    return Err("confirmation must be one JSON line of at most 4096 bytes".into());
+                }
+                decode_confirmation(&line, &offer)
+            });
+        let _ = sender.send(result);
+    });
+    receiver
+        .await
+        .map_err(|_| "pairing confirmation cancelled".to_string())?
+}
+
+pub(crate) fn pair_json(args: &[String]) -> ExitCode {
+    let result = (|| -> Result<_, String> {
+        if args.iter().filter(|a| a.as_str() == "--json").count() != 1 {
+            return Err("specify --json exactly once".into());
+        }
+        let mut plain = Vec::new();
+        let mut expected_id = None;
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            match arg.as_str() {
+                "--json" => {}
+                "--expected-node-id" if expected_id.is_none() => {
+                    let id = iter
+                        .next()
+                        .ok_or("--expected-node-id requires a full Node ID")?;
+                    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err("invalid expected Node ID".into());
+                    }
+                    expected_id = Some(id.to_ascii_lowercase());
+                }
+                _ => plain.push(arg.clone()),
+            }
+        }
+        let target = parse_target(&plain).map_err(str::to_string)?;
+        if matches!(target, Target::Discover(_)) {
+            return Err("use discover --json, select a pairing endpoint, then pair HOST --json --expected-node-id ID".into());
+        }
+        let config =
+            ukvm_config::load_or_default(&ukvm_config::default_path().map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let control_port = config
+            .network
+            .listen
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| e.to_string())?
+            .port();
+        let identity = Identity::load_or_create(&default_state_dir()?)?;
+        let trust_dir = default_trust_dir()?;
+        super::with_runtime(async move {
+            let task = async {
+                let mut registration = None;
+                let mut discovery = None;
+                let (stream, role) = match target {
+                    Target::Direct(host) => {
+                        let address = target_address(host)?;
+                        json_event(
+                            "connecting",
+                            serde_json::json!({"endpoint": address, "timeout_seconds": PAIRING_TIMEOUT_SECS}),
+                        )?;
+                        (
+                            tokio::net::TcpStream::connect(&address)
+                                .await
+                                .map_err(|e| format!("pairing connection: {e}"))?,
+                            PairRole::Initiator,
+                        )
+                    }
+                    Target::Listen {
+                        bind,
+                        interface,
+                        advertise,
+                        ..
+                    } => {
+                        let listener = tokio::net::TcpListener::bind(&bind)
+                            .await
+                            .map_err(|e| format!("pairing listener: {e}"))?;
+                        let endpoint = listener.local_addr().map_err(|e| e.to_string())?;
+                        if advertise {
+                            let advertisement = Advertisement {
+                                node_name: config.node.name.clone(),
+                                node_id: identity.id.clone(),
+                                pairing_port: endpoint.port(),
+                                control_port,
+                                pairing_available: true,
+                                pairing_version: PAIRING_VERSION,
+                                input_version: (
+                                    ukvm_protocol::PROTOCOL_MAJOR,
+                                    ukvm_protocol::PROTOCOL_MINOR,
+                                ),
+                            };
+                            match DiscoveryService::new(interface) {
+                                Ok(service) => match service.advertise(&advertisement).await {
+                                    Ok(guard) => {
+                                        registration = Some(guard);
+                                        discovery = Some(service);
+                                    }
+                                    Err(error) => json_event(
+                                        "discovery_unavailable",
+                                        serde_json::json!({"message": error, "direct_pairing_available": true}),
+                                    )?,
+                                },
+                                Err(error) => json_event(
+                                    "discovery_unavailable",
+                                    serde_json::json!({"message": error, "direct_pairing_available": true}),
+                                )?,
+                            }
+                        }
+                        json_event(
+                            "listening",
+                            serde_json::json!({"endpoint": endpoint.to_string(), "node_id": identity.id, "name": config.node.name, "discovery_available": registration.is_some(), "timeout_seconds": PAIRING_TIMEOUT_SECS}),
+                        )?;
+                        (
+                            listener.accept().await.map_err(|e| e.to_string())?.0,
+                            PairRole::Responder,
+                        )
+                    }
+                    Target::Discover(_) => unreachable!(),
+                };
+                let result = pair_stream(
+                    stream,
+                    role,
+                    &identity,
+                    &config.node.name,
+                    &trust_dir,
+                    move |offer| async move {
+                        if expected_id
+                            .as_deref()
+                            .is_some_and(|id| id != offer.remote_id)
+                        {
+                            return Err(
+                                "cryptographically proven peer differs from expected Node ID"
+                                    .into(),
+                            );
+                        }
+                        confirm_json(offer).await
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string());
+                drop(registration);
+                drop(discovery);
+                result
+            };
+            #[cfg(unix)]
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            let terminated = terminate.recv();
+            #[cfg(not(unix))]
+            let terminated = std::future::pending::<()>();
+            tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(PAIRING_TIMEOUT_SECS), task) => result.map_err(|_| "pairing expired; inspect pair status before retrying".to_string())?,
+                _ = tokio::signal::ctrl_c() => Err("pairing cancelled locally; inspect pair status before retrying".into()),
+                _ = terminated => Err("pairing terminated locally; inspect pair status before retrying".into()),
+            }
+        })
+    })();
+    let (ok, data, error) = match result {
+        Ok(outcome) => (
+            true,
+            serde_json::json!({"peer": outcome.peer, "created": outcome.created, "apply_command": "ukvm apply"}),
+            serde_json::Value::Null,
+        ),
+        Err(message) => (
+            false,
+            serde_json::Value::Null,
+            serde_json::json!({"code": "pairing_failed", "message": message}),
+        ),
+    };
+    println!(
+        "{}",
+        serde_json::json!({"schema_version": 1, "command": "pair", "event": "result", "ok": ok, "data": data, "error": error})
+    );
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod json_tests {
+    use super::*;
+    #[test]
+    fn confirmation_is_bounded_to_the_current_verified_peer_and_code() {
+        let offer = PairOffer {
+            remote_name: "io".into(),
+            remote_id: "a".repeat(64),
+            verification_code: "example-code".into(),
+            address: "127.0.0.1".into(),
+            already_trusted_as: None,
+        };
+        let reply = |accept: serde_json::Value, id: &str, code: &str| {
+            serde_json::json!({"accept": accept, "remote_node_id": id, "verification_code": code})
+                .to_string()
+        };
+        assert!(decode_confirmation(
+            &reply(
+                serde_json::json!(true),
+                &offer.remote_id,
+                &offer.verification_code
+            ),
+            &offer
+        )
+        .unwrap());
+        assert!(!decode_confirmation(
+            &reply(
+                serde_json::json!(false),
+                &offer.remote_id,
+                &offer.verification_code
+            ),
+            &offer
+        )
+        .unwrap());
+        assert!(decode_confirmation(
+            &reply(
+                serde_json::json!(true),
+                &"b".repeat(64),
+                &offer.verification_code
+            ),
+            &offer
+        )
+        .is_err());
+        assert!(decode_confirmation(
+            &reply(serde_json::json!(true), &offer.remote_id, "other-code"),
+            &offer
+        )
+        .is_err());
+        assert!(decode_confirmation(
+            &reply(
+                serde_json::json!("yes"),
+                &offer.remote_id,
+                &offer.verification_code
+            ),
+            &offer
+        )
+        .is_err());
+        assert!(decode_confirmation("{broken", &offer).is_err());
     }
 }

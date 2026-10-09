@@ -18,6 +18,7 @@ ukvm-network.workspace = true
 ukvm-platform.workspace = true
 ukvm-protocol.workspace = true
 toml = "0.8"
+serde_json = "1"
 
 [dependencies.tokio]
 version = "1"

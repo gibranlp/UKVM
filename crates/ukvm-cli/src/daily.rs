@@ -80,11 +80,22 @@ pub fn peers(args: &[String]) -> ExitCode {
         return super::fail("usage: ukvm peers");
     }
     match context() {
-        Ok((_, store)) => {
+        Ok((config, store)) => {
             print!(
                 "Trusted peers (local permissions; readiness never grants authorization)\n{}",
                 peer_lines(&store, &live())
             );
+            for node in config.layout.topology() {
+                println!(
+                    "Position {}: {} [{}]",
+                    node.coordinate(),
+                    store
+                        .find_id(&node.peer_id)
+                        .map(|p| p.alias.as_str())
+                        .unwrap_or("UNTRUSTED"),
+                    node.peer_id
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(error) => super::fail(&error),

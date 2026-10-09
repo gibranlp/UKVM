@@ -57,11 +57,32 @@ For the configured workflow, import and verify each other's public certificates 
 
 For the experimental real-input path, the controlled node must have a user-authorized RemoteDesktop v2/ConnectToEIS portal. It must explicitly allow the controller with `ukvm peer allow ALIAS control-this-node` and run `ukvm listen --remote --bind 0.0.0.0:24800 --verbose`; the controller runs `ukvm control right`. The receiver never falls back to DebugSink or privileged injection. The controller and receiver must use the same Input Protocol 1.3 build. The first authorized session asks for portal consent; a second physical session on the same listener reused that grant without a picker. A listener restart asks again because no restore token is stored. See the [trial, physical proof and rollback](docs/WAYLAND_INJECTION_TRIAL.md).
 
-For guided first-run configuration, run `ukvm setup` while the other node is in pairing mode; see [setup](docs/SETUP.md). As an alternative to manual certificate exchange, run `ukvm pair` on one node and `ukvm pair --discover` on the other. `ukvm discover` lists pairing candidates without connecting. Direct `ukvm pair HOST` remains available when multicast discovery is unavailable. Compare the same short verification code on both screens and confirm on both terminals. Pairing uses a temporary listener on TCP 24801 and creates the same pinned peer records with **both input permissions denied**. If the final exchange is interrupted, inspect `ukvm pair status` and use `ukvm pair recover` on the listener with `ukvm pair recover HOST [TRANSACTION_ID]` on the initiator. See [discovery](docs/DISCOVERY.md) and [pairing security and safe physical trial](docs/PAIRING.md). Manual `peer add` remains available.
+For guided first-run configuration, run `ukvm setup` to prepare identity, platform readiness and the user service, then optionally pair another node; see [setup](docs/SETUP.md). As an alternative to manual certificate exchange, run `ukvm pair` on one node and `ukvm pair --discover` on the other. `ukvm discover` lists pairing and running machines without authenticating them. Direct `ukvm pair HOST` remains available when multicast discovery is unavailable. Compare the same short verification code on both screens and confirm on both terminals. Pairing uses a temporary listener on TCP 24801 and creates the same pinned peer records with **both input permissions denied**. If the final exchange is interrupted, inspect `ukvm pair status` and use `ukvm pair recover` on the listener with `ukvm pair recover HOST [TRANSACTION_ID]` on the initiator. See [discovery](docs/DISCOVERY.md) and [pairing security and safe physical trial](docs/PAIRING.md). Manual `peer add` remains available.
+
+## Linux configuration and frontend integration
+
+M16 adds safe configuration commands without editing TOML:
+
+```sh
+ukvm peers
+ukvm layout show
+ukvm layout place 1 0 io
+ukvm layout move io -1 0
+ukvm apply
+ukvm status --json
+ukvm peers --json
+ukvm discover --json
+ukvm layout --json
+ukvm doctor --json
+```
+
+Use place for an empty coordinate and move for an existing peer. Coordinates remain cardinal distance 1–2, with an inner neighbor required for outer placements. `ukvm layout remove PEER` and `ukvm unpair PEER` require confirmation or explicit `--yes`; unpair removes local trust and topology, never remote trust. Permission inspection and changes remain explicit `ukvm peer permissions/allow/deny` commands. `apply` validates config and restarts the managed user service, preserving exclusive runtime ownership and normal portal consent.
+
+The [versioned frontend contract](docs/FRONTEND_CONTRACT.md) documents JSON health, machine/topology views, permissions, service actions, useful errors and interactive JSON Lines pairing. Readiness is separate from trust, input permission and portal consent. No SpectrumOS dependency/widget, macOS/Windows work or M17 is included. M16 physical acceptance is pending; M15's proven control/runtime lifecycle is retained.
 
 ## Design
 
-The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linux installation, a systemd user service and daily status/peers commands are available in M15; normal service operation, switching, single-instance protection and restart recovery are physically confirmed. Automatic service startup after logout/login is physically confirmed. The separate pinned development portal lifecycle fix awaits physical retesting; see [trial lifecycle](docs/WAYLAND_INJECTION_TRIAL.md#m15-logoutlogin-lifecycle-regression). See [service setup](docs/SERVICE.md). Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
+The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linux installation, a systemd user service and daily status/peers commands are available in M15; normal service operation, switching, single-instance protection and restart recovery are physically confirmed. Automatic service startup after logout/login is physically confirmed. The persistent pinned development portal lifecycle is physically validated through M15; see [trial lifecycle](docs/WAYLAND_INJECTION_TRIAL.md#m15-logoutlogin-lifecycle-regression). See [service setup](docs/SERVICE.md). Core policy, input backends, configuration, protocol types, transport and discovery are separate Rust crates. See [architecture](docs/ARCHITECTURE.md), [platform support](docs/PLATFORM_SUPPORT.md), [protocol](docs/PROTOCOL.md), [security](docs/SECURITY.md), [pairing](docs/PAIRING.md), [discovery](docs/DISCOVERY.md), [setup](docs/SETUP.md), and [roadmap](docs/ROADMAP.md).
 
 ## License
 

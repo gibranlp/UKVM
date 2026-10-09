@@ -31,13 +31,29 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
     let unit = base.join("lib/systemd/user/ukvm.service");
     let doc = base.join("share/doc/ukvm/SERVICE.md");
     let topology_doc = base.join("share/doc/ukvm/TOPOLOGY.md");
-    for path in [&binary, &unit, &doc, &topology_doc] {
+    let contract_doc = base.join("share/doc/ukvm/FRONTEND_CONTRACT.md");
+    let schema_doc = base.join("share/doc/ukvm/cli-schema-v1.json");
+    for path in [
+        &binary,
+        &unit,
+        &doc,
+        &topology_doc,
+        &contract_doc,
+        &schema_doc,
+    ] {
         fs::create_dir_all(path.parent().ok_or("invalid install path")?)
             .map_err(|e| e.to_string())?;
     }
     // Reject symlink destinations; publish the new executable atomically so a
     // running instance keeps its old inode until an explicit service restart.
-    for path in [&binary, &unit, &doc, &topology_doc] {
+    for path in [
+        &binary,
+        &unit,
+        &doc,
+        &topology_doc,
+        &contract_doc,
+        &schema_doc,
+    ] {
         if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
             return Err(format!(
                 "refusing non-regular install destination {}",
@@ -73,6 +89,16 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
     fs::write(&doc, include_str!("../../../docs/SERVICE.md")).map_err(|e| e.to_string())?;
     fs::write(&topology_doc, include_str!("../../../docs/TOPOLOGY.md"))
         .map_err(|e| e.to_string())?;
+    fs::write(
+        &contract_doc,
+        include_str!("../../../docs/FRONTEND_CONTRACT.md"),
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        &schema_doc,
+        include_str!("../../../docs/cli-schema-v1.json"),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(binary)
 }
 pub fn command(args: &[String]) -> ExitCode {
@@ -138,6 +164,18 @@ mod tests {
             fs::read_to_string(dir.path().join("usr/lib/systemd/user/ukvm.service")).unwrap();
         assert!(text.contains("ExecStart=:\"/usr/bin/ukvm\" service run"));
         assert!(dir.path().join("usr/share/doc/ukvm/SERVICE.md").exists());
+        assert!(dir
+            .path()
+            .join("usr/share/doc/ukvm/FRONTEND_CONTRACT.md")
+            .exists());
+        let schema: serde_json::Value = serde_json::from_slice(
+            &fs::read(dir.path().join("usr/share/doc/ukvm/cli-schema-v1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            schema["$defs"]["result"]["properties"]["schema_version"]["const"],
+            1
+        );
         assert!(stage(Path::new("/usr/../etc"), None).is_err());
         assert!(stage(Path::new("/usr"), Some(Path::new("relative"))).is_err());
     }

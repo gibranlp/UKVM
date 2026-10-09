@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     process::ExitCode,
 };
-use ukvm_config::{Config, Edge};
+use ukvm_config::Config;
 use ukvm_network::{
     identity::{certificate_id, default_state_dir},
     trust::{default_trust_dir, edit_lock, resolve_address, SessionPermission, TrustStore},
@@ -69,13 +69,6 @@ pub fn peer(args: &[String]) -> ExitCode {
                 let peer = store.find(name).ok_or("unknown peer")?;
                 println!("Peer: {}\nNode ID / SHA-256 fingerprint: {}\nAddress: {}\nCertificate: {}\nPermissions:\n  connect: {}\n  debug-input: {}\n  control-this-node: {}",peer.alias,peer.id,peer.address.as_deref().unwrap_or("none"),ukvm_network::trust::cert_path(&state,&peer.id).display(),peer.permissions.connect,peer.permissions.debug_input,peer.permissions.control_this_node);
             }
-            [command, name] if command == "remove" => {
-                let peer = store.find(name).ok_or("unknown peer")?.clone();
-                let (config_path, _, mut config, _) = context()?;
-                config.remove_peer_from_layout(&peer.id);
-                ukvm_config::save(&config_path,&config).map_err(|e| e.to_string())?;
-                store.remove(&state,name)?; println!("Removed peer {} and its layout links.",peer.alias);
-            }
             [command, name, permission_name] if command == "allow" || command == "deny" => { let p=permission(permission_name)?; store.set_permission(&state,name,p,command == "allow")?; println!("{} {} for {}",if command == "allow" { "Allowed" } else { "Denied" },permission_name,name); }
             [command, cert_path, rest @ ..] if command == "add" => {
                 let mut name=None; let mut address=None; let mut it=rest.iter();
@@ -92,85 +85,6 @@ pub fn peer(args: &[String]) -> ExitCode {
                 store.import(&state,name.clone(),address,&cert)?; println!("Peer '{name}' added.");
             }
             _ => return Err("usage: ukvm peer list|show NAME|permissions NAME|add CERT --name ALIAS [--address HOST]|remove NAME|allow NAME PERMISSION|deny NAME PERMISSION".into()),
-        }
-        Ok(())
-    })();
-    finish(result)
-}
-
-pub fn layout(args: &[String]) -> ExitCode {
-    let result = (|| -> Result<(), String> {
-        let _lock = edit_lock(&default_trust_dir()?)?;
-        let (path, _, mut config, store) = context()?;
-        match args {
-            [] => {
-                println!("UniversalKVM Layout\nThis node: {}", config.node.name);
-                for node in config.layout.topology() {
-                    let peer = store
-                        .find_id(&node.peer_id)
-                        .ok_or("layout references unknown peer")?;
-                    println!(
-                        "{}: {} [{}] ({})",
-                        node.coordinate(),
-                        peer.alias,
-                        peer.id,
-                        peer.address.as_deref().unwrap_or("discovery only")
-                    );
-                }
-            }
-            [command, x, y, name] if command == "place" => {
-                let x = x.parse().map_err(|_| "x must be an integer")?;
-                let y = y.parse().map_err(|_| "y must be an integer")?;
-                let peer = store.find(name).ok_or("unknown trusted peer")?;
-                let local_cert = default_state_dir()?.join("node.der");
-                if local_cert.exists()
-                    && certificate_id(&std::fs::read(local_cert).map_err(|e| e.to_string())?)
-                        == peer.id
-                {
-                    return Err("cannot place this node as its own remote peer".into());
-                }
-                config
-                    .set_position(x, y, peer.id.clone())
-                    .map_err(|e| e.to_string())?;
-                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
-                println!("({x},{y}): {} [{}]", peer.alias, peer.id);
-            }
-            [command, x, y] if command == "remove-position" => {
-                let x = x.parse().map_err(|_| "x must be an integer")?;
-                let y = y.parse().map_err(|_| "y must be an integer")?;
-                config.remove_position(x, y).map_err(|e| e.to_string())?;
-                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
-                println!("Removed ({x},{y}).");
-            }
-            [command, edge, name] if command == "set" => {
-                let edge = Edge::parse(edge)?;
-                let peer = store.find(name).ok_or("unknown peer")?;
-                if peer.address.is_none() {
-                    return Err("peer needs an address before being placed in layout".into());
-                }
-                let local_cert = default_state_dir()?.join("node.der");
-                if local_cert.exists()
-                    && certificate_id(&std::fs::read(local_cert).map_err(|e| e.to_string())?)
-                        == peer.id
-                {
-                    return Err("cannot link this node to itself".into());
-                }
-                config.set_link(edge, peer.id.clone());
-                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
-                println!("{}: {}", edge.as_str(), peer.alias);
-            }
-            [command, edge] if command == "remove" => {
-                let edge = Edge::parse(edge)?;
-                if !config.remove_link(edge) {
-                    return Err("no peer on that edge".into());
-                }
-                ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
-                println!("Removed {} layout link.", edge.as_str());
-            }
-            _ => return Err(
-                "usage: ukvm layout [place X Y PEER|remove-position X Y|set EDGE PEER|remove EDGE]"
-                    .into(),
-            ),
         }
         Ok(())
     })();

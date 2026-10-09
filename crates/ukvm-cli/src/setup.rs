@@ -23,7 +23,7 @@ use ukvm_network::{
 };
 
 const HELP: &str = "Usage: ukvm setup [--interface NAME] [--host HOST[:PORT]] [--debug]\n\
-Guide identity, discovery or direct host pairing, local permissions, and layout.\n\
+Guide identity, platform readiness, user service, pairing, permissions, and layout.\n\
 Discovery is untrusted; new trust requires Pairing Protocol 2 and code comparison on both computers.\n\
 No --yes option exists. Run interactively in a terminal.";
 
@@ -147,9 +147,9 @@ async fn run(options: Options) -> Result<(), String> {
         ukvm_config::save(&config_path, &config).map_err(|e| e.to_string())?;
     }
     println!(
-        "This computer:\n  Name: {}\n  Node ID: {}...\n  Public certificate: {}",
+        "This computer:\n  Name: {}\n  Node ID: {}\n  Public certificate: {}",
         config.node.name,
-        &identity.id[..12],
+        identity.id,
         identity.cert_path.display()
     );
     if options.debug {
@@ -160,7 +160,13 @@ async fn run(options: Options) -> Result<(), String> {
             trust_dir.display()
         );
     }
-    let addresses = ukvm_discovery::local_interface_addresses(options.interface.as_deref())?;
+    let addresses = match ukvm_discovery::local_interface_addresses(options.interface.as_deref()) {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            println!("Discovery interface unavailable: {error}. Direct pairing remains available.");
+            Vec::new()
+        }
+    };
     for address in &addresses {
         println!("  Network: {address}");
     }
@@ -172,8 +178,47 @@ async fn run(options: Options) -> Result<(), String> {
         if name.is_empty() {
             return Err("display name cannot be empty".into());
         }
+        let _lock = edit_lock(&trust_dir)?;
+        config = ukvm_config::load_or_default(&config_path).map_err(|e| e.to_string())?;
         config.node.name = name;
         ukvm_config::save(&config_path, &config).map_err(|e| e.to_string())?;
+    }
+    let capability = platform_capability().await;
+    println!(
+        "\nPlatform readiness (no consent requested):\n  Capture: {}\n  Injection: {}",
+        capability.capture, capability.injection
+    );
+    #[cfg(target_os = "linux")]
+    {
+        println!("\nUser service: {}", crate::service::summary());
+        if yes_no(
+            "Install/update the UKVM user service using this executable?",
+            false,
+        )? && crate::service::command(&["install".into()]) != ExitCode::SUCCESS
+        {
+            return Err(
+                "service installation failed; identity and existing trust were retained".into(),
+            );
+        }
+        if yes_no(
+            "Enable UKVM automatically for future graphical logins?",
+            false,
+        )? {
+            crate::service::systemctl(&["enable", "ukvm.service"])?;
+        }
+        if yes_no(
+            "Start/restart the managed UKVM service now (normal portal consent may appear)?",
+            false,
+        )? {
+            crate::management::apply_configuration()?;
+        }
+    }
+    println!("\nDiscovery readiness: {} eligible address(es). Pairing uses temporary port 24801 and requires comparing codes on both computers. A running UKVM service never enables pairing automatically.", addresses.len());
+    println!("To receive a pairing request here, run `ukvm pair` in another terminal. To connect here, put the other computer in pairing mode.");
+    if options.host.is_none() && !yes_no("Find/pair or configure another computer now?", false)? {
+        println!("\nLocal setup complete. No new peer trust was granted.");
+        setup_summary(&config, &trust_dir)?;
+        return Ok(());
     }
     let store = TrustStore::load(&trust_dir)?;
     let selection = select_peer(&options, &store, &identity).await?;
@@ -272,14 +317,8 @@ async fn run(options: Options) -> Result<(), String> {
     let capability = platform_capability().await;
     let edge = setup_model::current_edge(&config, &peer.id);
     println!("\nUniversalKVM setup complete.\n\nThis computer: {}\nPeer: {} ({})\nTrust: pinned{}\nLayout: {}\nLocal permissions for {}:\n  Connect: {}\n  Debug input to THIS computer: {}\n  Control THIS computer: {}\nPlatform:\n  Local capture: {}\n  Local injection: {}", config.node.name, peer.alias, peer.id, if live_verified { "; live identity verified" } else { "; live identity not verified this run" }, edge.map(|e| format!("{} -> {} -> {}", config.node.name, e.as_str(), peer.alias)).unwrap_or_else(|| "not configured".into()), peer.alias, peer.permissions.connect, peer.permissions.debug_input, peer.permissions.control_this_node, capability.capture, capability.injection);
-    println!("\nTo let this computer send DebugSink input to {}, configure permission on {}: `ukvm peer allow {} debug-input`, then run `ukvm listen` there.", peer.alias, peer.alias, config.node.name);
-    if let Some(edge) = edge {
-        println!(
-            "For the development DebugSink path here: `ukvm control {} --debug`.",
-            edge.as_str()
-        );
-    }
-    println!("Real remote input injection is not available through this setup flow; see `ukvm doctor` for current platform details.");
+    println!("\nRemote control requires control-this-node permission on the receiving computer and normal portal consent. Run `ukvm apply` to apply saved topology/name changes to the managed service.");
+    setup_summary(&config, &trust_dir)?;
     Ok(())
 }
 
@@ -554,11 +593,9 @@ fn configure_layout(config_path: &Path, trust_dir: &Path, peer: &Peer) -> Result
     }
     let occupied = config
         .layout
-        .links
-        .iter()
-        .find(|link| link.edge == edge && link.peer_id != peer.id);
-    let approved_occupant = occupied.map(|link| link.peer_id.clone());
-    let replace = if let Some(link) = occupied {
+        .adjacent_link(edge)
+        .filter(|link| link.peer_id != peer.id);
+    let replace = if let Some(link) = &occupied {
         let store = TrustStore::load(trust_dir)?;
         let name = store
             .find_id(&link.peer_id)
@@ -577,8 +614,41 @@ fn configure_layout(config_path: &Path, trust_dir: &Path, peer: &Peer) -> Result
     if occupied.is_some() && !replace {
         return Ok(config);
     }
+    let mut preview = config.clone();
+    setup_model::set_peer_edge(&mut preview, &peer.id, edge, replace)?;
+    let remaining = preview.layout.topology();
+    let removed: Vec<_> = config
+        .layout
+        .topology()
+        .into_iter()
+        .filter(|node| {
+            node.peer_id != peer.id && !remaining.iter().any(|next| next.peer_id == node.peer_id)
+        })
+        .collect();
+    if !removed.is_empty() {
+        let store = TrustStore::load(trust_dir)?;
+        let names = removed
+            .iter()
+            .map(|node| {
+                store
+                    .find_id(&node.peer_id)
+                    .map(|peer| peer.alias.as_str())
+                    .unwrap_or(node.peer_id.as_str())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        if !yes_no(&format!("This change removes topology placements for {names}; their trust is retained. Continue?"), false)? {
+            return Ok(config);
+        }
+    }
+    let approved_layout = config.layout.clone();
     let _lock = edit_lock(trust_dir)?;
     config = ukvm_config::load_or_default(config_path).map_err(|e| e.to_string())?;
+    if config.layout != approved_layout {
+        return Err(
+            "layout changed during confirmation; retry without replacing other placements".into(),
+        );
+    }
     let store = TrustStore::load(trust_dir)?;
     if store
         .find_id(&peer.id)
@@ -586,20 +656,6 @@ fn configure_layout(config_path: &Path, trust_dir: &Path, peer: &Peer) -> Result
         .is_none()
     {
         return Err("peer trust or address changed during layout setup; retry".into());
-    }
-    if replace {
-        let current = config
-            .layout
-            .links
-            .iter()
-            .find(|link| link.edge == edge && link.peer_id != peer.id)
-            .map(|link| &link.peer_id);
-        if current != approved_occupant.as_ref() {
-            return Err(
-                "layout edge changed after confirmation; retry without replacing another peer"
-                    .into(),
-            );
-        }
     }
     if setup_model::set_peer_edge(&mut config, &peer.id, edge, replace)? {
         ukvm_config::save(config_path, &config).map_err(|e| e.to_string())?;
@@ -615,16 +671,60 @@ fn configure_layout(config_path: &Path, trust_dir: &Path, peer: &Peer) -> Result
     Ok(config)
 }
 
+fn setup_summary(config: &Config, trust_dir: &Path) -> Result<(), String> {
+    println!(
+        "\nCurrent configuration: {}\nTrusted machines: {}\nConfigured positions: {}",
+        config.node.name,
+        TrustStore::load(trust_dir)?.peers.len(),
+        config.layout.topology().len()
+    );
+    #[cfg(target_os = "linux")]
+    println!("Service: {}", crate::service::summary());
+    println!("Inspect: ukvm status | ukvm peers | ukvm layout show | ukvm doctor\nApply saved changes: ukvm apply");
+    Ok(())
+}
+
 async fn platform_capability() -> setup_model::CapabilitySummary {
     #[cfg(target_os = "linux")]
     {
-        let probe = ukvm_platform::linux_wayland::probe().await;
-        let reason = if probe.remote.version.is_some() {
-            "UKVM Wayland injection backend is not implemented"
-        } else {
-            "RemoteDesktop portal unavailable on this session"
+        let probe = match tokio::time::timeout(
+            Duration::from_secs(5),
+            ukvm_platform::linux_wayland::probe(),
+        )
+        .await
+        {
+            Ok(probe) => probe,
+            Err(_) => {
+                return setup_model::capability_summary(
+                    false,
+                    false,
+                    "portal capability probe timed out",
+                )
+            }
         };
-        setup_model::capability_summary(probe.capture.pointer_advertised, false, reason)
+        let capture = probe.session.wayland_socket_reachable
+            && probe.capture.version.is_some()
+            && probe.capture.pointer_advertised
+            && probe.capture.keyboard_advertised;
+        let injection = probe.session.wayland_socket_reachable
+            && probe.remote.version.is_some_and(|version| version >= 2)
+            && probe.remote.pointer_advertised
+            && probe.remote.keyboard_advertised;
+        let mut summary = setup_model::capability_summary(
+            capture,
+            injection,
+            "RemoteDesktop v2 keyboard/pointer or native Wayland session unavailable",
+        );
+        if let Some(error) = probe.capture.error {
+            summary.capture.push_str(&format!("; {error}"));
+        }
+        if let Some(error) = probe.remote.error {
+            summary.injection.push_str(&format!("; {error}"));
+        }
+        if let Some(error) = probe.portal_error {
+            summary.capture.push_str(&format!("; {error}"));
+        }
+        summary
     }
     #[cfg(not(target_os = "linux"))]
     {

@@ -163,3 +163,7 @@ cargo build --workspace
 4. If no activation occurs, retain spectrum's lifecycle log and run `journalctl --user -u xdg-desktop-portal-hyprland -n 120 --no-pager`. A portal invalid-barrier error/restart confirms the backend blocker; do not count either segment as passed. With the currently inspected compositor, that failure remains expected until its validator is corrected.
 
 Automated regression tests cover the exact two negative-coordinate segments, inclusive endpoints, independent activation IDs and common edge fractions, unknown-ID refusal, backend disconnect details, portal Closed reasons, and cleanup from setup failure. No physical activation, ReturnControl or emergency-release success on these left segments is claimed in this investigation.
+
+## M16 configuration commands
+
+Use `ukvm layout [show]`, `layout place X Y PEER`, `layout move PEER X Y`, and `layout remove PEER`. Place rejects occupied coordinates and duplicate peers; move validates the resulting whole topology. Remove requires confirmation or explicit `--yes`. Remove outer placements first before moving/removing their inner neighbor. `layout --json` supplies local/remote coordinates and missing-trust issues for a frontend. `ukvm apply` validates disk configuration and restarts the managed user service, preserving runtime ownership and normal consent. No partial-barrier workaround is added. See [frontend contract](FRONTEND_CONTRACT.md).

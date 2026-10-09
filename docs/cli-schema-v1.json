@@ -1,0 +1,1259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UniversalKVM Linux CLI schema version 1",
+  "description": "Additive fields are allowed. See FRONTEND_CONTRACT.md for authorization, health and pairing semantics.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/pair_event"
+    }
+  ],
+  "$defs": {
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "connect": {
+          "type": "boolean"
+        },
+        "debug_input": {
+          "type": "boolean"
+        },
+        "control_this_node": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "connect",
+        "debug_input",
+        "control_this_node"
+      ],
+      "additionalProperties": true
+    },
+    "position": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "additionalProperties": true
+    },
+    "availability": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "online",
+            "offline",
+            "unavailable",
+            "unknown"
+          ]
+        },
+        "runtime_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "enum": [
+            "runtime_snapshot",
+            "none"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "runtime_state",
+        "source"
+      ],
+      "additionalProperties": true
+    },
+    "peer": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "trusted": {
+          "const": true
+        },
+        "permissions": {
+          "$ref": "#/$defs/permissions"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability": {
+          "$ref": "#/$defs/availability"
+        }
+      },
+      "required": [
+        "name",
+        "node_id",
+        "trusted",
+        "permissions",
+        "endpoint",
+        "position",
+        "availability"
+      ],
+      "additionalProperties": true
+    },
+    "node": {
+      "type": "object",
+      "properties": {
+        "local": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "x": {
+          "type": "integer"
+        },
+        "y": {
+          "type": "integer"
+        },
+        "trusted": {
+          "type": "boolean"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "local",
+        "name",
+        "node_id",
+        "x",
+        "y",
+        "trusted",
+        "endpoint"
+      ],
+      "additionalProperties": true
+    },
+    "layout": {
+      "type": "object",
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "node_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "node_id"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "coordinate_model": {
+          "const": "cardinal_distance_1_2"
+        },
+        "apply_command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodes",
+        "issues",
+        "valid",
+        "coordinate_model",
+        "apply_command"
+      ],
+      "additionalProperties": true
+    },
+    "layout_edit": {
+      "type": "object",
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "layout": {
+          "$ref": "#/$defs/layout"
+        },
+        "apply_required": {
+          "type": "boolean"
+        },
+        "apply_command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "changed",
+        "layout",
+        "apply_required",
+        "apply_command"
+      ],
+      "additionalProperties": true
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "load_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "active_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sub_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unit_file_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "main_pid": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "load_state",
+        "active_state",
+        "sub_state",
+        "unit_file_state",
+        "main_pid",
+        "error"
+      ],
+      "additionalProperties": true
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "running",
+            "stopped",
+            "owned_unknown",
+            "unknown",
+            "unsupported"
+          ]
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "pid": {
+                  "type": "integer"
+                },
+                "updated": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "node_id": {
+                  "type": "string"
+                },
+                "state": {
+                  "type": "string"
+                },
+                "focus": {
+                  "type": "string"
+                },
+                "active_peer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "active_coordinate": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "capture": {
+                  "type": "string"
+                },
+                "receiver": {
+                  "type": "string"
+                },
+                "peers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "coordinate": {
+                        "type": "string"
+                      },
+                      "availability": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "coordinate",
+                      "availability"
+                    ],
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "required": [
+                "pid",
+                "updated",
+                "name",
+                "node_id",
+                "state",
+                "focus",
+                "active_peer",
+                "active_coordinate",
+                "capture",
+                "receiver",
+                "peers"
+              ],
+              "additionalProperties": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freshness_seconds": {
+          "const": 5
+        }
+      },
+      "required": [
+        "state",
+        "snapshot",
+        "error",
+        "freshness_seconds"
+      ],
+      "additionalProperties": true
+    },
+    "status": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "node_id"
+          ],
+          "additionalProperties": true
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "service": {
+          "$ref": "#/$defs/service"
+        },
+        "peers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/peer"
+          }
+        },
+        "layout": {
+          "$ref": "#/$defs/layout"
+        },
+        "health": {
+          "type": "object",
+          "properties": {
+            "configuration_valid": {
+              "type": "boolean"
+            },
+            "identity_initialized": {
+              "type": "boolean"
+            },
+            "runtime_reporting": {
+              "type": "boolean"
+            },
+            "service_active": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "configuration_valid",
+            "identity_initialized",
+            "runtime_reporting",
+            "service_active"
+          ],
+          "additionalProperties": true
+        },
+        "configuration": {
+          "type": "object",
+          "properties": {
+            "apply_command": {
+              "type": "string"
+            },
+            "loaded_at": {
+              "const": "runtime_start"
+            },
+            "disk_matches_runtime": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "apply_command",
+            "loaded_at",
+            "disk_matches_runtime"
+          ],
+          "additionalProperties": true
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "node",
+        "runtime",
+        "service",
+        "peers",
+        "layout",
+        "health",
+        "configuration",
+        "limitations"
+      ],
+      "additionalProperties": true
+    },
+    "portal_interface": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "keyboard_advertised": {
+          "type": "boolean"
+        },
+        "pointer_advertised": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "keyboard_advertised",
+        "pointer_advertised",
+        "error"
+      ],
+      "additionalProperties": true
+    },
+    "doctor": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "const": "linux"
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "type_hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "desktop_hint": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wayland_display": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "wayland_socket_reachable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type_hint",
+            "desktop_hint",
+            "wayland_display",
+            "wayland_socket_reachable"
+          ],
+          "additionalProperties": true
+        },
+        "portal": {
+          "type": "object",
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "error": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "error"
+          ],
+          "additionalProperties": true
+        },
+        "input_capture": {
+          "$ref": "#/$defs/portal_interface"
+        },
+        "remote_desktop": {
+          "$ref": "#/$defs/portal_interface"
+        },
+        "connect_to_eis_available": {
+          "type": "boolean"
+        },
+        "consent_requested": {
+          "const": false
+        },
+        "authorization": {
+          "const": "not_tested"
+        },
+        "physical_input": {
+          "const": "not_tested"
+        },
+        "limitations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "os",
+        "session",
+        "portal",
+        "input_capture",
+        "remote_desktop",
+        "connect_to_eis_available",
+        "consent_requested",
+        "authorization",
+        "physical_input",
+        "limitations"
+      ],
+      "additionalProperties": true
+    },
+    "discovery_machine": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "advertised_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service_instance": {
+          "type": "string"
+        },
+        "addresses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "control_port": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pairing_available": {
+          "type": "boolean"
+        },
+        "pairing_version": {
+          "type": "integer"
+        },
+        "input_version": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "untrusted_hint": {
+          "const": true
+        },
+        "matches_trusted_id": {
+          "type": "boolean"
+        },
+        "local_permissions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/permissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configured_position": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/position"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "availability": {
+          "const": "discovered_unverified"
+        }
+      },
+      "required": [
+        "name",
+        "advertised_node_id",
+        "service_instance",
+        "addresses",
+        "control_port",
+        "pairing_available",
+        "pairing_version",
+        "input_version",
+        "untrusted_hint",
+        "matches_trusted_id",
+        "local_permissions",
+        "configured_position",
+        "availability"
+      ],
+      "additionalProperties": true
+    },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "operation_failed",
+            "pairing_failed"
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": true
+    },
+    "result": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "command": {
+          "enum": [
+            "status",
+            "peers",
+            "discover",
+            "layout",
+            "doctor",
+            "peer",
+            "unpair",
+            "apply",
+            "service",
+            "pair"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "data": {},
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/error"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event": {
+          "const": "result"
+        }
+      },
+      "required": [
+        "schema_version",
+        "command",
+        "ok",
+        "data",
+        "error"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": false
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "null"
+              },
+              "error": {
+                "$ref": "#/$defs/error"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "status"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/status"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "peers"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "peers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/peer"
+                    }
+                  }
+                },
+                "required": [
+                  "peers"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "discover"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "machines": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/discovery_machine"
+                    }
+                  },
+                  "browse_seconds": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "machines",
+                  "browse_seconds"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "doctor"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/doctor"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "layout"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/layout"
+                  },
+                  {
+                    "$ref": "#/$defs/layout_edit"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "apply"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "applied": {
+                    "type": "boolean"
+                  },
+                  "mechanism": {
+                    "const": "user_service_restart"
+                  },
+                  "consent_may_be_required": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "applied",
+                  "mechanism",
+                  "consent_may_be_required"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "service"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/service"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string"
+                      },
+                      "service": {
+                        "$ref": "#/$defs/service"
+                      }
+                    },
+                    "required": [
+                      "action",
+                      "service"
+                    ],
+                    "additionalProperties": true
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "unpair"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "removed_node_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "apply_required": {
+                    "type": "boolean"
+                  },
+                  "apply_command": {
+                    "type": "string"
+                  },
+                  "remote_trust_removed": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "removed_node_id",
+                  "name",
+                  "apply_required",
+                  "apply_command",
+                  "remote_trust_removed"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "pair_event": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "command": {
+          "const": "pair"
+        },
+        "event": {
+          "enum": [
+            "connecting",
+            "listening",
+            "discovery_unavailable",
+            "confirmation_required"
+          ]
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "schema_version",
+        "command",
+        "event",
+        "data"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "connecting"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  },
+                  "timeout_seconds": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "endpoint",
+                  "timeout_seconds"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "listening"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "endpoint": {
+                    "type": "string"
+                  },
+                  "node_id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "discovery_available": {
+                    "type": "boolean"
+                  },
+                  "timeout_seconds": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "endpoint",
+                  "node_id",
+                  "name",
+                  "discovery_available",
+                  "timeout_seconds"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "discovery_unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "message": {
+                    "type": "string"
+                  },
+                  "direct_pairing_available": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "message",
+                  "direct_pairing_available"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "confirmation_required"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "type": "object",
+                "properties": {
+                  "remote_name": {
+                    "type": "string"
+                  },
+                  "remote_node_id": {
+                    "type": "string"
+                  },
+                  "address_hint": {
+                    "type": "string"
+                  },
+                  "verification_code": {
+                    "type": "string"
+                  },
+                  "already_trusted_as": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "remote_name",
+                  "remote_node_id",
+                  "address_hint",
+                  "verification_code",
+                  "already_trusted_as"
+                ],
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

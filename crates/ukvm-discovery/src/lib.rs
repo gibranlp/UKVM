@@ -41,9 +41,12 @@ impl Advertisement {
         {
             return Err("invalid discovery advertisement".into());
         }
-        // The DNS-SD instance and host are stable within a node identity. The
-        // configured display name stays a TXT *hint*, never a DNS identity.
-        let instance = format!("ukvm-{}", &self.node_id[..16]);
+        // La ceremonia temporal necesita otro nombre DNS-SD para coexistir con el servicio activo.
+        let instance = format!(
+            "ukvm-{}{}",
+            &self.node_id[..16],
+            if self.pairing_available { "-pair" } else { "" }
+        );
         let hostname = format!("{instance}.local.");
         let name = truncate_utf8(&self.node_name, 120);
         let pair = self.pairing_version.to_string();
@@ -445,6 +448,34 @@ mod tests {
         )
         .unwrap()
         .as_resolved_service()
+    }
+
+    #[test]
+    fn temporary_pairing_and_persistent_runtime_have_distinct_dns_sd_instances() {
+        let mut advertisement = Advertisement {
+            node_name: "io".into(),
+            node_id: "a".repeat(64),
+            pairing_port: 24801,
+            control_port: 24800,
+            pairing_version: 2,
+            pairing_available: false,
+            input_version: (1, 3),
+        };
+        let runtime = advertisement.service_info().unwrap();
+        assert_eq!(
+            runtime.get_fullname(),
+            "ukvm-aaaaaaaaaaaaaaaa._ukvm._tcp.local."
+        );
+        advertisement.pairing_available = true;
+        let pairing = advertisement.service_info().unwrap();
+        assert_ne!(runtime.get_fullname(), pairing.get_fullname());
+        assert_ne!(runtime.get_hostname(), pairing.get_hostname());
+        assert_eq!(
+            runtime.get_property_val_str("id"),
+            pairing.get_property_val_str("id")
+        );
+        assert_eq!(runtime.get_property_val_str("mode"), Some("control"));
+        assert_eq!(pairing.get_property_val_str("mode"), Some("pairing"));
     }
 
     #[test]
