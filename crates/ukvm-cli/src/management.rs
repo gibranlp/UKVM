@@ -183,6 +183,7 @@ fn layout(config: &Config, store: &TrustStore) -> Value {
 fn execute(command: &str, args: &[String]) -> Result<Value, String> {
     match command {
         "doctor" if args.is_empty() => doctor(),
+        "setup" => initialize_local(args),
         "pair" if args == ["status"] => {
             let dir = default_trust_dir()?;
             let records: Vec<_> = ukvm_network::pairing_state::list(&dir)?.into_iter().map(|record| {
@@ -215,6 +216,34 @@ fn execute(command: &str, args: &[String]) -> Result<Value, String> {
     }
 }
 
+fn initialize_local(args: &[String]) -> Result<Value, String> {
+    let name = match args {
+        [local] if local == "--local" => None,
+        [local, flag, name] if local == "--local" && flag == "--name" => Some(name),
+        _ => return Err("usage: ukvm setup --local [--name NAME] --json; local identity/configuration only, never pairing, consent or service activation".into()),
+    };
+    let _lock = edit_lock(&default_trust_dir()?)?;
+    let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
+    let mut config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
+    let mut changed = !path.exists();
+    if let Some(name) = name {
+        changed |= config.node.name != *name;
+        config.node.name = name.clone();
+    }
+    config.validate().map_err(|e| e.to_string())?;
+    let initialized = identity()?.is_none();
+    let identity = ukvm_network::identity::Identity::load_or_create(&default_state_dir()?)?;
+    if changed {
+        ukvm_config::save(&path, &config).map_err(|e| e.to_string())?;
+    }
+    Ok(
+        json!({"node": {"name": config.node.name, "node_id": identity.id},
+        "initialized": initialized, "configuration_changed": changed,
+        "apply_required": initialized || changed, "apply_command": "ukvm apply",
+        "consent_requested": false, "service_started": false, "trust_changed": false}),
+    )
+}
+
 pub fn doctor() -> Result<Value, String> {
     #[cfg(target_os = "linux")]
     {
@@ -227,8 +256,24 @@ pub fn doctor() -> Result<Value, String> {
         })
         .map_err(|_| "portal capability probe timed out")?;
         let interface = |p: &ukvm_platform::linux_wayland::InterfaceProbe| json!({"version": p.version, "keyboard_advertised": p.keyboard_advertised, "pointer_advertised": p.pointer_advertised, "error": p.error});
+        let backend_state = if !report.portal_service
+            || report.capture.version.is_none()
+            || report.remote.version.is_none()
+        {
+            "backend_missing"
+        } else if report.capture.version.unwrap_or(0) < 1
+            || report.remote.version.unwrap_or(0) < 2
+            || !report.capture.keyboard_advertised
+            || !report.capture.pointer_advertised
+            || !report.remote.keyboard_advertised
+            || !report.remote.pointer_advertised
+        {
+            "incompatible_backend"
+        } else {
+            "backend_ready"
+        };
         Ok(
-            json!({"os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
+            json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
         )
     }
     #[cfg(not(target_os = "linux"))]

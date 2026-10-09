@@ -1,6 +1,6 @@
 # Linux management CLI contract — schema version 1
 
-M16 adds Linux configuration and management UX over the existing M15 runtime. A frontend invokes the installed `ukvm` executable as the logged-in user with an argument array, inherits that user's graphical/XDG environment, and parses JSON. It never edits config, certificates, trust, runtime snapshots or systemd files itself. UKVM has no SpectrumOS dependency. No widget, macOS/Windows work, input-protocol change or M17 feature is included.
+M16 adds Linux configuration and management UX over the existing M15 runtime. A frontend invokes the installed `ukvm` executable as the logged-in user with an argument array, inherits that user's graphical/XDG environment, and parses JSON. It never edits config, certificates, trust, runtime snapshots or systemd files itself. UKVM has no SpectrumOS dependency. M18 adds local-only initialization and backend classification without changing trust, pairing or input protocols.
 
 ## Framing, compatibility and errors
 
@@ -18,6 +18,7 @@ Version 1 permits additive fields; ignore unknown fields and handle unknown enum
 
 | Purpose | Argument array after `ukvm` | Result data |
 | --- | --- | --- |
+| Local initialization | `setup --local [--name NAME] --json` | `node`, `initialized`, `configuration_changed`, `apply_required`, `apply_command`, `consent_requested: false`, `service_started: false`, `trust_changed: false` |
 | Health/config/runtime | `status --json` | `node`, `runtime`, `service`, `peers`, `layout`, `health`, `configuration`, `limitations` |
 | Trusted machines | `peers --json` | `peers` array |
 | LAN discovery | `discover --json [--interface NAME]` | `machines` array, `browse_seconds` (4) |
@@ -80,3 +81,11 @@ Use `accept: false` for rejection. Both identity and code must match this curren
 `apply` validates config/trust and restarts only the installed user service through the existing current-session start path. It refuses a foreground/unknown owner rather than launching a second runtime. A fresh runtime snapshot must match the manager's MainPID before an owned runtime is treated as service-managed. The permanent-inode ownership lock remains the final exclusion guard. No signal reload, polling config writer, portal restart workaround or shell-profile hook is introduced. Restart closes active control and normal consent may be requested again. `applied` records successful restart submission/completion from systemd, not proof of portal consent; re-query health afterward. Enable/disable affect future login; start/stop affect the current service. Service commands are explicit user actions, never a consequence of read-only widget refresh.
 
 Automated tests use isolated profiles, private pairing TCP endpoints/buses and systemctl doubles. They exercise structured reads/errors, missing trust, topology failures without writes, code-bound approval/rejection, permission scope, unpair confirmation, service errors, apply/ownership refusal, and local-only setup in a pseudo-terminal. The existing M15 runtime/login/trial regressions remain in the full suite. Physical M16 acceptance is still required on spectrum/io: inspect JSON, run setup while retaining existing trust/placement, make and revert a layout edit with apply, confirm normal control/ReturnControl, and verify logout/login. Do not create a new identity or unpair the proven machines solely to test destructive UI actions; use separate profiles for new pairing/unpair tests. M17 is unstarted.
+
+## M18 local setup and backend readiness
+
+`setup --local --json` is an explicit local write operation, suitable for a first-run button. It validates preferences before creating an identity, preserves existing identity, trust, permission and topology, and is idempotent. Optional `--name` validates 1–63 printable characters and renames only this computer. It never pairs, grants permission, requests portal consent, installs/enables/starts a service or restarts a running instance. A failure after identity creation can leave that identity initialized; re-query status and retry. Serialize this operation with other mutations. Normal `setup` remains the interactive terminal guide. `--yes` is not accepted for either setup form.
+
+`doctor --json` adds `backend_state`: `backend_missing` (portal/interface absent), `incompatible_backend` (interface version/device capabilities insufficient), or `backend_ready` (InputCapture v1+, RemoteDesktop v2+, keyboard and pointer advertised). This is capability readiness, **not** a consent grant or proof of delivered input. `authorization: not_tested` remains authoritative. Frontends should show service failures separately and explain that starting/restarting may require approving the desktop's portal dialog. Do not classify permission denial by parsing diagnostic prose.
+
+The optional `ukvm-portal-session` executable is a distro-integration helper for managed Hyprland portal units; it shares session validation with the development trial. It is not a widget API, input runtime, permission broker or general portal-restart command. See [LINUX_PRODUCTION.md](LINUX_PRODUCTION.md).

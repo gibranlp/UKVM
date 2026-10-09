@@ -25,7 +25,8 @@ use ukvm_network::{
 const HELP: &str = "Usage: ukvm setup [--interface NAME] [--host HOST[:PORT]] [--debug]\n\
 Guide identity, platform readiness, user service, pairing, permissions, and layout.\n\
 Discovery is untrusted; new trust requires Pairing Protocol 2 and code comparison on both computers.\n\
-No --yes option exists. Run interactively in a terminal.";
+For a frontend: ukvm setup --local [--name NAME] --json initializes only local identity/preferences.\n\
+No --yes option exists. Run the full guide interactively in a terminal.";
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct Options {

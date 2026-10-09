@@ -1,4 +1,4 @@
-//! Development-only lifecycle checks for the pinned Hyprland portal trial.
+//! Session-bound lifecycle checks for managed Hyprland portals.
 use super::{service_environment, ServiceEnvironment, SESSION_ENV};
 use std::{os::unix::process::CommandExt, process::Command, time::Duration};
 
@@ -7,7 +7,7 @@ async fn environment() -> Result<ServiceEnvironment, String> {
     if env.get("XDG_CURRENT_DESKTOP").map(String::as_str) != Some("Hyprland")
         || !env.contains_key("HYPRLAND_INSTANCE_SIGNATURE")
     {
-        return Err("the portal trial requires one current native Hyprland instance".into());
+        return Err("managed Hyprland portals require one current native Hyprland instance".into());
     }
     Ok(env)
 }
@@ -21,7 +21,7 @@ fn verify_process_environment(bytes: &[u8], env: &ServiceEnvironment) -> Result<
     ] {
         let expected = format!(
             "{key}={}",
-            env.get(key).ok_or("incomplete trial environment")?
+            env.get(key).ok_or("incomplete portal environment")?
         );
         if !bytes
             .split(|b| *b == 0)
@@ -94,7 +94,7 @@ pub async fn prepare_environment() -> Result<(), String> {
         Ok(())
     })
     .await
-    .map_err(|_| "trial graphical environment preparation timed out".to_string())?
+    .map_err(|_| "portal graphical environment preparation timed out".to_string())?
 }
 
 async fn interfaces(
@@ -164,18 +164,18 @@ pub async fn check(backend: bool) -> Result<(), String> {
         ready(&environment().await?, backend).await
     })
     .await
-    .map_err(|_| "trial portal readiness query timed out".to_string())?
+    .map_err(|_| "portal readiness query timed out".to_string())?
 }
 
 pub async fn launch(binary: &str, backend: bool) -> Result<(), String> {
     if !std::path::Path::new(binary).is_absolute() {
-        return Err("trial portal executable must be absolute".into());
+        return Err("portal executable must be absolute".into());
     }
     let env = environment().await?;
     if !backend {
         tokio::time::timeout(Duration::from_secs(5), ready(&env, true))
             .await
-            .map_err(|_| "trial backend readiness query timed out".to_string())??;
+            .map_err(|_| "portal backend readiness query timed out".to_string())??;
     }
     let mut command = Command::new(binary);
     for key in SESSION_ENV {
@@ -183,7 +183,7 @@ pub async fn launch(binary: &str, backend: bool) -> Result<(), String> {
     }
     // libwayland prefiere este FD heredado sobre WAYLAND_DISPLAY; no reutilizarlo.
     command.env_remove("WAYLAND_SOCKET").envs(env);
-    Err(format!("cannot execute trial portal: {}", command.exec()))
+    Err(format!("cannot execute portal: {}", command.exec()))
 }
 
 #[cfg(test)]

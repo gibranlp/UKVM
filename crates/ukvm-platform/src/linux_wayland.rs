@@ -18,7 +18,8 @@ use ukvm_protocol::{EdgePosition, InputEvent, KeyCode};
 
 mod geometry;
 mod pointer_position;
-pub mod portal_trial;
+pub mod portal_session;
+pub use portal_session as portal_trial;
 mod rearm;
 mod return_edge;
 mod service_session;

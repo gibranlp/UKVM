@@ -620,6 +620,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "backend_state": {
+          "enum": [
+            "backend_ready",
+            "backend_missing",
+            "incompatible_backend"
+          ]
         }
       },
       "required": [
@@ -765,7 +772,8 @@
             "unpair",
             "apply",
             "service",
-            "pair"
+            "pair",
+            "setup"
           ]
         },
         "ok": {
@@ -1078,6 +1086,25 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "ok": {
+                "const": true
+              },
+              "command": {
+                "const": "setup"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/local_setup"
+              }
+            }
+          }
         }
       ]
     },
@@ -1254,6 +1281,50 @@
           }
         }
       ]
+    },
+    "local_setup": {
+      "type": "object",
+      "properties": {
+        "node": {
+          "type": "object",
+          "required": [
+            "name",
+            "node_id"
+          ]
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "configuration_changed": {
+          "type": "boolean"
+        },
+        "apply_required": {
+          "type": "boolean"
+        },
+        "apply_command": {
+          "const": "ukvm apply"
+        },
+        "consent_requested": {
+          "const": false
+        },
+        "service_started": {
+          "const": false
+        },
+        "trust_changed": {
+          "const": false
+        }
+      },
+      "required": [
+        "node",
+        "initialized",
+        "configuration_changed",
+        "apply_required",
+        "apply_command",
+        "consent_requested",
+        "service_started",
+        "trust_changed"
+      ],
+      "additionalProperties": true
     }
   }
 }

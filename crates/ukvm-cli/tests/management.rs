@@ -424,3 +424,75 @@ fn setup_can_finish_local_preparation_without_a_peer_or_portal() {
     assert!(log.contains("--user enable ukvm.service"));
     assert!(!log.contains("--user restart ukvm.service"));
 }
+
+#[test]
+fn local_setup_initializes_without_trust_consent_or_service_and_is_idempotent() {
+    let profile = Profile::new();
+    let first = profile.json(&["setup", "--local", "--name", "My workstation"], true);
+    assert_eq!(first["data"]["initialized"], true);
+    assert_eq!(first["data"]["consent_requested"], false);
+    assert_eq!(first["data"]["service_started"], false);
+    assert_eq!(first["data"]["trust_changed"], false);
+    let id = first["data"]["node"]["node_id"].clone();
+    assert_eq!(id.as_str().unwrap().len(), 64);
+    assert!(!profile.dir.path().join("systemctl.log").exists());
+    let bytes = profile.configuration();
+    let again = profile.json(&["setup", "--local"], true);
+    assert_eq!(again["data"]["node"]["node_id"], id);
+    assert_eq!(again["data"]["configuration_changed"], false);
+    assert_eq!(again["data"]["apply_required"], false);
+    assert_eq!(profile.configuration(), bytes);
+}
+
+#[test]
+fn local_setup_preserves_trust_permissions_and_topology_when_renaming() {
+    let profile = Profile::new();
+    profile.json(&["setup", "--local"], true);
+    let id = profile.add_peer("Existing peer");
+    profile.json(&["layout", "place", "1", "0", &id], true);
+    profile.json(&["peer", "allow", &id, "control-this-node"], true);
+    let before = profile.json(&["peers"], true);
+    profile.json(&["setup", "--local", "--name", "Renamed"], true);
+    assert_eq!(profile.json(&["peers"], true), before);
+}
+
+#[test]
+fn local_setup_rejects_invalid_names_and_pairing_flags_before_writes() {
+    let profile = Profile::new();
+    for args in [
+        vec!["setup", "--local", "--name", ""],
+        vec!["setup", "--local", "--name", "bad\nname"],
+        vec!["setup", "--local", "--yes"],
+        vec!["setup"],
+    ] {
+        profile.json(&args, false);
+    }
+    assert!(!profile.dir.path().join("data/ukvm/node.der").exists());
+    assert!(!profile.dir.path().join("config/ukvm/config.toml").exists());
+}
+
+#[test]
+fn packaged_portal_launcher_refuses_unready_session_without_executing_portal() {
+    let profile = Profile::new();
+    for action in ["backend", "frontend", "check-backend", "check-frontend"] {
+        let mut command = profile.command();
+        command = {
+            let mut helper = Command::new(env!("CARGO_BIN_EXE_ukvm-portal-session"));
+            helper.envs(
+                command
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            );
+            helper.env_remove("WAYLAND_DISPLAY");
+            helper
+        };
+        command.arg(action);
+        if action == "backend" || action == "frontend" {
+            command.arg("/bin/true");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(75));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Portal not ready"));
+    }
+}
