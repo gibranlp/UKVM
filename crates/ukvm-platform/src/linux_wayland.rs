@@ -278,7 +278,7 @@ impl CaptureSession {
             .map_err(|e| e.to_string())?;
         let mut authorization = authorization::Authorization::begin(
             authorization::Kind::InputCapture,
-            authorization::Context::current(portal.version()),
+            authorization::Context::on_bus(&bus, portal.version()).await?,
         )?;
         let requested = CaptureFlags::Keyboard | CaptureFlags::Pointer;
         let (session, flags) = if portal.version() >= 2 {

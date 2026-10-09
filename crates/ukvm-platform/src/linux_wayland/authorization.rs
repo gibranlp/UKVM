@@ -30,6 +30,7 @@ pub struct Context {
     version: u32,
 }
 impl Context {
+    #[cfg(test)]
     pub fn current(version: u32) -> Self {
         Self {
             desktop: std::env::var("XDG_CURRENT_DESKTOP")
@@ -38,6 +39,87 @@ impl Context {
             version,
         }
     }
+
+    pub async fn on_bus(bus: &zbus::Connection, version: u32) -> Result<Self, String> {
+        let daemon = zbus::Proxy::new(
+            bus,
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        )
+        .await
+        .map_err(|_| "cannot identify the active desktop portal")?;
+        let owner: String = daemon
+            .call("GetNameOwner", &("org.freedesktop.portal.Desktop",))
+            .await
+            .map_err(|_| "desktop portal is not running")?;
+        let pid: u32 = daemon
+            .call("GetConnectionUnixProcessID", &(&owner,))
+            .await
+            .map_err(|_| "cannot identify desktop portal process")?;
+        let uid: u32 = daemon
+            .call("GetConnectionUnixUser", &(&owner,))
+            .await
+            .map_err(|_| "cannot verify desktop portal owner")?;
+        if uid != rustix::process::getuid().as_raw() {
+            return Err("desktop portal must belong to the current user".into());
+        }
+        let mut bytes = Vec::new();
+        File::open(format!("/proc/{pid}/environ"))
+            .and_then(|file| file.take(1_048_577).read_to_end(&mut bytes))
+            .map_err(|_| "cannot inspect desktop portal context")?;
+        if bytes.len() > 1_048_576 {
+            return Err("desktop portal context exceeds size limit".into());
+        }
+        let desktop = portal_desktop(&bytes)?;
+        let current_owner: String = daemon
+            .call("GetNameOwner", &("org.freedesktop.portal.Desktop",))
+            .await
+            .map_err(|_| "desktop portal disappeared during context validation")?;
+        if current_owner != owner {
+            return Err("desktop portal changed during context validation; retry".into());
+        }
+        Ok(Self { desktop, version })
+    }
+}
+
+// Se usa el entorno del portal que eligió el backend, nunca el de la terminal o del servicio cliente.
+fn portal_desktop(bytes: &[u8]) -> Result<String, String> {
+    let desktop = bytes
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(b"XDG_CURRENT_DESKTOP="))
+        .and_then(|value| std::str::from_utf8(value).ok())
+        .ok_or("desktop portal has no valid desktop identity")?;
+    let names: Vec<String> = desktop
+        .split(':')
+        .map(|name| name.trim().to_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    if names.is_empty() || names.iter().any(|name| name.chars().any(char::is_control)) {
+        return Err("desktop portal has no valid desktop identity".into());
+    }
+    Ok(names.join(":"))
+}
+
+fn observed_context(version: u32) -> Option<Context> {
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .ok()?
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    let bus = zbus::Connection::session().await.ok()?;
+                    Context::on_bus(&bus, version).await.ok()
+                })
+                .await
+                .ok()
+                .flatten()
+            })
+    })
+    .join()
+    .ok()
+    .flatten()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +151,7 @@ pub struct Status {
     pub remembered: bool,
     pub persistence_api_supported: Option<bool>,
     pub reason: Reason,
+    pub context_verified: bool,
 }
 
 pub fn directory() -> Result<PathBuf, String> {
@@ -286,6 +369,7 @@ fn status_in(dir: &Path, kind: Kind, version: Option<u32>) -> Result<Status, Str
         remembered: false,
         persistence_api_supported: supported,
         reason,
+        context_verified: false,
     };
     if !private_directory(dir, false)? {
         return Ok(missing(Reason::Missing));
@@ -294,8 +378,12 @@ fn status_in(dir: &Path, kind: Kind, version: Option<u32>) -> Result<Status, Str
     let Some(record) = record else {
         return Ok(missing(reason));
     };
-    let context = Context::current(version.unwrap_or(record.context.version));
-    if record.context != context {
+    let context = observed_context(version.unwrap_or(record.context.version));
+    if context
+        .as_ref()
+        .is_some_and(|context| record.context != *context)
+        || version.is_some_and(|version| record.context.version != version)
+    {
         return Ok(missing(Reason::BackendChanged));
     }
     if supported == Some(false) {
@@ -327,6 +415,7 @@ fn status_in(dir: &Path, kind: Kind, version: Option<u32>) -> Result<Status, Str
         remembered,
         persistence_api_supported: supported.or(Some(record.context.version >= 2)),
         reason: record.reason,
+        context_verified: context.is_some(),
     })
 }
 
@@ -504,5 +593,171 @@ mod tests {
             Authorization::begin_in(&dir, Kind::InputCapture, Context::current(3)).unwrap();
         assert!(attempt.restore_token().is_none());
         assert_eq!(attempt.record.reason, Reason::BackendChanged);
+    }
+
+    struct Process(std::process::Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    #[test]
+    fn portal_context_process_fixture() {
+        let Ok(role) = std::env::var("UKVM_CONTEXT_TEST_ROLE") else {
+            return;
+        };
+        if role == "status" {
+            println!(
+                "STATUS:{}",
+                serde_json::to_string(&status(Kind::RemoteDesktop, None).unwrap()).unwrap()
+            );
+            return;
+        }
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let _portal = zbus::connection::Builder::session()
+                    .unwrap()
+                    .name("org.freedesktop.portal.Desktop")
+                    .unwrap()
+                    .build()
+                    .await
+                    .unwrap();
+                println!("READY");
+                std::io::stdout().flush().unwrap();
+                tokio::task::spawn_blocking(|| {
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input).unwrap();
+                })
+                .await
+                .unwrap();
+            });
+    }
+    fn portal_process(address: &str, desktop: &str) -> Process {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "linux_wayland::authorization::tests::portal_context_process_fixture",
+                "--nocapture",
+            ])
+            .env("UKVM_CONTEXT_TEST_ROLE", "portal")
+            .env("DBUS_SESSION_BUS_ADDRESS", address)
+            .env("XDG_CURRENT_DESKTOP", desktop)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        loop {
+            assert!(reader.read_line(&mut line).unwrap() > 0);
+            if line.contains("READY") {
+                break;
+            }
+            line.clear();
+        }
+        Process(child)
+    }
+    #[test]
+    fn same_session_service_approval_is_visible_from_different_cli_environments() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let (tmp, dir) = fixture();
+        let mut bus = Command::new("dbus-daemon")
+            .args(["--session", "--nofork", "--print-address=1"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut address = String::new();
+        BufReader::new(bus.stdout.take().unwrap())
+            .read_line(&mut address)
+            .unwrap();
+        let _bus = Process(bus);
+        let address = address.trim();
+        let portal = portal_process(address, "Hyprland");
+        let context_on_bus = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let bus = zbus::connection::Builder::address(address)
+                        .unwrap()
+                        .build()
+                        .await
+                        .unwrap();
+                    Context::on_bus(&bus, 2).await.unwrap()
+                })
+        };
+        let context = context_on_bus();
+        assert_eq!(context.desktop, "hyprland");
+        let query = |desktop: Option<&str>| {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "linux_wayland::authorization::tests::portal_context_process_fixture",
+                    "--nocapture",
+                ])
+                .env("UKVM_CONTEXT_TEST_ROLE", "status")
+                .env("DBUS_SESSION_BUS_ADDRESS", address)
+                .env("XDG_STATE_HOME", tmp.path());
+            if let Some(desktop) = desktop {
+                command.env("XDG_CURRENT_DESKTOP", desktop);
+            } else {
+                command.env_remove("XDG_CURRENT_DESKTOP");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            assert!(!text.contains("private-remembered-token"));
+            serde_json::from_str::<serde_json::Value>(
+                text.lines()
+                    .find_map(|line| line.strip_prefix("STATUS:"))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let mut approved =
+            Authorization::begin_in(&dir, Kind::RemoteDesktop, context.clone()).unwrap();
+        approved.granted(Some("private-remembered-token")).unwrap();
+        for desktop in [None, Some(""), Some("SpectrumOS:Hyprland"), Some("KDE")] {
+            let status = query(desktop);
+            assert_eq!(status["state"], "persistent");
+            assert_eq!(status["remembered"], true);
+            assert_eq!(status["active"], true);
+            assert_eq!(status["context_verified"], true);
+        }
+        drop(approved);
+        drop(portal);
+        let portal = portal_process(address, "Hyprland");
+        assert!(context_on_bus() == context);
+        let restored =
+            Authorization::begin_in(&dir, Kind::RemoteDesktop, context_on_bus()).unwrap();
+        assert_eq!(restored.restore_token(), Some("private-remembered-token"));
+        drop(restored);
+        drop(portal);
+        let _portal = portal_process(address, "KDE");
+        assert_eq!(query(Some("Hyprland"))["reason"], "backend_changed");
+        let changed = Authorization::begin_in(&dir, Kind::RemoteDesktop, context_on_bus()).unwrap();
+        assert!(changed.restore_token().is_none());
+    }
+    #[test]
+    fn portal_desktop_identity_excludes_volatile_and_unrelated_environment() {
+        let first = portal_desktop(b"XDG_CURRENT_DESKTOP=Hyprland\0WAYLAND_DISPLAY=wayland-1\0HYPRLAND_INSTANCE_SIGNATURE=old\0").unwrap();
+        let reboot = portal_desktop(b"WAYLAND_DISPLAY=wayland-8\0XDG_CURRENT_DESKTOP=HYPRLAND\0HYPRLAND_INSTANCE_SIGNATURE=new\0").unwrap();
+        assert_eq!(first, reboot);
+        assert_ne!(first, portal_desktop(b"XDG_CURRENT_DESKTOP=KDE\0").unwrap());
+        assert!(portal_desktop(b"XDG_CURRENT_DESKTOP=\0").is_err());
+        assert!(portal_desktop(b"WAYLAND_DISPLAY=wayland-1\0").is_err());
     }
 }

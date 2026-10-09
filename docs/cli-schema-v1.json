@@ -1407,6 +1407,9 @@
             "string",
             "null"
           ]
+        },
+        "context_verified": {
+          "type": "boolean"
         }
       },
       "required": [

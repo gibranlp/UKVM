@@ -371,7 +371,9 @@ impl PortalEisSession {
         let mut pending = PendingPortalSession(Some(session));
         let mut authorization = super::authorization::Authorization::begin(
             super::authorization::Kind::RemoteDesktop,
-            super::authorization::Context::current(portal.version()),
+            super::authorization::Context::on_bus(portal.connection(), portal.version())
+                .await
+                .map_err(PlatformError::Backend)?,
         )
         .map_err(PlatformError::Backend)?;
         let result = async {
