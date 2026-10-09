@@ -74,3 +74,7 @@ clipboard/history remains user-visible and may retain already shared text.
 Native data-control uses the compositor's sanctioned clipboard-manager interface,
 never input injection APIs, root, XWayland or portal-security bypasses.
 See [CLIPBOARD.md](CLIPBOARD.md).
+
+## M20 files
+
+File Protocol 1 runs on a separate pinned mutual-TLS ALPN channel, never discovery. `receive-files` defaults off and requires connection permission independently of clipboard/control. Per-write/finalization shared policy locks and bounded live checks make revocation fail closed. Private staging, descriptor-relative no-follow filesystem operations, portable component validation, exclusive creates, streamed SHA-256 verification and atomic no-replace batch publication prevent path escape and silent collisions. No special files, permissions/ownership/executable bits or command execution are transferred. Payloads/digests are absent from diagnostics and JSON. See FILE_TRANSFER.md for exact bounds, disk checks and interrupted/uncertain receipt behavior.

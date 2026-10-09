@@ -279,3 +279,8 @@ mod topology_tests {
         .is_err());
     }
 }
+
+pub mod files;
+
+#[cfg(all(test, target_os = "linux"))]
+mod file_tests;

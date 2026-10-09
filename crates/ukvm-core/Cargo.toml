@@ -7,3 +7,5 @@ rust-version.workspace = true
 
 [dependencies]
 ukvm-protocol.workspace = true
+
+serde = { version = "1", features = ["derive"] }

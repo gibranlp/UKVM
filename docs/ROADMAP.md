@@ -28,3 +28,5 @@ This sequence is directional, not a release commitment.
 17. **SpectrumOS frontend (physically validated):** independent native configuration widget using the versioned CLI contract.
 18. **Linux/Hyprland production integration (physically accepted):** managed portal/UKVM packages, graphical-session lifecycle and official persistent RemoteDesktop authorization. Windows/macOS remain unstarted.
 19. **Plain-text clipboard (implemented; physical acceptance pending):** separate opt-in permission, pinned encrypted Clipboard Protocol 1, native Wayland data-control, safe status and SpectrumOS frontend controls. See [clipboard acceptance](CLIPBOARD.md).
+
+M20 secure file transfer is implemented for Linux with automated protocol/storage/frontend validation; two-machine physical acceptance remains pending. M18 Linux control/persistence and M19 clipboard physical acceptance were confirmed by the user. Windows/macOS are not started. See FILE_TRANSFER.md.

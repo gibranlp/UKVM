@@ -24,4 +24,5 @@ ukvm-core.workspace = true
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+ukvm-platform.workspace = true
 tempfile = "3"

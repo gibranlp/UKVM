@@ -15,6 +15,14 @@ pub struct Config {
     pub network: Network,
     #[serde(default)]
     pub layout: Layout,
+    #[serde(default)]
+    pub file_transfer: FileTransfer,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileTransfer {
+    pub receive_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -290,12 +298,23 @@ impl Default for Config {
             },
             network: Network::default(),
             layout: Layout::default(),
+            file_transfer: FileTransfer::default(),
         }
     }
 }
 
 impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if self
+            .file_transfer
+            .receive_directory
+            .as_ref()
+            .is_some_and(|p| !std::path::Path::new(p).is_absolute() || p.contains('\0'))
+        {
+            return Err(ConfigError::Invalid(
+                "file_transfer.receive_directory must be an absolute local path".into(),
+            ));
+        }
         if !valid_name(&self.node.name) {
             return Err(ConfigError::Invalid(
                 "node.name must be 1-63 printable characters".into(),
@@ -396,7 +415,15 @@ pub fn save(path: &Path, config: &Config) -> Result<(), ConfigError> {
         .parent()
         .ok_or_else(|| ConfigError::Invalid("config path has no parent".into()))?;
     fs::create_dir_all(parent).map_err(ConfigError::Io)?;
-    let source = toml::to_string_pretty(config).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+    let mut value =
+        toml::Value::try_from(config).map_err(|e| ConfigError::Invalid(e.to_string()))?;
+    if config.file_transfer == FileTransfer::default() {
+        value
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::Invalid("invalid configuration table".into()))?
+            .remove("file_transfer");
+    }
+    let source = toml::to_string_pretty(&value).map_err(|e| ConfigError::Invalid(e.to_string()))?;
     let temp = parent.join(format!(
         ".config-{}-{}.tmp",
         std::process::id(),

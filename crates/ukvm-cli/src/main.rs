@@ -3,6 +3,7 @@ use std::process::ExitCode;
 mod authorization;
 mod daily;
 mod discovery;
+mod files;
 #[cfg(target_os = "linux")]
 mod install;
 mod management;
@@ -22,6 +23,8 @@ Commands:\n\
   peer list|show|add|remove|permissions|allow|deny  Manage trusted peers\n\
   layout [show|place X Y PEER|move PEER X Y|remove PEER] [--json]  Manage coordinate layout\n\
   peer allow|deny PEER share-clipboard  Opt-in bilateral text sharing (both nodes)\n\
+  send PATH... PEER [--json]  Explicit encrypted file/folder transfer\n\
+  files status|directory [PATH]|cancel ID [--json]  File transfer status and settings\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
@@ -56,6 +59,9 @@ Commands:\n\
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = files::dispatch(&args) {
+        return code;
+    }
     if let Some(code) = management::dispatch(&args) {
         return code;
     }

@@ -154,6 +154,7 @@ mod tests {
             permissions: Permissions {
                 connect: true,
                 share_clipboard: false,
+                receive_files: false,
                 debug_input: false,
                 control_this_node: false,
             },

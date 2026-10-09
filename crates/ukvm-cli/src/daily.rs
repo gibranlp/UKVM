@@ -72,8 +72,8 @@ fn peer_lines(store: &TrustStore, live: &Live) -> String {
     if store.peers.is_empty() {
         return "No trusted peers.\n".into();
     }
-    store.peers.iter().map(|peer| format!("{}  pinned={}  connect={} debug-input={} control-this-node={} share-clipboard={}  availability={}  address={}\n",
-        peer.alias, peer.id, peer.permissions.connect, peer.permissions.debug_input, peer.permissions.control_this_node, peer.permissions.share_clipboard,
+    store.peers.iter().map(|peer| format!("{}  pinned={}  connect={} debug-input={} control-this-node={} share-clipboard={} receive-files={}  availability={}  address={}\n",
+        peer.alias, peer.id, peer.permissions.connect, peer.permissions.debug_input, peer.permissions.control_this_node, peer.permissions.share_clipboard, peer.permissions.receive_files,
         live.states.get(&peer.id).map(String::as_str).unwrap_or("unknown (no fresh configured runtime observation)"),
         peer.address.as_deref().unwrap_or("none"))).collect()
 }
@@ -231,6 +231,7 @@ mod tests {
             permissions: Permissions {
                 connect: true,
                 share_clipboard: false,
+                receive_files: false,
                 debug_input: false,
                 control_this_node: true,
             },

@@ -30,6 +30,8 @@ pub struct RuntimeSnapshot {
     pub receiver: String,
     pub peers: Vec<PeerStatus>,
     #[serde(default)]
+    pub file_protocol_version: Option<u16>,
+    #[serde(default)]
     pub clipboard: crate::wayland::clipboard::ClipboardStatus,
 }
 #[derive(Debug)]

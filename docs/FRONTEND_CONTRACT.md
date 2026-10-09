@@ -126,3 +126,15 @@ Frontends should explain sensitive text sharing, confirm grants explicitly, disp
 its separate per-peer switch, and never request/parse clipboard contents. Ignore
 unknown/additional schema fields and disable clipboard actions on older UKVM versions.
 See [CLIPBOARD.md](CLIPBOARD.md) for protocol, lifecycle and physical acceptance.
+
+## M20 file transfer (additive schema v1)
+
+Peer `permissions.receive_files` is a boolean, default false, independent of input and clipboard. `peer allow|deny PEER receive-files --json` returns the authoritative permissions and `apply_required:false`; changes take effect immediately. A known running pre-M20 runtime must be restarted before enabling file receiving.
+
+`status --json` adds `data.files`; `files status --json` returns the same object: `supported`, `protocol_version:1`, `state` (`available` or `restart_required`; unsupported on unimplemented OS), `receive_directory`, `max_chunk_bytes`, `max_entries`, `bytes_per_second`, and `transfers`. Receive availability additionally requires the normal runtime/service health. Transfers contain `id`, `peer_id`, `peer_name`, `direction` (`send`/`receive`), `name`, `state`, `bytes`, `total_bytes`, `entries`, Unix-second `started`/`updated`, nullable final basename `destination`, and nullable safe `error`. States: `preparing`, `connecting`, `transferring`, `verifying`, `completed`, `failed`, `cancelled`, `interrupted`. History is bounded to 64. No contents/hashes appear in this API.
+
+`send PATH... PEER --json` accepts 1–64 literal local paths (no shell needed). It emits JSONL with schema_version 1, command `send`, event `started` or `progress`, data containing the transfer record; then exactly one event `result` with normal `ok/data/error` envelope. Success data: `id`, receiver-selected basename `destination`, `bytes`. Nonzero exit is failure; incomplete result means unconfirmed receipt. Frontends must inspect receiver history before retrying an uncertain finalization. Pairing's separate code-bound approval protocol is unchanged.
+
+`files cancel ID --json` accepts only a known active 32-character lowercase hex ID and returns `cancellation_requested:true`, not a guarantee that a concurrently finalizing transfer was undone. `files directory ABSOLUTE_PATH --json` saves a receive root and returns `apply_required:true`; use the existing Apply flow. `files directory --json` reports the current configured/default receive root. Frontends must not modify config/history/permission files directly. Picker file URLs must be decoded to local paths by the frontend bridge; remote URL schemes are not transfer inputs. A future drop-on-peer action can invoke exactly this same send API.
+
+See [FILE_TRANSFER.md](FILE_TRANSFER.md) for storage, limits, lifecycle and physical acceptance.

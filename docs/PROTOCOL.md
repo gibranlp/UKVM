@@ -43,3 +43,7 @@ maximum UTF-8 text is 65,536 bytes. Input Protocol 1.3 and Pairing Protocol 2 ar
 unchanged. Old nodes fail closed on clipboard ALPN while normal input remains compatible.
 Clipboard trust/permissions are separately enforced on both nodes; frames never enter
 the input receiver or discovery. See [CLIPBOARD.md](CLIPBOARD.md) for encoding and lifecycle.
+
+## File Protocol 1
+
+Independent ALPN `ukvm-files/1`, pinned mutual TLS, bounded Hello/Offer/Accepted/Rejected, indexed 64 KiB Chunk/Ack, FileEnd(size,SHA-256), Complete/Result and Cancel. Portable UTF-8 path component arrays; no platform paths/MIME extensions interpreted. Input and clipboard versions remain unchanged. Older nodes retain their input/clipboard behavior and reject unsupported file channels. See FILE_TRANSFER.md for framing and limits.

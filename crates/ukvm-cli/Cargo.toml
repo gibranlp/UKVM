@@ -11,6 +11,7 @@ name = "ukvm"
 path = "src/main.rs"
 
 [dependencies]
+ukvm-core.workspace = true
 ukvm-config.workspace = true
 ukvm-runtime.workspace = true
 ukvm-discovery.workspace = true

@@ -19,7 +19,9 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
             command.as_str(),
             "layout" | "unpair" | "apply" | "authorization"
         )
-        && !(command == "peer" && args.get(1).is_some_and(|a| a == "remove"))
+        && !(command == "peer"
+            && (args.get(1).is_some_and(|a| a == "remove")
+                || args.get(3).is_some_and(|a| a == "receive-files")))
     {
         return None;
     }
@@ -229,7 +231,7 @@ fn execute(command: &str, args: &[String]) -> Result<Value, String> {
                 return Ok(json!({"peers": peers}));
             }
             Ok(
-                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "clipboard": clipboard_status(&store, &runtime), "desktop_authorization": super::authorization::status(None, None), "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
+                json!({"node": {"name": config.node.name, "node_id": identity()?}, "runtime": runtime, "service": service, "peers": peers, "layout": layout(&config, &store), "health": {"configuration_valid": layout(&config, &store)["valid"], "identity_initialized": identity()?.is_some(), "runtime_reporting": runtime["state"] == "running", "service_active": service["active_state"] == "active"}, "clipboard": clipboard_status(&store, &runtime), "files": super::files::status_data()?, "desktop_authorization": super::authorization::status(None, None), "configuration": {"apply_command": "ukvm apply", "loaded_at": "runtime_start", "disk_matches_runtime": null}, "limitations": ["hyprland_partial_external_edge_barriers"]}),
             )
         }
         "layout" => edit_layout(args),
@@ -472,7 +474,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
                 (action, name, permission)
             }
             _ => return Err(
-                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node|share-clipboard [--json]"
+                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node|share-clipboard|receive-files [--json]"
                     .into(),
             ),
         };
@@ -481,6 +483,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
         "debug-input" => SessionPermission::DebugInput,
         "control-this-node" => SessionPermission::ControlThisNode,
         "share-clipboard" => SessionPermission::ShareClipboard,
+        "receive-files" => SessionPermission::ReceiveFiles,
         _ => return Err("unknown permission".into()),
     };
     if permission == SessionPermission::ShareClipboard {
@@ -489,12 +492,18 @@ fn permission(args: &[String]) -> Result<Value, String> {
             return Err("Restart UKVM to load M19 before changing clipboard permissions".into());
         }
     }
+    if permission == SessionPermission::ReceiveFiles {
+        let live = runtime();
+        if live["state"] == "running" && live["snapshot"]["file_protocol_version"] != json!(1) {
+            return Err("Restart UKVM to load M20 before changing file permissions".into());
+        }
+    }
     let _lock = edit_lock(&default_trust_dir()?)?;
     let mut store = TrustStore::load(&default_trust_dir()?)?;
     store.set_permission(&default_trust_dir()?, name, permission, action == "allow")?;
     let peer = store.find(name).ok_or("peer disappeared")?;
     Ok(
-        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_required": permission != SessionPermission::ShareClipboard, "apply_command": if permission == SessionPermission::ShareClipboard { Value::Null } else { json!("ukvm apply") }}),
+        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_required": !matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles), "apply_command": if matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles) { Value::Null } else { json!("ukvm apply") }}),
     )
 }
 

@@ -47,6 +47,14 @@ pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
 }
 
 pub fn clipboard_guard(dir: &Path, id: &str) -> Result<fs::File, String> {
+    permission_guard(dir, id, SessionPermission::ShareClipboard)
+}
+
+pub fn permission_guard(
+    dir: &Path,
+    id: &str,
+    permission: SessionPermission,
+) -> Result<fs::File, String> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
@@ -59,7 +67,7 @@ pub fn clipboard_guard(dir: &Path, id: &str) -> Result<fs::File, String> {
         .map_err(|_| "clipboard policy unavailable".to_string())?;
     fs2::FileExt::try_lock_shared(&guard)
         .map_err(|_| "clipboard policy edit in progress".to_string())?;
-    TrustStore::load(dir)?.authorize(id, SessionPermission::ShareClipboard)?;
+    TrustStore::load(dir)?.authorize(id, permission)?;
     Ok(guard)
 }
 
@@ -74,6 +82,8 @@ pub struct Permissions {
     pub control_this_node: bool,
     #[serde(default)]
     pub share_clipboard: bool,
+    #[serde(default)]
+    pub receive_files: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -99,6 +109,7 @@ pub enum SessionPermission {
     DebugInput,
     ControlThisNode,
     ShareClipboard,
+    ReceiveFiles,
 }
 
 impl TrustStore {
@@ -156,6 +167,9 @@ impl TrustStore {
             .find_id(id)
             .ok_or("authenticated peer is not trusted")?;
         let allowed = match permission {
+            SessionPermission::ReceiveFiles => {
+                peer.permissions.connect && peer.permissions.receive_files
+            }
             SessionPermission::ShareClipboard => {
                 peer.permissions.connect && peer.permissions.share_clipboard
             }
@@ -242,6 +256,7 @@ impl TrustStore {
             .ok_or("unknown peer")?;
         match permission {
             SessionPermission::ShareClipboard => peer.permissions.share_clipboard = allowed,
+            SessionPermission::ReceiveFiles => peer.permissions.receive_files = allowed,
             SessionPermission::Connect => peer.permissions.connect = allowed,
             SessionPermission::DebugInput => peer.permissions.debug_input = allowed,
             SessionPermission::ControlThisNode => peer.permissions.control_this_node = allowed,
@@ -277,9 +292,23 @@ impl TrustStore {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         private_dir(dir)?;
         self.validate(dir)?;
+        let mut value = toml::Value::try_from(self).map_err(|e| e.to_string())?;
+        // El valor falso se omite para que una actualización sin permisos nuevos siga siendo legible por M19.
+        if let Some(peers) = value.get_mut("peers").and_then(toml::Value::as_array_mut) {
+            for peer in peers {
+                if let Some(permissions) = peer
+                    .get_mut("permissions")
+                    .and_then(toml::Value::as_table_mut)
+                {
+                    if permissions.get("receive_files") == Some(&toml::Value::Boolean(false)) {
+                        permissions.remove("receive_files");
+                    }
+                }
+            }
+        }
         atomic_write(
             &dir.join("peers.toml"),
-            toml::to_string_pretty(self)
+            toml::to_string_pretty(&value)
                 .map_err(|e| e.to_string())?
                 .as_bytes(),
         )

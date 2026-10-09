@@ -99,3 +99,5 @@ The CLI calls the reusable `ukvm-runtime` library for foreground operation; Linu
 Licensed under [MIT](LICENSE).
 
 Persistent desktop authorization on supported Linux portals is documented in [PORTAL_PERSISTENCE.md](docs/PORTAL_PERSISTENCE.md). Inspect safe state with `ukvm authorization status`; explicitly forget remembered approval with `ukvm authorization reset`. Peer trust and control permissions remain separate. Unattended physical acceptance of this persistence change is pending.
+
+M20 adds explicitly authorized Linux file/folder transfers: `ukvm send PATH... PEER`, per-peer `receive-files`, bounded private receive history and SpectrumOS file/folder controls. Transfers use separate pinned TLS streams and atomic digest-verified publication. [File transfer](docs/FILE_TRANSFER.md) documents security, defaults and pending physical acceptance. M18 control/persistence and M19 clipboard are user-confirmed accepted; Windows/macOS remain unimplemented.

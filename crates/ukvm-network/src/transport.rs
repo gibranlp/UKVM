@@ -198,6 +198,10 @@ pub async fn accept_remote_trusted<S: InputSink>(
 }
 
 pub enum RuntimeConnection {
+    Files {
+        stream: TlsStream<TcpStream>,
+        peer_id: String,
+    },
     Input(Connection),
     Clipboard {
         stream: TlsStream<TcpStream>,
@@ -219,7 +223,7 @@ pub async fn accept_runtime(
         .map(|p| load_peer_certificate(&cert_path(state_dir, &p.id)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut config = (*server_config_many(identity, certificates)?).clone();
-    config.alpn_protocols = vec![crate::clipboard::ALPN.to_vec()];
+    config.alpn_protocols = vec![crate::clipboard::ALPN.to_vec(), crate::files::ALPN.to_vec()];
     tcp.set_nodelay(true).map_err(|e| e.to_string())?;
     let tls = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
@@ -229,6 +233,17 @@ pub async fn accept_runtime(
     .map_err(|_| "TLS handshake timed out".to_string())?
     .map_err(|_| "TLS peer authentication failed".to_string())?;
     let mut stream = TlsStream::from(tls);
+    if stream.get_ref().1.alpn_protocol() == Some(crate::files::ALPN) {
+        let certificate = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .ok_or("TLS peer certificate missing")?;
+        let peer_id = certificate_id(certificate.as_ref());
+        store.authorize(&peer_id, SessionPermission::Connect)?;
+        return Ok(RuntimeConnection::Files { stream, peer_id });
+    }
     if stream.get_ref().1.alpn_protocol() == Some(crate::clipboard::ALPN) {
         let certificate = stream
             .get_ref()

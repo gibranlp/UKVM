@@ -65,6 +65,7 @@ impl Fixture {
         let context = Context {
             clipboard: clipboard::Clipboard::new(&local.id).unwrap(),
             config: Config {
+                file_transfer: Default::default(),
                 node: ukvm_config::Node {
                     name: "local".into(),
                     role: ukvm_config::ConfigRole::Both,

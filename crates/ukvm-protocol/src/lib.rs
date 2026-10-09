@@ -194,3 +194,5 @@ mod tests {
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 2, minor: 0 }));
     }
 }
+
+pub mod files;

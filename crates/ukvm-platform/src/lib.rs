@@ -568,3 +568,5 @@ mod injector_tests {
         assert_eq!(closes.load(Ordering::SeqCst), 1);
     }
 }
+
+pub mod files;

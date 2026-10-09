@@ -763,6 +763,124 @@ fn older_running_runtime_requires_restart_before_clipboard_permission_edits() {
         profile.json(&["peers"], true)["data"]["peers"][0]["permissions"]["share_clipboard"],
         false
     );
+    assert_eq!(
+        profile.json(&["files", "status"], true)["data"]["state"],
+        "restart_required"
+    );
+    profile.json(&["peer", "allow", "io", "receive-files"], false);
+    assert_eq!(
+        profile.json(&["peers"], true)["data"]["peers"][0]["permissions"]["receive_files"],
+        false
+    );
     holder.stdin.take();
     holder.wait().unwrap();
+}
+#[test]
+fn files_default_deny_live_permission_private_status_and_directory_apply() {
+    let p = Profile::new();
+    p.add_peer("recipient");
+    let status = p.json(&["status"], true);
+    assert_eq!(
+        status["data"]["peers"][0]["permissions"]["receive_files"],
+        false
+    );
+    let changed = p.json(&["peer", "allow", "recipient", "receive-files"], true);
+    assert_eq!(changed["data"]["permissions"]["receive_files"], true);
+    assert_eq!(changed["data"]["permissions"]["control_this_node"], false);
+    assert_eq!(changed["data"]["permissions"]["share_clipboard"], false);
+    assert_eq!(changed["data"]["apply_required"], false);
+    p.json(&["peer", "deny", "recipient", "receive-files"], true);
+    let files = p.json(&["files", "status"], true);
+    assert_eq!(files["data"]["protocol_version"], 1);
+    assert!(files["data"].get("contents").is_none());
+    assert!(files["data"]["transfers"].as_array().unwrap().is_empty());
+    let path = p.dir.path().join("receive");
+    let changed = p.json(&["files", "directory", path.to_str().unwrap()], true);
+    assert_eq!(changed["data"]["apply_required"], true);
+    p.json(&["files", "directory", "relative"], false);
+    p.json(&["files", "cancel", "../escape"], false);
+}
+#[test]
+fn actual_cli_send_jsonl_pinned_tls_and_receiver_hash_verification() {
+    use ukvm_network::{
+        files,
+        transport::{self, RuntimeConnection},
+    };
+    let p = Profile::new();
+    let a = Identity::load_or_create(&p.dir.path().join("data/ukvm")).unwrap();
+    let b = Identity::load_or_create(&p.dir.path().join("receiver-identity")).unwrap();
+    let trust = p.dir.path().join("state/ukvm");
+    let bd = p.dir.path().join("receiver-trust");
+    let root = p.dir.path().join("received");
+    let expected = b"binary\x00secret-file-contents\xff";
+    let source = p.dir.path().join("a file.txt");
+    fs::write(&source, expected).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let mut ast = TrustStore::default();
+    ast.import(
+        &trust,
+        "receiver".into(),
+        Some(listener.local_addr().unwrap().to_string()),
+        b.tls_cert().as_ref(),
+    )
+    .unwrap();
+    let mut bst = TrustStore::default();
+    bst.import(&bd, "sender".into(), None, a.tls_cert().as_ref())
+        .unwrap();
+    bst.set_permission(
+        &bd,
+        &a.id,
+        ukvm_network::trust::SessionPermission::ReceiveFiles,
+        true,
+    )
+    .unwrap();
+    let mut command = p.command();
+    command.args(["send", source.to_str().unwrap(), "receiver", "--json"]);
+    let client = std::thread::spawn(move || command.output().unwrap());
+    let output = root.clone();
+    runtime.block_on(async {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let RuntimeConnection::Files { mut stream, .. } =
+            transport::accept_runtime(tcp, &b, &bst, &bd, "receiver")
+                .await
+                .unwrap()
+        else {
+            panic!("unexpected channel")
+        };
+        files::receive(
+            &mut stream,
+            std::sync::Arc::new(|| Ok(())),
+            std::sync::Arc::new(|_| Ok(())),
+            move |offer| {
+                Ok(Box::new(ukvm_platform::files::linux::Receiver::new(
+                    &output, offer,
+                )?))
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let result = client.join().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read(root.join("a file.txt")).unwrap(), expected);
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    assert!(!stdout.contains("secret-file-contents"));
+    let records = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.first().unwrap()["event"], "started");
+    assert_eq!(records.last().unwrap()["event"], "result");
+    assert_eq!(records.last().unwrap()["ok"], true);
+    assert!(records.iter().all(|r| r["schema_version"] == 1));
 }

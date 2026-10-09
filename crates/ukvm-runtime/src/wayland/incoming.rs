@@ -4,6 +4,7 @@ use super::*;
 type Injector = RemoteInputSink<WaylandInputInjector>;
 struct Authority {
     input_slots: tokio::sync::Semaphore,
+    file_slots: tokio::sync::Semaphore,
     sink: Arc<Mutex<Option<Injector>>>,
     initialization: tokio::sync::Mutex<()>,
     status: Arc<Mutex<String>>,
@@ -172,6 +173,25 @@ async fn incoming(
     };
     let connection = match connection {
         transport::RuntimeConnection::Input(connection) => connection,
+        transport::RuntimeConnection::Files {
+            mut stream,
+            peer_id,
+        } => {
+            if let Ok(_slot) = input_authority.file_slots.try_acquire() {
+                if let Err(error) =
+                    super::files::session(context, &peer_id, &mut stream, stop).await
+                {
+                    context.log(format!("file transfer: {error}"));
+                }
+            } else {
+                let _ = ukvm_network::files::write(
+                    &mut stream,
+                    &ukvm_protocol::files::Message::Rejected,
+                )
+                .await;
+            }
+            return;
+        }
         transport::RuntimeConnection::Clipboard { stream, peer_id } => {
             if let Err(error) = super::clipboard::session(context, &peer_id, stream, stop).await {
                 context.log(format!("clipboard peer {peer_id}: {error}"));
@@ -242,6 +262,7 @@ pub(super) async fn receiver(
 ) {
     let authority = Arc::new(Authority {
         input_slots: tokio::sync::Semaphore::new(16),
+        file_slots: tokio::sync::Semaphore::new(4),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),
@@ -249,7 +270,7 @@ pub(super) async fn receiver(
     let mut connections = FuturesUnordered::new();
     // Eight positions per source; a bounded number of readiness relationships
     // may coexist. Excess connections are closed without waiting for consent.
-    const MAX_INCOMING: usize = 80;
+    const MAX_INCOMING: usize = 84;
     loop {
         tokio::select! {
             _ = cancelled(&mut stop) => break,
@@ -277,6 +298,7 @@ pub(super) async fn receiver(
 pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
     let authority = Arc::new(Authority {
         input_slots: tokio::sync::Semaphore::new(16),
+        file_slots: tokio::sync::Semaphore::new(4),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),

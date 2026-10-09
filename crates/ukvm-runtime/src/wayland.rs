@@ -34,6 +34,7 @@ enum PeerAvailability {
 }
 
 pub(crate) mod clipboard;
+mod files;
 
 struct Context {
     clipboard: clipboard::Clipboard,
@@ -187,6 +188,7 @@ async fn publish_status(
                 let topology = context.config.layout.topology();
                 let states = context.availability.lock().unwrap();
                 let snapshot = ownership::RuntimeSnapshot {
+                    file_protocol_version: Some(ukvm_protocol::files::VERSION),
                     clipboard: context.clipboard.snapshot(),
                     name: context.config.node.name.clone(),
                     node_id: context.identity.id.clone(),
