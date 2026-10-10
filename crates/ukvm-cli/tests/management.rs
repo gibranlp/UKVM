@@ -377,6 +377,47 @@ fn apply_uses_one_managed_restart_and_rejects_foreground_ownership() {
 }
 
 #[test]
+fn first_control_permission_allow_apply_and_deny_apply_use_managed_lifecycle() {
+    use std::os::unix::net::UnixListener;
+    let profile = Profile::new();
+    profile.add_peer("spectrum");
+    let _socket = UnixListener::bind(profile.dir.path().join("wayland-test")).unwrap();
+    for (action, expected) in [("allow", true), ("deny", false)] {
+        let permission = profile.json(&["peer", action, "spectrum", "control-this-node"], true);
+        assert_eq!(
+            permission["data"]["permissions"]["control_this_node"],
+            expected
+        );
+        assert_eq!(permission["data"]["apply_required"], true);
+        let output = profile
+            .command()
+            .args(["apply", "--json"])
+            .env("WAYLAND_DISPLAY", "wayland-test")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["data"]["applied"], true);
+        assert_eq!(result["data"]["mechanism"], "user_service_restart");
+        let store = TrustStore::load(&profile.dir.path().join("state/ukvm")).unwrap();
+        assert_eq!(
+            store
+                .find("spectrum")
+                .unwrap()
+                .permissions
+                .control_this_node,
+            expected
+        );
+    }
+    let log = fs::read_to_string(profile.dir.path().join("systemctl.log")).unwrap();
+    assert_eq!(log.matches("--user restart ukvm.service").count(), 2);
+}
+
+#[test]
 fn setup_can_finish_local_preparation_without_a_peer_or_portal() {
     if !std::path::Path::new("/usr/bin/script").exists() {
         return;

@@ -255,6 +255,78 @@ async fn incoming(
     }
 }
 
+// Prepare only an explicitly permitted receiver; never enter remote focus here.
+async fn prepare_receiver<S: InputSink + Send>(
+    context: &Context,
+    sink: &mut S,
+    mut stop: watch::Receiver<bool>,
+) -> Result<(), String> {
+    let store = TrustStore::load(&context.trust_dir)?;
+    let Some(peer) = store
+        .peers
+        .iter()
+        .find(|peer| peer.permissions.connect && peer.permissions.control_this_node)
+    else {
+        return Ok(());
+    };
+    let peer_id = peer.id.clone();
+    let revoked = async {
+        loop {
+            if TrustStore::load(&context.trust_dir)
+                .and_then(|store| {
+                    store
+                        .authorize(
+                            &peer_id,
+                            ukvm_network::trust::SessionPermission::ControlThisNode,
+                        )
+                        .map(|_| ())
+                })
+                .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    };
+    tokio::select! {
+        biased;
+        _ = cancelled(&mut stop) => Err("receiver preparation stopped".into()),
+        _ = revoked => Err("receiver preparation permission revoked".into()),
+        result = sink.begin_session_async() => result,
+    }
+}
+
+async fn prepare_authority(
+    context: &Context,
+    authority: Arc<Authority>,
+    stop: watch::Receiver<bool>,
+) {
+    let peer = TrustStore::load(&context.trust_dir).ok().and_then(|store| {
+        store
+            .peers
+            .iter()
+            .find(|peer| peer.permissions.connect && peer.permissions.control_this_node)
+            .map(|peer| peer.id.clone())
+    });
+    let Some(peer) = peer else {
+        return;
+    };
+    let mut sink = IncomingSink {
+        session: SharedSession {
+            shared: Arc::clone(&authority.sink),
+            entered: false,
+        },
+        authority,
+        policy: (context.trust_dir.clone(), peer),
+        verbose: context.verbose,
+        gate: context.gate.clone(),
+    };
+    if let Err(error) = prepare_receiver(context, &mut sink, stop).await {
+        *context.receiver_status.lock().unwrap() = format!("unavailable: {error}");
+        context.log(format!("receiver preparation: {error}"));
+    }
+}
+
 pub(super) async fn receiver(
     context: &Context,
     listener: tokio::net::TcpListener,
@@ -267,7 +339,11 @@ pub(super) async fn receiver(
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),
     });
-    let mut connections = FuturesUnordered::new();
+    let mut connections: FuturesUnordered<futures_util::future::BoxFuture<'_, ()>> =
+        FuturesUnordered::new();
+    use futures_util::FutureExt;
+    // Consent runs concurrently with listening, clipboard and file handling.
+    connections.push(prepare_authority(context, Arc::clone(&authority), stop.clone()).boxed());
     // Eight positions per source; a bounded number of readiness relationships
     // may coexist. Excess connections are closed without waiting for consent.
     const MAX_INCOMING: usize = 84;
@@ -278,7 +354,7 @@ pub(super) async fn receiver(
             accepted = listener.accept() => match accepted {
                 Ok((tcp, address)) => {
                     if connections.len() >= MAX_INCOMING { context.log(format!("incoming capacity reached; closing {address}")); }
-                    else { connections.push(incoming(context, Arc::clone(&authority), tcp, stop.clone())); }
+                    else { connections.push(incoming(context, Arc::clone(&authority), tcp, stop.clone()).boxed()); }
                 }
                 Err(error) => { context.log(format!("accept failed: {error}")); pause(Duration::from_secs(1), &mut stop).await; }
             }
@@ -325,4 +401,116 @@ pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
             fraction: 0.5
         })
         .is_err());
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::super::tests::Fixture;
+    use super::*;
+    use ukvm_network::trust::SessionPermission;
+
+    struct ConsentProbe {
+        requests: usize,
+        pending: bool,
+    }
+    impl InputSink for ConsentProbe {
+        fn kind(&self) -> SinkKind {
+            SinkKind::RemoteInput
+        }
+        fn begin_session(&mut self) -> Result<(), String> {
+            unreachable!()
+        }
+        fn begin_session_async(&mut self) -> SinkFuture<'_> {
+            Box::pin(async move {
+                self.requests += 1;
+                if self.pending {
+                    std::future::pending::<()>().await;
+                }
+                Err("normal portal approval required".into())
+            })
+        }
+        fn handle_event(&mut self, _: &InputEvent) -> Result<SinkAction, String> {
+            unreachable!()
+        }
+        fn end_session(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    fn allow(f: &Fixture, permission: SessionPermission, value: bool) {
+        TrustStore::load(&f.context.trust_dir)
+            .unwrap()
+            .set_permission(&f.context.trust_dir, "peer", permission, value)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn applied_control_permission_prepares_receiver_without_network_or_focus() {
+        let f = Fixture::new(false);
+        let (_tx, stop) = watch::channel(false);
+        let mut sink = ConsentProbe {
+            requests: 0,
+            pending: false,
+        };
+        prepare_receiver(&f.context, &mut sink, stop.clone())
+            .await
+            .unwrap();
+        assert_eq!(sink.requests, 0);
+        allow(&f, SessionPermission::ControlThisNode, true);
+        assert!(prepare_receiver(&f.context, &mut sink, stop.clone())
+            .await
+            .unwrap_err()
+            .contains("approval required"));
+        assert_eq!(sink.requests, 1);
+        assert_eq!(f.context.gate.state(), Focus::Local);
+        allow(&f, SessionPermission::ControlThisNode, false);
+        prepare_receiver(&f.context, &mut sink, stop.clone())
+            .await
+            .unwrap();
+        assert_eq!(sink.requests, 1);
+        allow(&f, SessionPermission::ControlThisNode, true);
+        allow(&f, SessionPermission::Connect, false);
+        prepare_receiver(&f.context, &mut sink, stop).await.unwrap();
+        assert_eq!(sink.requests, 1);
+    }
+
+    #[tokio::test]
+    async fn revocation_cancels_pending_first_consent() {
+        let f = Fixture::new(false);
+        allow(&f, SessionPermission::ControlThisNode, true);
+        let (_tx, stop) = watch::channel(false);
+        let mut sink = ConsentProbe {
+            requests: 0,
+            pending: true,
+        };
+        let revoke = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            allow(&f, SessionPermission::ControlThisNode, false);
+        };
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(prepare_receiver(&f.context, &mut sink, stop), revoke)
+        })
+        .await
+        .unwrap();
+        assert!(result.unwrap_err().contains("permission revoked"));
+        assert_eq!(sink.requests, 1);
+        assert_eq!(f.context.gate.state(), Focus::Local);
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_first_consent() {
+        let f = Fixture::new(false);
+        allow(&f, SessionPermission::ControlThisNode, true);
+        let (tx, stop) = watch::channel(false);
+        let mut sink = ConsentProbe {
+            requests: 0,
+            pending: true,
+        };
+        let shutdown = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send(true).unwrap();
+        };
+        let (result, ()) = tokio::join!(prepare_receiver(&f.context, &mut sink, stop), shutdown);
+        assert!(result.unwrap_err().contains("stopped"));
+        assert_eq!(sink.requests, 1);
+    }
 }
