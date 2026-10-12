@@ -56,6 +56,14 @@ Tests should cover meaningful policy, version compatibility, parsing, malformed 
 
 ## Two-computer testing and Git attribution
 
+The user has authorized routine redeployment on the Spectrum development PC
+(hostname Hell) after validated UKVM changes. On that PC, install the release
+build into ~/.local, regenerate its managed user-service unit using the installed
+binary, restart the service, and verify the selected executable and service state.
+Do this as part of completing the change, rather than leaving local deployment
+commands for the user. This authorization is scoped to that PC; portal consent
+and peer permissions remain explicit user choices.
+
 When a change needs to be checked on the other computer, complete local review and validation, then commit and push the relevant code to the configured Git remote before giving instructions to pull or test it there. Verify that the push succeeded and report the commit ID. If it cannot be pushed, say so clearly; do not present an unpublished change as ready for the other computer. Check the staged files for secrets and build output before committing.
 
 Use the repository owner's configured Git identity. Do not add Codex as an author, co-author, contributor, or commit trailer, and do not add Codex to a contributors list.
