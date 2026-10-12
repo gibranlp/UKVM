@@ -44,6 +44,9 @@ pub fn command(args: &[String]) -> ExitCode {
                     let viewing = async {
                         let result =
                             view(&peer, &identity, &trust, &worker_shared, stop.clone()).await;
+                        if let Err(error) = &result {
+                            eprintln!("remote display: {error}");
+                        }
                         let mut state = worker_shared.state.lock().unwrap();
                         state.connected = false;
                         state.controlling = false;
@@ -138,7 +141,12 @@ async fn view(
     let mut rate = std::time::Instant::now();
     loop {
         let message = {
-            let frame = display::read(&mut stream);
+            // The capture side allows ten seconds for the first usable buffer.
+            // Do not tear it down at the normal five-second steady-state limit.
+            let frame = display::read_until(
+                &mut stream,
+                Duration::from_secs(if last_sequence.is_none() { 12 } else { 5 }),
+            );
             tokio::pin!(frame);
             let mut policy = tokio::time::interval(Duration::from_millis(100));
             loop {

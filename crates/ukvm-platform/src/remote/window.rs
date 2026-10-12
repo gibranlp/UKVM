@@ -79,6 +79,7 @@ pub fn run(
         modifiers: winit::keyboard::ModifiersState::empty(),
         error: None,
         last_frame: Instant::now(),
+        redraw: RedrawClock::new(Instant::now()),
     };
     let result = event_loop.run_app(&mut app).map_err(|e| e.to_string());
     result?;
@@ -108,6 +109,24 @@ struct App {
     modifiers: winit::keyboard::ModifiersState,
     error: Option<String>,
     last_frame: Instant,
+    redraw: RedrawClock,
+}
+// request_redraw wakes winit immediately, even with WaitUntil. Only request one
+// when the deadline expires; otherwise RedrawRequested/about_to_wait form a spin.
+struct RedrawClock {
+    next: Instant,
+}
+impl RedrawClock {
+    fn new(now: Instant) -> Self {
+        Self { next: now }
+    }
+    fn due(&mut self, now: Instant) -> bool {
+        if now < self.next {
+            return false;
+        }
+        self.next = now + Duration::from_millis(33);
+        true
+    }
 }
 impl App {
     fn release(&mut self) {
@@ -265,12 +284,12 @@ impl ApplicationHandler for App {
             state.connected = false;
             state.message = "Display stalled; control released".into();
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        if self.redraw.due(Instant::now()) {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
-        el.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(33),
-        ));
+        el.set_control_flow(ControlFlow::WaitUntil(self.redraw.next));
     }
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
@@ -443,6 +462,23 @@ fn draw_text(pixels: &mut [u32], width: u32, height: u32, text: &str, top: u32) 
 mod tests {
     use super::*;
     #[test]
+    fn redraw_wakeups_do_not_create_a_busy_loop() {
+        let now = Instant::now();
+        let mut clock = RedrawClock::new(now);
+        assert!(clock.due(now));
+        for _ in 0..1000 {
+            assert!(!clock.due(now));
+        }
+        assert!(!clock.due(now + Duration::from_millis(32)));
+        assert!(clock.due(now + Duration::from_millis(33)));
+        // After a stalled/minimized window, skip missed frames instead of
+        // issuing a burst of catch-up redraws.
+        let later = now + Duration::from_secs(10);
+        assert!(clock.due(later));
+        assert!(!clock.due(later));
+        assert_eq!(clock.next, later + Duration::from_millis(33));
+    }
+    #[test]
     fn shortcut_requires_all_modifiers() {
         assert!(emergency(&HashSet::from([29, 56, 42])));
         assert!(emergency(&HashSet::from([97, 100, 54])));
@@ -491,6 +527,7 @@ mod tests {
             modifiers: winit::keyboard::ModifiersState::empty(),
             error: None,
             last_frame: Instant::now(),
+            redraw: RedrawClock::new(Instant::now()),
         };
         app.release();
         assert_eq!(*release.borrow_and_update(), 1);

@@ -182,7 +182,7 @@ async fn incoming(
         _ = cancelled(&mut stop) => return,
         result = transport::accept_runtime(tcp, &context.identity, &store, &context.trust_dir, &context.config.node.name) => match result {
             Ok(connection) => connection,
-            Err(error) => { context.log(format!("incoming authentication rejected: {error}")); return; }
+            Err(error) => { eprintln!("[runtime] incoming authentication rejected: {error}"); return; }
         }
     };
     let connection = match connection {
@@ -194,8 +194,12 @@ async fn incoming(
                 if let Err(error) =
                     super::remote::display_session(context, &peer_id, &mut stream, stop).await
                 {
-                    context.log(format!("remote display: {error}"));
+                    // A failed first capture has no frame to explain the failure
+                    // in the viewer. Surface it without requiring verbose mode.
+                    eprintln!("[runtime] remote display: {error}");
                 }
+            } else {
+                eprintln!("[runtime] remote display: another screen-sharing session is active");
             }
             return;
         }

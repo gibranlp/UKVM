@@ -321,6 +321,28 @@ fn pipewire(
         })
         .register()
         .map_err(|e| e.to_string())?;
+    let values = video_format()?;
+    let pod = spa::pod::Pod::from_bytes(&values).ok_or("video format invalid")?;
+    stream
+        .connect(
+            spa::utils::Direction::Input,
+            Some(node),
+            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
+            &mut [pod],
+        )
+        .map_err(|e| e.to_string())?;
+    while !stop.load(Ordering::Acquire) {
+        mainloop.loop_().iterate(Duration::from_millis(20));
+        if let Some(e) = failure.lock().unwrap().take() {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+// Include the required size range, as in PipeWire's video capture tutorial.
+// The source selects its native size; the encoder handles downscaling.
+fn video_format() -> Result<Vec<u8>, String> {
     let object = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
         spa::param::ParamType::EnumFormat,
@@ -346,38 +368,45 @@ fn pipewire(
             spa::param::video::VideoFormat::RGBA
         ),
         spa::pod::property!(
+            spa::param::format::FormatProperties::VideoSize,
+            Choice,
+            Range,
+            Rectangle,
+            spa::utils::Rectangle {
+                width: 1920,
+                height: 1080
+            },
+            spa::utils::Rectangle {
+                width: 1,
+                height: 1
+            },
+            spa::utils::Rectangle {
+                width: 8192,
+                height: 8192
+            }
+        ),
+        spa::pod::property!(
             spa::param::format::FormatProperties::VideoFramerate,
             Choice,
             Range,
             Fraction,
             spa::utils::Fraction { num: 30, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction { num: 30, denom: 1 }
+            // Some portal sources advertise the monitor's fixed refresh rate.
+            // Accept it and throttle buffer copies/encoding locally to ~30 FPS.
+            spa::utils::Fraction {
+                num: 1000,
+                denom: 1
+            }
         )
     );
-    let values = spa::pod::serialize::PodSerializer::serialize(
+    Ok(spa::pod::serialize::PodSerializer::serialize(
         std::io::Cursor::new(Vec::new()),
         &spa::pod::Value::Object(object),
     )
     .map_err(|_| "video format encoding failed")?
     .0
-    .into_inner();
-    let pod = spa::pod::Pod::from_bytes(&values).ok_or("video format invalid")?;
-    stream
-        .connect(
-            spa::utils::Direction::Input,
-            Some(node),
-            pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-            &mut [pod],
-        )
-        .map_err(|e| e.to_string())?;
-    while !stop.load(Ordering::Acquire) {
-        mainloop.loop_().iterate(Duration::from_millis(20));
-        if let Some(e) = failure.lock().unwrap().take() {
-            return Err(e);
-        }
-    }
-    Ok(())
+    .into_inner())
 }
 
 pub type PortalConnection = zbus::Connection;
@@ -388,6 +417,47 @@ pub async fn portal_connection() -> Result<PortalConnection, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_offer_accepts_native_resolution_and_high_refresh_sources() {
+        use spa::{
+            param::format::FormatProperties,
+            pod::{deserialize::PodDeserializer, ChoiceValue, Value},
+            utils::ChoiceEnum,
+        };
+        let bytes = video_format().unwrap();
+        let (_, Value::Object(object)) = PodDeserializer::deserialize_any_from(&bytes).unwrap()
+        else {
+            panic!("format object expected")
+        };
+        let property = |key: FormatProperties| {
+            &object
+                .properties
+                .iter()
+                .find(|p| p.key == key.as_raw())
+                .unwrap()
+                .value
+        };
+        let Value::Choice(ChoiceValue::Rectangle(size)) = property(FormatProperties::VideoSize)
+        else {
+            panic!("size range required for negotiation")
+        };
+        let ChoiceEnum::Range { min, max, .. } = &size.1 else {
+            panic!("size range expected")
+        };
+        assert_eq!((min.width, min.height), (1, 1));
+        assert!(max.width >= 3840 && max.height >= 2160);
+        let Value::Choice(ChoiceValue::Fraction(rate)) = property(FormatProperties::VideoFramerate)
+        else {
+            panic!("refresh range expected")
+        };
+        let ChoiceEnum::Range { min, max, .. } = &rate.1 else {
+            panic!("refresh range expected")
+        };
+        // Zero is used for variable/damage-only streams; 60/144 Hz are common
+        // fixed source rates and must not be excluded by the encoding target.
+        assert_eq!(min.num, 0);
+        assert!(max.num / max.denom >= 144);
+    }
     #[test]
     fn encoding_preserves_aspect_ratio_and_bgr_channels() {
         let raw = Raw {

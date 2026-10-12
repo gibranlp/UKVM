@@ -30,6 +30,17 @@ without upscaling to fit 1920×1080 and encodes independent JPEG images at quali
 65, targeting 30 FPS. Portrait images also fit that bounding box. One native
 Wayland window uses winit/softbuffer; JPEG decoding checks dimensions and RGB24
 before bounded pixel allocation. A header strip stays outside the remote content.
+Redraw requests have a monotonic 33 ms deadline. Winit wakeups/input events do
+not schedule additional frames before that deadline, including in a disconnected
+black window; missed deadlines are skipped rather than replayed.
+
+The PipeWire offer includes a native-size range up to 8192×8192 and accepts
+fixed-refresh sources up to 1000 Hz as well as damage-only streams. Buffer-copy
+and encoding throttles still target ~30 FPS, and the 64 MiB source bound remains.
+The former offer omitted the size range and capped source negotiation at 30 Hz,
+which could reject a monitor's fixed refresh rate before any frame appeared.
+The size/rate negotiation follows the official
+[PipeWire video capture example](https://docs.pipewire.org/page_tutorial5.html).
 
 Clicking connects to the local runtime's private, same-user Unix input bridge.
 That runtime reserves its existing focus gate, closes any idle physical capture,
@@ -85,6 +96,8 @@ encoding run on dedicated threads. No encoder work runs on the input executor.
 Shared network/CPU resources cannot guarantee hardware QoS on a saturated LAN;
 JPEG may lower effective FPS on slow CPUs/links. Future H.264/hardware codecs
 require a new negotiated display revision, not a replacement input system.
+The viewer allows twelve seconds for its first frame after Ready, matching the
+server's ten-second usable-buffer deadline; subsequent reads use five seconds.
 
 `view-screen` is a new independent receiver-side permission, default OFF,
 including missing fields in old records. It also requires `connect`. Viewing
@@ -145,11 +158,12 @@ After the published commit is available, in the checkout on **both** PCs:
 ```sh
 git pull --ff-only
 cargo build --release --locked --workspace
+./target/release/ukvm version
 ./target/release/ukvm install
 export PATH="$HOME/.local/bin:$PATH"
-ukvm service install
-ukvm service restart
-ukvm version
+~/.local/bin/ukvm service install
+~/.local/bin/ukvm service restart
+~/.local/bin/ukvm version
 ```
 
 Use a graphical user terminal. Stop an existing foreground `ukvm run` cooperatively
@@ -157,6 +171,8 @@ before switching to the service; do not launch a second runtime. Installation
 and unit installation alone do not start/enable it; `service restart` here is an
 explicit test action. For an existing distro-owned production executable, this
 installs the development binary in ~/.local/bin without overwriting /usr.
+Both explicit version checks must show protocol 1.4. Use ~/.local/bin/ukvm for
+the test if the shell still selects an older /usr/bin/ukvm.
 Do not reinstall/reset the portal trial, identity, pairing or authorization state.
 
 On **io**, using its already-paired alias for Spectrum (normally `spectrum`):
@@ -198,3 +214,31 @@ reallowing. For view-only testing deny control before opening `ukvm remote io`.
 Restore only the permissions you intended to retain. Finish with normal physical
 edge switching and existing opt-in clipboard/file-transfer tests. No automated
 check establishes physical success for these steps.
+
+## Black window / display-channel failure diagnostics
+
+The first two-PC attempt reported a black window with `io display channel closed`
+and apparent desktop freezing, despite both CLIs reporting Input Protocol 1.4.
+No desktop delivery/control success is claimed. Follow-up fixes bound redraw
+scheduling, supply native size/refresh negotiation, align the first-frame
+deadlines, and surface remote failures without verbose mode. Regression tests
+cover redraw wakeups and the serialized capture offer. Workspace validation
+passed (281 tests, zero failures, five opt-in tests ignored), including fmt,
+check, Clippy with warnings denied, and debug/release builds. The user's failure
+still requires receiver logs and a physical retest to establish its cause.
+
+The viewer prints display failures to its terminal; the controlled runtime prints
+capture and authentication/permission failures to its service journal even without
+verbose mode. A generic `display channel closed` in the viewer does not identify
+the remote cause. On the controlled PC inspect:
+
+```sh
+~/.local/bin/ukvm peer permissions spectrum
+journalctl --user -u ukvm.service --since '20 minutes ago' --no-pager
+```
+
+Confirm that the service's executable is the intended build as well as the CLI:
+`systemctl --user show ukvm.service -p ExecStart`. A first-frame failure remains
+a display-only failure; it must not grab local input or stop physical KVM.
+Report which PC stalls, whether the ScreenCast picker appeared, and the service
+error. Do not reset trust or portal restore tokens to troubleshoot video.
