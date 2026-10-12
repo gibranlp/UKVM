@@ -69,6 +69,28 @@ physical evdev keys, scroll, heartbeats and held-state cleanup use the existing
 input path. There is no VNC input transport, independent injector or edge-return
 state in a window lease. Ending it restores the gate for physical switching.
 
+While a connected, interactive session is controlling and its native window is
+focused, the viewer requests the official Wayland
+`zwp_keyboard_shortcuts_inhibit_manager_v1` grant for that surface and each keyboard
+seat. This allows compositor shortcuts such as Super+Enter and workspace changes
+to reach the window and be forwarded as ordinary existing physical-key events.
+It does not grab global input or add an injector. The compositor can refuse or
+reserve its own override shortcuts; the window status reports the grant rather
+than promising that every shortcut is available. Unsupported compositors retain
+ordinary viewing/control with local compositor shortcuts.
+
+Inhibitors are destroyed on emergency release, focus loss, close, input/display
+failure, control/viewing permission loss, and event-loop exit; clicking again
+requests a new grant after control is accepted. Asynchronous session changes are
+observed at the existing bounded UI refresh interval (at most 100 ms without
+other events). View-only sessions and an idle focused viewer do not request
+inhibition. Ctrl+Alt+Shift+Escape is handled locally by the viewer before sending
+Escape and releases the existing runtime lease/held state. This viewer-only
+change keeps Input 1.4 and Display 2 unchanged; io needs no protocol update.
+Mock-compositor tests cover grants/refusals, unsupported capability, explicit
+release/resume and guest cleanup while the host surface/connection remains live.
+Physical shortcut delivery awaits the user's test.
+
 A GUI release watch has priority over its bounded event queue. Events carry a
 local generation so previously queued input cannot reach a new lease. Closing
 its Unix connection makes the runtime prioritize SessionEnd over queued input;
@@ -323,3 +345,25 @@ including ScreenCast, after its existing confirmation and owned-runtime shutdown
 It leaves UKVM stopped. Do not use reset for this retest: it would discard the
 already accepted input grants as well. Revoke individual screen-sharing consent
 through the desktop's portal controls when available.
+
+## Remote system-shortcut test
+
+On Spectrum after the local redeploy:
+
+```sh
+~/.local/bin/ukvm remote io
+```
+
+Click inside the desktop and wait for “system shortcuts forwarded”. Press
+Super+Enter and io's configured workspace shortcuts; their actions should occur
+on io. Press Ctrl+Alt+Shift+Escape, then verify Super+Enter acts locally on
+Spectrum while the remote screen remains visible. Click again to resume, test
+focus loss/close, and verify ordinary local shortcuts and physical edge control.
+The compositor may retain its special override combinations even with a grant.
+This change requires updating the viewer only, not restarting or reinstalling io.
+
+Local shortcut validation passed all required workspace checks (fmt, check,
+304 tests passed / zero failed / six opt-in tests ignored, Clippy with warnings
+denied, and debug build). The focused surface inhibition requires the existing
+wayland-client system backend and wayland-protocols unstable feature; no new
+crate, runtime process, native library or protocol version is introduced.

@@ -271,6 +271,8 @@ pub fn run(
         peer,
         shared,
         commands,
+        shortcuts: None,
+        focused: false,
         window: None,
         surface: None,
         image: None,
@@ -283,6 +285,8 @@ pub fn run(
         redraw,
     };
     let result = event_loop.run_app(&mut app).map_err(|e| e.to_string());
+    app.release();
+    app.shortcuts = None;
     worker_stop.store(true, std::sync::atomic::Ordering::Release);
     let _ = worker.join();
     result?;
@@ -313,6 +317,8 @@ struct App {
     peer: String,
     shared: Arc<Shared>,
     commands: mpsc::Sender<Command>,
+    shortcuts: Option<super::shortcuts::Shortcuts>,
+    focused: bool,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     image: Option<Arc<Image>>,
@@ -348,6 +354,9 @@ impl RedrawClock {
 }
 impl App {
     fn release(&mut self) {
+        if let Some(shortcuts) = &mut self.shortcuts {
+            shortcuts.release();
+        }
         let mut state = self.shared.state.lock().unwrap();
         state.controlling = false;
         state.requesting = false;
@@ -387,7 +396,13 @@ impl App {
         let status = if !state.connected {
             state.message.clone()
         } else if state.controlling {
-            format!("Controlling {}", self.peer)
+            format!(
+                "Controlling {} — {}",
+                self.peer,
+                self.shortcuts
+                    .as_ref()
+                    .map_or("local shortcuts unavailable", |s| s.status())
+            )
         } else if state.requesting {
             "Requesting control".into()
         } else if state.interactive && self.image.as_ref().is_some_and(|i| i.screen.is_some()) {
@@ -553,6 +568,11 @@ impl ApplicationHandler<VideoReady> for App {
             window.request_redraw();
         }
     }
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.release();
+        // Tear down guest Wayland objects before winit closes its display.
+        self.shortcuts = None;
+    }
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -571,6 +591,10 @@ impl ApplicationHandler<VideoReady> for App {
             self.surface = Some(
                 softbuffer::Surface::new(&context, window.clone()).map_err(|e| e.to_string())?,
             );
+            match super::shortcuts::Shortcuts::new(window.clone()) {
+                Ok(shortcuts) => self.shortcuts = Some(shortcuts),
+                Err(error) => eprintln!("UKVM: window shortcut inhibition unavailable: {error}"),
+            }
             self.window = Some(window);
             Ok::<_, String>(())
         })();
@@ -598,6 +622,22 @@ impl ApplicationHandler<VideoReady> for App {
             state.connected = false;
             state.message = "Display stalled; control released".into();
         }
+        let inhibit = {
+            let state = self.shared.state.lock().unwrap();
+            super::shortcuts::wanted(
+                state.connected,
+                state.interactive,
+                state.controlling,
+                self.focused,
+            )
+        };
+        if let Some(shortcuts) = &mut self.shortcuts {
+            if let Err(error) = shortcuts.sync(inhibit) {
+                eprintln!("UKVM: window shortcut inhibition failed: {error}");
+                self.release();
+                self.shortcuts = None;
+            }
+        }
         if self.redraw.due(Instant::now()) {
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -612,7 +652,12 @@ impl ApplicationHandler<VideoReady> for App {
                 let _ = self.commands.try_send(Command::Close);
                 el.exit();
             }
-            WindowEvent::Focused(false) => self.release(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if !focused {
+                    self.release();
+                }
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::RedrawRequested => {
                 if let Err(e) = self.redraw() {
@@ -1054,6 +1099,8 @@ mod tests {
             peer: "peer".into(),
             shared: shared.clone(),
             commands: tx,
+            shortcuts: None,
+            focused: false,
             window: None,
             surface: None,
             image: None,

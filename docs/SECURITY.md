@@ -106,3 +106,13 @@ bounded to 8 MiB, decoded pixels to 64 MiB, pending video to one frame per stage
 and outstanding frames to one. The receiver checks image geometry before codec
 allocation. Clock estimates are diagnostics only and never authenticate or order
 input. Performance reports exclude pixels, input contents and portal tokens.
+
+The native Wayland remote viewer requests surface/seat-scoped shortcut inhibition
+only for a focused, connected, authorized interactive control lease. The
+compositor decides whether to grant it and may reserve override shortcuts.
+Emergency release/focus loss/close/session or permission loss destroys the
+inhibitor and ends existing input ownership. An idle/view-only window requests
+no inhibition. This is a sanctioned window protocol, not a global capture or
+portal bypass; trust, portal consent and receiver-side input permissions remain
+unchanged. The guest libwayland backend borrows the window's live display/surface,
+owns only its own proxies and queue, and cleans them before event-loop shutdown.

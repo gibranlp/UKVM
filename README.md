@@ -11,6 +11,10 @@ Click its desktop to use the existing UKVM input transport and RemoteDesktop/EIS
 injector. Ctrl+Alt+Shift+Escape releases control while viewing stays open; click
 again to resume. The receiver must explicitly allow `view-screen`, and interactive
 control additionally needs `control-this-node` plus normal portal consent.
+During focused remote control, the viewer requests Wayland shortcut inhibition
+so Super+Enter and workspace shortcuts can reach the peer. Release/focus loss
+restores local shortcuts. Compositor grants/override shortcuts remain under its
+control; physical shortcut testing is pending.
 
 The user confirmed viewing/control, remembered ScreenCast sharing across reconnect
 and reboot, and return to physical topology on close. The performance follow-up
