@@ -30,3 +30,11 @@ This sequence is directional, not a release commitment.
 19. **Plain-text clipboard (implemented; physical acceptance pending):** separate opt-in permission, pinned encrypted Clipboard Protocol 1, native Wayland data-control, safe status and SpectrumOS frontend controls. See [clipboard acceptance](CLIPBOARD.md).
 
 M20 secure file transfer is implemented for Linux with automated protocol/storage/frontend validation; two-machine physical acceptance remains pending. M18 Linux control/persistence and M19 clipboard physical acceptance were confirmed by the user. Windows/macOS are not started. See FILE_TRANSFER.md.
+
+21. **Interactive Remote Sessions v1 (implemented; physical acceptance pending):**
+    native Linux Wayland `ukvm remote PEER`, permissioned ScreenCast/PipeWire,
+    bounded JPEG Display Protocol 1 and independent view-screen default deny.
+    Clicking leases existing runtime focus/input transport/RemoteDesktop/EIS;
+    emergency release preserves viewing. Input 1.4; pairing/clipboard/files unchanged.
+    No audio, recording, multiple viewing monitors, headless output, Windows or macOS.
+    See [architecture, limits and two-PC acceptance](REMOTE_SESSIONS.md).

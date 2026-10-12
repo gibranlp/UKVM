@@ -84,6 +84,8 @@ pub struct Permissions {
     pub share_clipboard: bool,
     #[serde(default)]
     pub receive_files: bool,
+    #[serde(default)]
+    pub view_screen: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -110,6 +112,7 @@ pub enum SessionPermission {
     ControlThisNode,
     ShareClipboard,
     ReceiveFiles,
+    ViewScreen,
 }
 
 impl TrustStore {
@@ -167,6 +170,9 @@ impl TrustStore {
             .find_id(id)
             .ok_or("authenticated peer is not trusted")?;
         let allowed = match permission {
+            SessionPermission::ViewScreen => {
+                peer.permissions.connect && peer.permissions.view_screen
+            }
             SessionPermission::ReceiveFiles => {
                 peer.permissions.connect && peer.permissions.receive_files
             }
@@ -255,6 +261,7 @@ impl TrustStore {
             .find(|p| p.alias == name || p.id == name)
             .ok_or("unknown peer")?;
         match permission {
+            SessionPermission::ViewScreen => peer.permissions.view_screen = allowed,
             SessionPermission::ShareClipboard => peer.permissions.share_clipboard = allowed,
             SessionPermission::ReceiveFiles => peer.permissions.receive_files = allowed,
             SessionPermission::Connect => peer.permissions.connect = allowed,
@@ -300,6 +307,9 @@ impl TrustStore {
                     .get_mut("permissions")
                     .and_then(toml::Value::as_table_mut)
                 {
+                    if permissions.get("view_screen") == Some(&toml::Value::Boolean(false)) {
+                        permissions.remove("view_screen");
+                    }
                     if permissions.get("receive_files") == Some(&toml::Value::Boolean(false)) {
                         permissions.remove("receive_files");
                     }
@@ -470,5 +480,45 @@ mod tests {
             resolve_address("example.local:1234").unwrap(),
             "example.local:1234"
         );
+    }
+    #[test]
+    fn viewing_is_default_deny_independent_and_live() {
+        let permissions: Permissions =
+            toml::from_str("connect = true\ncontrol_this_node = true").unwrap();
+        assert!(!permissions.view_screen);
+        let t = tempfile::tempdir().unwrap();
+        let identity = Identity::load_or_create(&t.path().join("identity")).unwrap();
+        let dir = t.path().join("trust");
+        let mut store = TrustStore::default();
+        let peer = store
+            .import(&dir, "peer".into(), None, identity.tls_cert().as_ref())
+            .unwrap();
+        assert!(store
+            .authorize(&peer.id, SessionPermission::ViewScreen)
+            .is_err());
+        store
+            .set_permission(&dir, "peer", SessionPermission::ViewScreen, true)
+            .unwrap();
+        assert!(store
+            .authorize(&peer.id, SessionPermission::ViewScreen)
+            .is_ok());
+        assert!(store
+            .authorize(&peer.id, SessionPermission::ControlThisNode)
+            .is_err());
+        let guard = permission_guard(&dir, &peer.id, SessionPermission::ViewScreen).unwrap();
+        drop(guard);
+        store
+            .set_permission(&dir, "peer", SessionPermission::ViewScreen, false)
+            .unwrap();
+        assert!(permission_guard(&dir, &peer.id, SessionPermission::ViewScreen).is_err());
+        store
+            .set_permission(&dir, "peer", SessionPermission::ViewScreen, true)
+            .unwrap();
+        store
+            .set_permission(&dir, "peer", SessionPermission::Connect, false)
+            .unwrap();
+        assert!(store
+            .authorize(&peer.id, SessionPermission::ViewScreen)
+            .is_err());
     }
 }

@@ -1013,7 +1013,7 @@ where
                             }
                             if let Err(err) = (hooks.on_event)(input.clone()) { abort_reason = Some(format!("event forwarding stopped: {err}")); break; }
                             match input {
-                                InputEvent::PointerMotion { .. } => summary.pointer_events += 1,
+                                InputEvent::PointerMotion { .. } | InputEvent::PointerAbsolute { .. } => summary.pointer_events += 1,
                                 InputEvent::PointerButton { .. } => summary.button_events += 1,
                                 InputEvent::Scroll { .. } => summary.scroll_events += 1,
                                 InputEvent::Key { .. } => summary.key_events += 1,

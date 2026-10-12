@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// First protocol major version. Incompatible peers must fail closed.
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 3;
+pub const PROTOCOL_MINOR: u16 = 4;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum Edge {
@@ -91,12 +91,22 @@ pub enum InputEvent {
         code: KeyCode,
         pressed: bool,
     },
+    /// Compositor logical coordinates; permitted only in a window session.
+    PointerAbsolute {
+        x: f64,
+        y: f64,
+    },
 }
 
 /// Validate values before any sink sees them, including non-network callers.
 pub fn validate_event(event: &InputEvent) -> Result<(), String> {
     let valid_delta = |value: f64| value.is_finite() && value.abs() <= 32768.0;
     match event {
+        InputEvent::PointerAbsolute { x, y } => {
+            if !valid_delta(*x) || !valid_delta(*y) {
+                return Err("invalid absolute position".into());
+            }
+        }
         InputEvent::PointerMotion { dx, dy } | InputEvent::Scroll { dx, dy } => {
             if !valid_delta(*dx) || !valid_delta(*dy) {
                 return Err("invalid input delta".into());
@@ -148,6 +158,14 @@ pub enum WireMessage {
     },
     /// Refresh ready exits without recreating the active permissioned session.
     TopologyExits(Vec<Edge>),
+    /// Same input channel and injector; requires view-screen and control-this-node.
+    WindowSessionStart,
+    WindowEntry {
+        target: display::WindowTarget,
+        x: f64,
+        y: f64,
+    },
+    WindowEntered,
 }
 
 /// Candidate messages for a future authenticated transport. This is not a wire API.
@@ -188,7 +206,7 @@ mod tests {
 
     #[test]
     fn major_version_must_match() {
-        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 3 }));
+        assert!(ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 4 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 1 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 1, minor: 2 }));
         assert!(!ProtocolVersion::CURRENT.compatible_with(ProtocolVersion { major: 2, minor: 0 }));
@@ -196,3 +214,5 @@ mod tests {
 }
 
 pub mod files;
+
+pub mod display;

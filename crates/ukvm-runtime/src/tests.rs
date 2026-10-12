@@ -31,6 +31,14 @@ impl PlatformInputInjector for Injector {
         }
         Ok(())
     }
+    fn enter_window(
+        &mut self,
+        _: ukvm_protocol::display::WindowTarget,
+        _: f64,
+        _: f64,
+    ) -> Result<(), PlatformError> {
+        Ok(())
+    }
     fn enter_remote(&mut self, _: EdgePosition) -> Result<(), PlatformError> {
         Ok(())
     }
@@ -275,4 +283,88 @@ async fn invalid_prepared_grant_fails_entry_without_requesting_consent_while_cap
     assert!(session.enter_remote_async(entry()).await.is_err());
     session.end_session().unwrap();
     assert_eq!(gate.state(), Focus::Local);
+}
+
+#[tokio::test]
+async fn window_lease_uses_exclusive_gate_and_releases_held_state() {
+    let gate = FocusGate::default();
+    let evidence = Arc::new(Mutex::new(Evidence::default()));
+    let shared = Arc::new(Mutex::new(Some(RemoteInputSink::new(Injector {
+        evidence: evidence.clone(),
+        granted: false,
+    }))));
+    let mut window = ExclusiveSink {
+        inner: SharedSession {
+            shared: shared.clone(),
+            entered: false,
+        },
+        gate: gate.clone(),
+        reserved: false,
+    };
+    let mut other = ExclusiveSink {
+        inner: SharedSession {
+            shared,
+            entered: false,
+        },
+        gate: gate.clone(),
+        reserved: false,
+    };
+    window
+        .enter_window_async(window_target(), -100., 100.)
+        .await
+        .unwrap();
+    assert_eq!(gate.state(), Focus::Controlled);
+    assert!(other
+        .enter_window_async(window_target(), 10., 10.)
+        .await
+        .is_err());
+    window
+        .handle_event(&InputEvent::Key {
+            code: KeyCode::LinuxEvdev(42),
+            pressed: true,
+        })
+        .unwrap();
+    window
+        .handle_event(&InputEvent::PointerButton {
+            button: 272,
+            pressed: true,
+        })
+        .unwrap();
+    assert!(evidence.lock().unwrap().held_key);
+    other.end_session().unwrap();
+    assert!(evidence.lock().unwrap().held_key);
+    window.end_session().unwrap();
+    assert_eq!(gate.state(), Focus::Local);
+    let e = evidence.lock().unwrap();
+    assert!(!e.held_key && !e.held_button);
+}
+#[test]
+fn source_window_focus_excludes_physical_capture_and_incoming() {
+    let gate = FocusGate::default();
+    gate.reserve_inbound().unwrap();
+    *gate.0.lock().unwrap() = Focus::Window;
+    assert!(!gate.arm());
+    assert!(!gate.activate());
+    assert!(gate.reserve_inbound().is_err());
+    gate.inbound_closed();
+    assert!(gate.arm());
+    gate.reserve_inbound().unwrap();
+    assert_eq!(gate.state(), Focus::Yielding);
+    gate.outbound_closed();
+    assert_eq!(gate.state(), Focus::Reserved);
+    gate.inbound_closed();
+    assert_eq!(gate.state(), Focus::Local);
+}
+
+fn window_target() -> ukvm_protocol::display::WindowTarget {
+    ukvm_protocol::display::WindowTarget {
+        origin_known: true,
+        screen: ukvm_protocol::display::ScreenRect {
+            x: -1000,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+        mapping_id: None,
+    }
 }

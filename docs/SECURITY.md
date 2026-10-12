@@ -78,3 +78,16 @@ See [CLIPBOARD.md](CLIPBOARD.md).
 ## M20 files
 
 File Protocol 1 runs on a separate pinned mutual-TLS ALPN channel, never discovery. `receive-files` defaults off and requires connection permission independently of clipboard/control. Per-write/finalization shared policy locks and bounded live checks make revocation fail closed. Private staging, descriptor-relative no-follow filesystem operations, portable component validation, exclusive creates, streamed SHA-256 verification and atomic no-replace batch publication prevent path escape and silent collisions. No special files, permissions/ownership/executable bits or command execution are transferred. Payloads/digests are absent from diagnostics and JSON. See FILE_TRANSFER.md for exact bounds, disk checks and interrupted/uncertain receipt behavior.
+
+## Interactive Remote Sessions v1
+
+Screen pixels require separate `view-screen` default-deny permission and legitimate
+ScreenCast consent, independently of `control-this-node`, input portal authority,
+clipboard and files. Display v1 uses a separate pinned mTLS ALPN channel, bounded
+JPEG frames, acknowledgements, timeouts and latest-frame slots. Window input is
+Input Protocol 1.4 on the existing input Sender/ExclusiveSink/shared RemoteDesktop
+EIS grant, with both viewing and control permission. A private same-user local
+socket only leases runtime input focus; it cannot mutate trust, consent or service
+state. Revocation/disconnect/release clean held input and focus. No pixels or
+keys are logged. Physical acceptance is pending. See [remote sessions](REMOTE_SESSIONS.md)
+for protocol bounds, coordinate matching, permission checks and testing.

@@ -30,6 +30,7 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
     let binary = base.join("bin/ukvm");
     let unit = base.join("lib/systemd/user/ukvm.service");
     let doc = base.join("share/doc/ukvm/SERVICE.md");
+    let remote_doc = base.join("share/doc/ukvm/REMOTE_SESSIONS.md");
     let topology_doc = base.join("share/doc/ukvm/TOPOLOGY.md");
     let contract_doc = base.join("share/doc/ukvm/FRONTEND_CONTRACT.md");
     let schema_doc = base.join("share/doc/ukvm/cli-schema-v1.json");
@@ -38,6 +39,7 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
         &unit,
         &doc,
         &topology_doc,
+        &remote_doc,
         &contract_doc,
         &schema_doc,
     ] {
@@ -51,6 +53,7 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
         &unit,
         &doc,
         &topology_doc,
+        &remote_doc,
         &contract_doc,
         &schema_doc,
     ] {
@@ -84,6 +87,11 @@ fn install(source: &Path, prefix: &Path, destdir: Option<&Path>) -> Result<PathB
     fs::write(
         &unit,
         super::service::unit(&prefix.join("bin/ukvm"), false)?,
+    )
+    .map_err(|e| e.to_string())?;
+    fs::write(
+        &remote_doc,
+        include_str!("../../../docs/REMOTE_SESSIONS.md"),
     )
     .map_err(|e| e.to_string())?;
     fs::write(&doc, include_str!("../../../docs/SERVICE.md")).map_err(|e| e.to_string())?;

@@ -813,6 +813,7 @@ fn older_running_runtime_requires_restart_before_clipboard_permission_edits() {
         profile.json(&["peers"], true)["data"]["peers"][0]["permissions"]["receive_files"],
         false
     );
+    profile.json(&["peer", "allow", "io", "view-screen"], false);
     holder.stdin.take();
     holder.wait().unwrap();
 }
@@ -924,4 +925,26 @@ fn actual_cli_send_jsonl_pinned_tls_and_receiver_hash_verification() {
     assert_eq!(records.last().unwrap()["event"], "result");
     assert_eq!(records.last().unwrap()["ok"], true);
     assert!(records.iter().all(|r| r["schema_version"] == 1));
+}
+
+#[test]
+fn viewing_permission_defaults_off_and_does_not_grant_control() {
+    let p = Profile::new();
+    p.add_peer("io");
+    assert_eq!(
+        p.json(&["peers"], true)["data"]["peers"][0]["permissions"]["view_screen"],
+        false
+    );
+    let changed = p.json(&["peer", "allow", "io", "view-screen"], true);
+    assert_eq!(changed["data"]["permissions"]["view_screen"], true);
+    for permission in ["control_this_node", "share_clipboard", "receive_files"] {
+        assert_eq!(changed["data"]["permissions"][permission], false);
+    }
+    assert_eq!(changed["data"]["apply_required"], false);
+    assert!(changed["data"]["apply_command"].is_null());
+    p.json(&["peer", "deny", "io", "view-screen"], true);
+    assert_eq!(
+        p.json(&["peers"], true)["data"]["peers"][0]["permissions"]["view_screen"],
+        false
+    );
 }

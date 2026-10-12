@@ -218,3 +218,27 @@ fn runtime_shutdown_test(signal: &str) {
     assert!(temp.path().join("ukvm/runtime.lock").exists());
     assert!(std::net::TcpListener::bind(address).is_ok());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn remote_help_and_unknown_peer_never_create_identity_or_start_runtime() {
+    let binary = env!("CARGO_BIN_EXE_ukvm");
+    let help = Command::new(binary)
+        .args(["remote", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("Click") || text.contains("click"));
+    assert!(text.contains("view-screen"));
+    assert!(text.contains("Ctrl+Alt+Shift+Escape"));
+    let temp = tempfile::tempdir().unwrap();
+    let error = Command::new(binary)
+        .args(["remote", "unknown-peer"])
+        .env("XDG_STATE_HOME", temp.path().join("state"))
+        .env("XDG_DATA_HOME", temp.path().join("data"))
+        .output()
+        .unwrap();
+    assert!(!error.status.success());
+    assert!(!temp.path().join("data/ukvm/node.key").exists());
+}

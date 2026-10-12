@@ -142,3 +142,15 @@ See [FILE_TRANSFER.md](FILE_TRANSFER.md) for storage, limits, lifecycle and phys
 ### Fresh controlled-node preparation
 
 After granting `control-this-node`, the existing `apply_required:true` / `apply_command:"ukvm apply"` response remains unchanged. Apply retains `mechanism:"user_service_restart"`: general preference reload still requires the single managed lifecycle action. The restarted runtime proactively prepares its shared receiver if a pinned peer has both connection and control permission, so a fresh portal prompt no longer depends on an incoming control request. Preparation does not grant portal consent or enter control. Frontends should query the existing runtime receiver and desktop authorization fields afterward; `applied:true` never promises that the user approved a pending dialog. Revocation uses live peer policy checks and Apply closes prior receiver state; with no eligible peer, startup does not request consent. No JSON/JSONL fields or protocol versions change.
+
+## Interactive Remote Sessions v1 (additive schema v1)
+
+Permission objects add `view_screen` (default false when absent). Receiver-side
+`peer allow|deny PEER view-screen --json` applies live on the new runtime and
+returns `apply_required:false`, `apply_command:null`; a running older runtime must
+be restarted first. Trust, viewing, control, clipboard and files remain separate.
+Runtime snapshots add nullable `display_protocol_version` (1 in this release).
+`ukvm remote PEER` launches a native Wayland window and is deliberately a window
+command rather than a JSON stream. The existing remote-input permission and Apply
+semantics stay unchanged. No frame bytes, pixels or key payloads enter JSON.
+See [REMOTE_SESSIONS.md](REMOTE_SESSIONS.md) for behavior and physical tests.

@@ -57,6 +57,8 @@ pub struct Connection {
     local_sink: SinkKind,
     allowed_debug: bool,
     allowed_remote: bool,
+    allowed_view: bool,
+    policy_dir: Option<std::path::PathBuf>,
 }
 
 fn hello(identity: &Identity, name: &str, controller: bool, sink: Option<SinkKind>) -> WireMessage {
@@ -144,6 +146,8 @@ pub async fn connect(
         local_sink: SinkKind::Debug,
         allowed_debug: false,
         allowed_remote: false,
+        allowed_view: false,
+        policy_dir: None,
     })
 }
 
@@ -167,6 +171,8 @@ pub async fn accept(
         local_sink: SinkKind::Debug,
         allowed_debug: true,
         allowed_remote: false,
+        allowed_view: false,
+        policy_dir: None,
     })
 }
 
@@ -198,6 +204,10 @@ pub async fn accept_remote_trusted<S: InputSink>(
 }
 
 pub enum RuntimeConnection {
+    Display {
+        stream: TlsStream<TcpStream>,
+        peer_id: String,
+    },
     Files {
         stream: TlsStream<TcpStream>,
         peer_id: String,
@@ -223,7 +233,11 @@ pub async fn accept_runtime(
         .map(|p| load_peer_certificate(&cert_path(state_dir, &p.id)))
         .collect::<Result<Vec<_>, _>>()?;
     let mut config = (*server_config_many(identity, certificates)?).clone();
-    config.alpn_protocols = vec![crate::clipboard::ALPN.to_vec(), crate::files::ALPN.to_vec()];
+    config.alpn_protocols = vec![
+        crate::clipboard::ALPN.to_vec(),
+        crate::files::ALPN.to_vec(),
+        crate::display::ALPN.to_vec(),
+    ];
     tcp.set_nodelay(true).map_err(|e| e.to_string())?;
     let tls = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
@@ -233,6 +247,17 @@ pub async fn accept_runtime(
     .map_err(|_| "TLS handshake timed out".to_string())?
     .map_err(|_| "TLS peer authentication failed".to_string())?;
     let mut stream = TlsStream::from(tls);
+    if stream.get_ref().1.alpn_protocol() == Some(crate::display::ALPN) {
+        let certificate = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .ok_or("TLS peer certificate missing")?;
+        let peer_id = certificate_id(certificate.as_ref());
+        store.authorize(&peer_id, SessionPermission::ViewScreen)?;
+        return Ok(RuntimeConnection::Display { stream, peer_id });
+    }
     if stream.get_ref().1.alpn_protocol() == Some(crate::files::ALPN) {
         let certificate = stream
             .get_ref()
@@ -270,6 +295,8 @@ pub async fn accept_runtime(
         local_sink: SinkKind::RemoteInput,
         allowed_debug: false,
         allowed_remote: trusted.permissions.control_this_node,
+        allowed_view: trusted.permissions.view_screen,
+        policy_dir: Some(state_dir.to_owned()),
     }))
 }
 
@@ -302,6 +329,8 @@ async fn accept_trusted_for(
         local_sink: sink,
         allowed_debug: sink == SinkKind::Debug && trusted.permissions.debug_input,
         allowed_remote: sink == SinkKind::RemoteInput && trusted.permissions.control_this_node,
+        allowed_view: trusted.permissions.view_screen,
+        policy_dir: Some(state_dir.to_owned()),
     })
 }
 
@@ -338,6 +367,8 @@ pub async fn accept_remote<S: InputSink>(
         local_sink: SinkKind::RemoteInput,
         allowed_debug: false,
         allowed_remote: true,
+        allowed_view: false,
+        policy_dir: None,
     })
 }
 
@@ -402,6 +433,7 @@ where
         return Err("receiver sink does not match advertised session type".into());
     }
     let mut state = ControlledState::PeerAuthenticated;
+    let mut window_session = false;
     let mut counts = EventCounts::default();
     let mut rate_window = Instant::now();
     let mut rate_count = 0u32;
@@ -423,6 +455,9 @@ where
                 tokio::select! {
                     _ = &mut shutdown => break Err("local control override".into()),
                     _ = health_tick.tick() => {
+                        if window_session && connection.policy_dir.as_ref().is_none_or(|dir| TrustStore::load(dir).and_then(|store| store.authorize(&connection.peer.id, SessionPermission::ViewScreen).map(|_| ())).is_err()) {
+                            break Err("window viewing permission revoked".into());
+                        }
                         if state == ControlledState::ReceivingInput && !sink.is_healthy() {
                             break Err("input backend disconnected; releasing remote input".into());
                         }
@@ -437,9 +472,15 @@ where
             Err(err) => break Err(err),
         };
         match message {
-            requested_message @ (WireMessage::SessionStart | WireMessage::RemoteSessionStart)
+            requested_message @ (WireMessage::SessionStart
+            | WireMessage::RemoteSessionStart
+            | WireMessage::WindowSessionStart)
                 if connection.peer.controller =>
             {
+                window_session = requested_message == WireMessage::WindowSessionStart;
+                if window_session && !connection.allowed_view {
+                    break Err("view-screen permission denied".into());
+                }
                 let requested = if requested_message == WireMessage::SessionStart {
                     SinkKind::Debug
                 } else {
@@ -474,6 +515,12 @@ where
                 notice(ReceiverNotice::SessionStarted);
             }
             WireMessage::Input(event) => {
+                if matches!(event, InputEvent::PointerAbsolute { .. }) && !window_session {
+                    break Err("absolute input outside window session".into());
+                }
+                if matches!(event, InputEvent::PointerMotion { .. }) && window_session {
+                    break Err("relative input in window session".into());
+                }
                 if let Err(err) = state.event() {
                     break Err(err);
                 }
@@ -515,9 +562,29 @@ where
                     notice(ReceiverNotice::Counts(counts.clone()));
                 }
             }
+            WireMessage::WindowEntry { target, x, y }
+                if window_session
+                    && state == ControlledState::ReceivingInput
+                    && !remote_entry_seen =>
+            {
+                let entered = tokio::select! {
+                    _ = &mut shutdown => Err("local override during window entry".into()),
+                    result = sink.enter_window_async(target, x, y) => result,
+                };
+                if let Err(err) = entered {
+                    break Err(err);
+                }
+                remote_entry_seen = true;
+                if let Err(err) =
+                    write_frame(&mut connection.stream, &WireMessage::WindowEntered).await
+                {
+                    break Err(err);
+                }
+            }
             WireMessage::RemoteEntry(position)
                 if state == ControlledState::ReceivingInput
                     && sink.kind() == SinkKind::RemoteInput
+                    && !window_session
                     && !remote_entry_seen =>
             {
                 let entered = tokio::select! {
@@ -533,6 +600,7 @@ where
             WireMessage::TopologyEntry { entry, exits }
                 if state == ControlledState::ReceivingInput
                     && sink.kind() == SinkKind::RemoteInput
+                    && !window_session
                     && !remote_entry_seen =>
             {
                 let entered = tokio::select! {
@@ -594,6 +662,7 @@ pub struct Sender {
     pub control: mpsc::Sender<WireMessage>,
     pub alive: watch::Receiver<bool>,
     pub returned: watch::Receiver<Option<EdgePosition>>,
+    pub entered: watch::Receiver<bool>,
     pub rtt_micros: Arc<AtomicU64>,
     tasks: SenderTasks,
 }
@@ -633,7 +702,7 @@ impl Sender {
 }
 
 pub async fn start_sender(connection: Connection) -> Result<Sender, String> {
-    start_sender_for(connection, SinkKind::Debug, None).await
+    start_sender_for(connection, SinkKind::Debug, None, false).await
 }
 
 /// Only callers that explicitly choose remote control can send this request.
@@ -642,18 +711,23 @@ pub async fn start_remote_sender(
     connection: Connection,
     entry_edge: ukvm_protocol::Edge,
 ) -> Result<Sender, String> {
-    start_sender_for(connection, SinkKind::RemoteInput, Some(entry_edge)).await
+    start_sender_for(connection, SinkKind::RemoteInput, Some(entry_edge), false).await
 }
 
 /// Routed runtime validates each reported exit against its selected topology.
 pub async fn start_topology_sender(connection: Connection) -> Result<Sender, String> {
-    start_sender_for(connection, SinkKind::RemoteInput, None).await
+    start_sender_for(connection, SinkKind::RemoteInput, None, false).await
+}
+
+pub async fn start_window_sender(connection: Connection) -> Result<Sender, String> {
+    start_sender_for(connection, SinkKind::RemoteInput, None, true).await
 }
 
 async fn start_sender_for(
     mut connection: Connection,
     kind: SinkKind,
     expected_return_edge: Option<ukvm_protocol::Edge>,
+    window: bool,
 ) -> Result<Sender, String> {
     let (request, accepted) = match kind {
         SinkKind::Debug => {
@@ -665,7 +739,11 @@ async fn start_sender_for(
                 return Err("peer did not advertise remote_input".into());
             }
             (
-                WireMessage::RemoteSessionStart,
+                if window {
+                    WireMessage::WindowSessionStart
+                } else {
+                    WireMessage::RemoteSessionStart
+                },
                 WireMessage::RemoteSessionAccept,
             )
         }
@@ -687,6 +765,7 @@ async fn start_sender_for(
     let (control, mut controls) = mpsc::channel::<WireMessage>(4);
     let (alive_tx, alive) = watch::channel(true);
     let (return_tx, returned) = watch::channel(None);
+    let (entered_tx, entered) = watch::channel(false);
     let rtt_micros = Arc::new(AtomicU64::new(0));
     let pending_ping = Arc::new(std::sync::Mutex::new(None::<(u64, Instant)>));
     let reader = {
@@ -697,6 +776,9 @@ async fn start_sender_for(
             loop {
                 let frame = tokio::time::timeout(HEALTH_TIMEOUT, read_frame(&mut read)).await;
                 match frame {
+                    Ok(Ok((WireMessage::WindowEntered, _))) if window && !*entered_tx.borrow() => {
+                        let _ = entered_tx.send(true);
+                    }
                     Ok(Ok((WireMessage::HeartbeatAck(nonce), _))) => {
                         let mut slot = pending.lock().unwrap();
                         if let Some((_, at)) =
@@ -795,6 +877,7 @@ async fn start_sender_for(
         control,
         alive,
         returned,
+        entered,
         rtt_micros,
         tasks: SenderTasks { writer, reader },
     })

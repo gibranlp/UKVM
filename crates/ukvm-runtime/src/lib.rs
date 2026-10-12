@@ -20,6 +20,7 @@ enum Focus {
     Disarming,
     Reserved,
     Controlled,
+    Window,
 }
 
 /// One focus owner; idle outbound barriers can yield to incoming control.
@@ -73,7 +74,7 @@ impl FocusGate {
         *state = match *state {
             // Do not allow rearming until the old portal has closed.
             Focus::Yielding => Focus::Disarming,
-            Focus::Reserved | Focus::Controlled => Focus::Local,
+            Focus::Reserved | Focus::Controlled | Focus::Window => Focus::Local,
             other => other,
         };
     }
@@ -94,6 +95,32 @@ impl<S: InputSink + Send> InputSink for ExclusiveSink<S> {
     }
     fn begin_session_async(&mut self) -> SinkFuture<'_> {
         self.inner.begin_session_async()
+    }
+    fn enter_window_async(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> SinkFuture<'_> {
+        Box::pin(async move {
+            self.gate.reserve_inbound()?;
+            self.reserved = true;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while self.gate.state() == Focus::Yielding {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| "local capture cleanup timed out")?;
+            {
+                let mut state = self.gate.0.lock().unwrap();
+                if *state != Focus::Reserved {
+                    return Err("focus reservation lost".into());
+                }
+                *state = Focus::Controlled;
+            }
+            self.inner.enter_window_async(target, x, y).await
+        })
     }
     fn enter_remote(&mut self, _: EdgePosition) -> Result<(), String> {
         Err("runtime entry requires asynchronous capture cleanup".into())
@@ -180,6 +207,18 @@ impl<S: InputSink + Send> InputSink for SharedSession<S> {
         } else {
             Err("portal grant unavailable".into())
         }
+    }
+    fn enter_window(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> Result<(), String> {
+        self.entered = true;
+        let mut shared = self.shared.lock().unwrap();
+        let sink = shared.as_mut().ok_or("portal grant unavailable")?;
+        sink.resume_session()?;
+        sink.enter_window(target, x, y)
     }
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
         self.entered = true;

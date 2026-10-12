@@ -41,3 +41,14 @@ The current runtime supports Linux Wayland and up to eight cardinal coordinates,
 `ukvm-config` uses TOML and OS-appropriate user paths: XDG config directory on Linux, Application Support on macOS, and AppData Roaming on Windows. The schema contains node name, role, listen address and node-level edge links. Links store the peer's certificate fingerprint, not its alias. On Linux, trust metadata and pinned peer certificates live in `$XDG_STATE_HOME/ukvm` (or `~/.local/state/ukvm`), while the unchanged `node.der`/`node.key` identity remains in the existing local user-data directory (`$XDG_DATA_HOME/ukvm` or its platform default). Peer aliases are labels; addresses are replaceable connection hints. Adding a peer defaults to connect allowed, debug input denied and control-this-node denied. The configured `listen` command checks the authenticated certificate ID and the requested session type against those permissions. CLI peer and layout edits take an advisory user-state lock, then replace files through synced temporary files and atomic rename. Coordinate topology is stored in `[[layout.nodes]]`; legacy edge links map to distance-one coordinates. Input Protocol 1.3 carries bounded permitted exits and refreshes without conveying identity or permission. Permissioned portal zone geometry supplies external boundary segments; a monitor-mapping UI remains future work. Existing minimal TOML and identity files remain valid without migration.
 
 Pairing is a temporary first-contact channel, separate from mTLS input sessions. It exchanges public identities inside Noise transport, then requires both users to compare a short transcript-bound value and confirm. Its commit phase writes the same peer store used by manual import; permissions and layout remain separate. A separate, time-limited pending record captures mutual confirmation and commit state so an interrupted distributed commit can be inspected and recovered without turning pending data into trust. See [pairing](PAIRING.md) for the threat model and protocol. See [discovery](DISCOVERY.md) for the temporary mDNS pairing advertisement and bounded browse.
+
+## Interactive Remote Sessions v1
+
+In addition to physical capture, `ukvm remote PEER` provides a native window input
+source. Its private local runtime bridge reserves the same focus gate and uses
+the same authenticated input Sender and shared RemoteDesktop/EIS injector. Video
+uses an independent ScreenCast → restricted PipeWire → JPEG → display TLS → native
+window path; display failure does not fail normal runtime workers. Portable frame
+and mapping types live in protocol/core; Linux capture/presentation remain in
+platform. See [the implementation and limitations](REMOTE_SESSIONS.md). Input 1.4
+is required on both nodes; previous milestone protocol references are historical.

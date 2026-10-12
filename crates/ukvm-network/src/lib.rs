@@ -118,6 +118,10 @@ pub fn validate(message: &WireMessage) -> Result<(), String> {
                 return Err("invalid platform".into());
             }
         }
+        WireMessage::WindowEntry { target, x, y } => {
+            target.fractions(*x, *y)?;
+            validate_event(&InputEvent::PointerAbsolute { x: *x, y: *y })?
+        }
         WireMessage::Input(event) => validate_event(event)?,
         WireMessage::RemoteEntry(position) | WireMessage::ReturnControl(position) => {
             position.validate()?;
@@ -158,7 +162,9 @@ pub struct EventCounts {
 impl EventCounts {
     pub fn add(&mut self, event: &InputEvent) {
         match event {
-            InputEvent::PointerMotion { .. } => self.pointer += 1,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerAbsolute { .. } => {
+                self.pointer += 1
+            }
             InputEvent::PointerButton { .. } => self.buttons += 1,
             InputEvent::Scroll { .. } => self.scroll += 1,
             InputEvent::Key { .. } => self.keyboard += 1,
@@ -284,3 +290,8 @@ pub mod files;
 
 #[cfg(all(test, target_os = "linux"))]
 mod file_tests;
+
+pub mod display;
+
+#[cfg(test)]
+mod remote_tests;

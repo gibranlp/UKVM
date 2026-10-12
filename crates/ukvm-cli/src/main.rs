@@ -10,6 +10,8 @@ mod management;
 mod network;
 mod pairing;
 #[cfg(target_os = "linux")]
+mod remote;
+#[cfg(target_os = "linux")]
 mod service;
 mod settings;
 mod setup;
@@ -25,6 +27,7 @@ Commands:\n\
   peer allow|deny PEER share-clipboard  Opt-in bilateral text sharing (both nodes)\n\
   send PATH... PEER [--json]  Explicit encrypted file/folder transfer\n\
   files status|directory [PATH]|cancel ID [--json]  File transfer status and settings\n\
+  remote PEER  View a peer monitor; click to control; Ctrl+Alt+Shift+Escape releases\n\
   run [--verbose]  Run persistent authenticated edge control\n\
   control EDGE [--zone INDEX]  Request remote input through a configured edge\n\
   control EDGE --debug [--zone INDEX]  Forward captured input to a DebugSink\n\
@@ -102,6 +105,12 @@ fn main() -> ExitCode {
         [command] if command == "doctor" => doctor(),
         [command, rest @ ..] if command == "identity" => network::identity(rest),
         [command, rest @ ..] if command == "listen" => network::listen(rest),
+        #[cfg(target_os = "linux")]
+        [command, rest @ ..] if command == "remote" => remote::command(rest),
+        #[cfg(not(target_os = "linux"))]
+        [command, ..] if command == "remote" => {
+            fail("remote sessions currently require Linux Wayland")
+        }
         [command, rest @ ..] if command == "run" => run(rest),
         [command, target, rest @ ..] if command == "connect" => {
             network::connect(target, rest, false)

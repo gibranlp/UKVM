@@ -37,6 +37,12 @@ const PORTAL_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_QUEUE: usize = 256;
 
 enum Command {
+    WindowEntry(
+        ukvm_protocol::display::WindowTarget,
+        f64,
+        f64,
+        reply::SyncSender<Result<(), PlatformError>>,
+    ),
     Begin(reply::SyncSender<Result<(), PlatformError>>),
     Resume(reply::SyncSender<Result<(), PlatformError>>),
     BeginAsync(oneshot::Sender<Result<(), PlatformError>>),
@@ -251,6 +257,17 @@ impl PlatformInputInjector for WaylandInputInjector {
         )
     }
 
+    fn enter_window(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> Result<(), PlatformError> {
+        self.request(
+            |reply| Command::WindowEntry(target, x, y, reply),
+            COMMAND_TIMEOUT,
+        )
+    }
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
         self.request(|reply| Command::Enter(entry, reply), COMMAND_TIMEOUT)
     }
@@ -291,6 +308,53 @@ impl PlatformInputInjector for WaylandInputInjector {
     }
 }
 
+fn window_region(
+    target: &ukvm_protocol::display::WindowTarget,
+    regions: &[reis::event::Region],
+) -> Result<ukvm_protocol::display::ScreenRect, PlatformError> {
+    target.validate().map_err(PlatformError::Backend)?;
+    let region = if let Some(id) = target
+        .mapping_id
+        .as_ref()
+        .filter(|_| regions.iter().any(|r| r.mapping_id.is_some()))
+    {
+        regions.iter().find(|r| r.mapping_id.as_ref() == Some(id))
+    } else {
+        regions
+            .iter()
+            .find(|r| {
+                target.origin_known
+                    && i64::from(r.x) == i64::from(target.screen.x)
+                    && i64::from(r.y) == i64::from(target.screen.y)
+                    && r.width == target.screen.width
+                    && r.height == target.screen.height
+            })
+            .or_else(|| {
+                if regions.len() == 1
+                    && regions[0].width == target.screen.width
+                    && regions[0].height == target.screen.height
+                {
+                    regions.first()
+                } else {
+                    None
+                }
+            })
+    }
+    .ok_or(PlatformError::Unsupported(
+        "selected screen cannot be matched to an EI region",
+    ))?;
+    let rect = ukvm_protocol::display::ScreenRect {
+        x: i32::try_from(region.x)
+            .map_err(|_| PlatformError::Unsupported("EI region offset out of range"))?,
+        y: i32::try_from(region.y)
+            .map_err(|_| PlatformError::Unsupported("EI region offset out of range"))?,
+        width: region.width,
+        height: region.height,
+    };
+    rect.validate().map_err(PlatformError::Backend)?;
+    Ok(rect)
+}
+
 struct PortalEisSession {
     portal_session: Session<RemoteDesktop>,
     _authorization: super::authorization::Authorization,
@@ -301,6 +365,10 @@ struct PortalEisSession {
     held_keys: HashSet<u32>,
     held_buttons: HashSet<u32>,
     remote_pointer: Option<RemotePointer>,
+    window_mapping: Option<(
+        ukvm_protocol::display::WindowTarget,
+        ukvm_protocol::display::ScreenRect,
+    )>,
     clock: Instant,
 }
 
@@ -510,6 +578,7 @@ impl PortalEisSession {
                 held_keys: HashSet::new(),
                 held_buttons: HashSet::new(),
                 remote_pointer: None,
+                window_mapping: None,
                 clock: Instant::now(),
             }),
             Err(err) => Err(err),
@@ -538,6 +607,30 @@ impl PortalEisSession {
             .map_err(|err| PlatformError::Backend(format!("EI flush failed: {err}")))
     }
 
+    fn enter_window(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> Result<(), PlatformError> {
+        self.remote_pointer = None;
+        target.fractions(x, y).map_err(PlatformError::Backend)?;
+        let rect = window_region(&target, self.pointer.regions())?;
+        self.window_mapping = Some((target, rect));
+        self.window_motion(x, y)
+    }
+    fn window_motion(&self, x: f64, y: f64) -> Result<(), PlatformError> {
+        let (target, region) = self
+            .window_mapping
+            .as_ref()
+            .ok_or(PlatformError::SessionClosed)?;
+        let (fx, fy) = target.fractions(x, y).map_err(PlatformError::Backend)?;
+        self.absolute_motion(
+            (f64::from(region.x) + fx * f64::from(region.width)) as f32,
+            (f64::from(region.y) + fy * f64::from(region.height)) as f32,
+        )
+    }
+
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), PlatformError> {
         self.enter_topology(entry, Vec::new())
     }
@@ -547,6 +640,7 @@ impl PortalEisSession {
         entry: EdgePosition,
         exits: Vec<ukvm_protocol::Edge>,
     ) -> Result<(), PlatformError> {
+        self.window_mapping = None;
         if !self
             .pointer
             .has_capability(DeviceCapability::PointerAbsolute)
@@ -613,6 +707,7 @@ impl PortalEisSession {
             return Err(PlatformError::SessionClosed);
         }
         match event {
+            InputEvent::PointerAbsolute { x, y } => self.window_motion(*x, *y),
             InputEvent::PointerMotion { dx, dy } => {
                 let pointer =
                     self.pointer
@@ -759,6 +854,9 @@ async fn run_actor(
                         } else { Err(PlatformError::SessionClosed) };
                         let _ = reply.send(result);
                     }
+                    Some(Command::WindowEntry(target, x, y, reply)) => {
+                        let _ = reply.send(if in_use { active.enter_window(target, x, y) } else { Err(PlatformError::SessionClosed) });
+                    }
                     Some(Command::RemoteEvent(event, reply)) => {
                         let result = if in_use { active.inject_remote(&event) } else { Err(PlatformError::SessionClosed) };
                         if result.is_err() { healthy.store(false, Ordering::Release); }
@@ -770,6 +868,7 @@ async fn run_actor(
                     Some(Command::Park(reply)) => {
                         let result = active.release_all();
                         active.remote_pointer = None;
+                        active.window_mapping = None;
                         in_use = false;
                         let _ = reply.send(result);
                     }
@@ -879,6 +978,9 @@ async fn run_actor(
                     | Command::Topology(_, _, reply)
                     | Command::Exits(_, reply),
                 ) => {
+                    let _ = reply.send(Err(PlatformError::SessionClosed));
+                }
+                Some(Command::WindowEntry(_, _, _, reply)) => {
                     let _ = reply.send(Err(PlatformError::SessionClosed));
                 }
                 Some(Command::RemoteEvent(_, reply)) => {
@@ -1284,5 +1386,44 @@ mod persistence_tests {
         assert!(
             persistence_result(Some(secret), Some(secret)).contains("replacement_same_value=true")
         );
+    }
+}
+
+#[cfg(test)]
+mod window_geometry_tests {
+    use super::*;
+    use ukvm_protocol::display::{ScreenRect, WindowTarget};
+    fn region(x: u32, id: Option<&str>) -> reis::event::Region {
+        reis::event::Region {
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.,
+            mapping_id: id.map(str::to_owned),
+        }
+    }
+    #[test]
+    fn mapping_id_selects_monitor_and_single_region_translates_negative_origin() {
+        let target = WindowTarget {
+            origin_known: true,
+            screen: ScreenRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            mapping_id: Some("second".into()),
+        };
+        let selected = window_region(
+            &target,
+            &[region(0, Some("first")), region(1920, Some("second"))],
+        )
+        .unwrap();
+        assert_eq!(selected.x, 1920);
+        assert_eq!(target.fractions(-960., 540.).unwrap(), (0.5, 0.5));
+        assert!(window_region(&target, &[region(0, Some("wrong"))]).is_err());
+        assert_eq!(window_region(&target, &[region(0, None)]).unwrap().x, 0);
+        assert!(window_region(&target, &[region(0, None), region(1920, None)]).is_err());
     }
 }

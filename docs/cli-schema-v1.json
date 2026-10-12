@@ -23,6 +23,14 @@
         "control_this_node": {
           "type": "boolean"
         },
+        "view_screen": {
+          "type": "boolean",
+          "default": false
+        },
+        "receive_files": {
+          "type": "boolean",
+          "default": false
+        },
         "share_clipboard": {
           "type": "boolean"
         }

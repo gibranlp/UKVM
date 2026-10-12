@@ -5,6 +5,7 @@ type Injector = RemoteInputSink<WaylandInputInjector>;
 struct Authority {
     input_slots: tokio::sync::Semaphore,
     file_slots: tokio::sync::Semaphore,
+    display_slots: tokio::sync::Semaphore,
     sink: Arc<Mutex<Option<Injector>>>,
     initialization: tokio::sync::Mutex<()>,
     status: Arc<Mutex<String>>,
@@ -89,6 +90,19 @@ impl InputSink for IncomingSink {
             self.authorize()
         })
     }
+    fn enter_window(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> Result<(), String> {
+        self.authorize()?;
+        TrustStore::load(&self.policy.0)?.authorize(
+            &self.policy.1,
+            ukvm_network::trust::SessionPermission::ViewScreen,
+        )?;
+        self.session.enter_window(target, x, y)
+    }
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
         self.authorize()
             .and_then(|()| self.session.enter_remote(entry))
@@ -172,6 +186,19 @@ async fn incoming(
         }
     };
     let connection = match connection {
+        transport::RuntimeConnection::Display {
+            mut stream,
+            peer_id,
+        } => {
+            if let Ok(_slot) = input_authority.display_slots.try_acquire() {
+                if let Err(error) =
+                    super::remote::display_session(context, &peer_id, &mut stream, stop).await
+                {
+                    context.log(format!("remote display: {error}"));
+                }
+            }
+            return;
+        }
         transport::RuntimeConnection::Input(connection) => connection,
         transport::RuntimeConnection::Files {
             mut stream,
@@ -335,6 +362,7 @@ pub(super) async fn receiver(
     let authority = Arc::new(Authority {
         input_slots: tokio::sync::Semaphore::new(16),
         file_slots: tokio::sync::Semaphore::new(4),
+        display_slots: tokio::sync::Semaphore::new(1),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),
@@ -375,6 +403,7 @@ pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
     let authority = Arc::new(Authority {
         input_slots: tokio::sync::Semaphore::new(16),
         file_slots: tokio::sync::Semaphore::new(4),
+        display_slots: tokio::sync::Semaphore::new(1),
         sink: Arc::new(Mutex::new(None)),
         initialization: tokio::sync::Mutex::new(()),
         status: Arc::clone(&context.receiver_status),

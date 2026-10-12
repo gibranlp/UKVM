@@ -155,6 +155,7 @@ mod tests {
                 connect: true,
                 share_clipboard: false,
                 receive_files: false,
+                view_screen: false,
                 debug_input: false,
                 control_this_node: false,
             },

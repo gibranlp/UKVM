@@ -1,4 +1,4 @@
-# Input protocol sketch (version 1.3)
+# Input protocol sketch (version 1.4)
 
 The input protocol is a provisional development format. Each TLS application frame has a four-byte big-endian length and a fixed-integer `bincode` payload, capped at 512 bytes before allocation. Both peers must use the exact major and minor version. The protocol is authenticated by pinned mutual TLS; `Hello.node_id` must match the authenticated certificate fingerprint. Pairing is a **separate version 2 protocol** on port 24801 and is unchanged by this revision. Discovery is an untrusted address hint.
 
@@ -47,3 +47,17 @@ the input receiver or discovery. See [CLIPBOARD.md](CLIPBOARD.md) for encoding a
 ## File Protocol 1
 
 Independent ALPN `ukvm-files/1`, pinned mutual TLS, bounded Hello/Offer/Accepted/Rejected, indexed 64 KiB Chunk/Ack, FileEnd(size,SHA-256), Complete/Result and Cancel. Portable UTF-8 path component arrays; no platform paths/MIME extensions interpreted. Input and clipboard versions remain unchanged. Older nodes retain their input/clipboard behavior and reject unsupported file channels. See FILE_TRANSFER.md for framing and limits.
+
+## Interactive window input (1.4) and Display Protocol 1
+
+Input 1.4 adds WindowSessionStart, WindowEntry (bounded logical target, optional
+mapping ID and initial position), WindowEntered acknowledgement, and
+PointerAbsolute. Window requests require both view-screen and control-this-node.
+They reuse RemoteSessionAccept, Input, SessionEnd, heartbeats and existing held-input
+cleanup; no topology entry/relative motion or inverse-edge return is enabled in
+a window lease. Absolute input is rejected in physical sessions. Both nodes must
+use 1.4; 1.3/older fail closed at Hello. Pairing 2, Clipboard 1 and File 1 remain
+unchanged. `ukvm-display/1` is a separate pinned TLS ALPN with independently bounded
+Hello/Ready/JPEG Frame/Ack messages and no input payloads. See
+[REMOTE_SESSIONS.md](REMOTE_SESSIONS.md) for the complete reviewed v1 bounds and
+lifecycle; physical acceptance remains pending.

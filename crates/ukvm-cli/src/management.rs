@@ -21,7 +21,9 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         )
         && !(command == "peer"
             && (args.get(1).is_some_and(|a| a == "remove")
-                || args.get(3).is_some_and(|a| a == "receive-files")))
+                || args
+                    .get(3)
+                    .is_some_and(|a| a == "receive-files" || a == "view-screen")))
     {
         return None;
     }
@@ -474,7 +476,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
                 (action, name, permission)
             }
             _ => return Err(
-                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node|share-clipboard|receive-files [--json]"
+                "usage: ukvm peer allow|deny PEER connect|debug-input|control-this-node|share-clipboard|receive-files|view-screen [--json]"
                     .into(),
             ),
         };
@@ -483,6 +485,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
         "debug-input" => SessionPermission::DebugInput,
         "control-this-node" => SessionPermission::ControlThisNode,
         "share-clipboard" => SessionPermission::ShareClipboard,
+        "view-screen" => SessionPermission::ViewScreen,
         "receive-files" => SessionPermission::ReceiveFiles,
         _ => return Err("unknown permission".into()),
     };
@@ -490,6 +493,14 @@ fn permission(args: &[String]) -> Result<Value, String> {
         let live = runtime();
         if live["state"] == "running" && live["snapshot"]["clipboard"]["state"] == "" {
             return Err("Restart UKVM to load M19 before changing clipboard permissions".into());
+        }
+    }
+    if permission == SessionPermission::ViewScreen {
+        let live = runtime();
+        if live["state"] == "running" && live["snapshot"]["display_protocol_version"] != json!(1) {
+            return Err(
+                "Restart UKVM to load remote sessions before changing viewing permissions".into(),
+            );
         }
     }
     if permission == SessionPermission::ReceiveFiles {
@@ -503,7 +514,7 @@ fn permission(args: &[String]) -> Result<Value, String> {
     store.set_permission(&default_trust_dir()?, name, permission, action == "allow")?;
     let peer = store.find(name).ok_or("peer disappeared")?;
     Ok(
-        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_required": !matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles), "apply_command": if matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles) { Value::Null } else { json!("ukvm apply") }}),
+        json!({"node_id": peer.id, "permissions": peer.permissions, "scope": "this_computer", "apply_required": !matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles|SessionPermission::ViewScreen), "apply_command": if matches!(permission,SessionPermission::ShareClipboard|SessionPermission::ReceiveFiles|SessionPermission::ViewScreen) { Value::Null } else { json!("ukvm apply") }}),
     )
 }
 

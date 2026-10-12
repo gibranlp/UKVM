@@ -126,6 +126,14 @@ pub trait PlatformInputInjector: Send {
         Box::pin(async { self.begin() })
     }
     fn inject(&mut self, event: &InputEvent) -> Result<(), PlatformError>;
+    fn enter_window(
+        &mut self,
+        _target: ukvm_protocol::display::WindowTarget,
+        _x: f64,
+        _y: f64,
+    ) -> Result<(), PlatformError> {
+        Err(PlatformError::Unsupported("window entry unavailable"))
+    }
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), PlatformError> {
         Err(PlatformError::Unsupported(
             "remote edge entry is unavailable",
@@ -225,6 +233,22 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
         })
     }
 
+    fn enter_window(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> Result<(), String> {
+        if !self.active || self.entered {
+            return Err("window entry out of order".into());
+        }
+        ukvm_protocol::validate_event(&InputEvent::PointerAbsolute { x, y })?;
+        self.injector
+            .enter_window(target, x, y)
+            .map_err(|e| e.to_string())?;
+        self.entered = true;
+        Ok(())
+    }
     fn enter_remote(&mut self, entry: EdgePosition) -> Result<(), String> {
         if !self.active || self.entered {
             return Err("remote entry is out of order".into());
@@ -269,7 +293,9 @@ impl<I: PlatformInputInjector> InputSink for RemoteInputSink<I> {
         ukvm_protocol::validate_event(event)?;
         let caps = self.injector.capabilities();
         let supported = match event {
-            InputEvent::PointerMotion { .. } => caps.pointer_absolute,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerAbsolute { .. } => {
+                caps.pointer_absolute
+            }
             InputEvent::PointerButton { .. } => caps.pointer_button,
             InputEvent::Scroll { .. } => caps.pointer_scroll,
             InputEvent::Key { .. } => caps.keyboard,
@@ -570,3 +596,6 @@ mod injector_tests {
 }
 
 pub mod files;
+
+#[cfg(target_os = "linux")]
+pub mod remote;

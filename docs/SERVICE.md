@@ -98,3 +98,14 @@ Expect an enabled, active/running service and a current runtime snapshot, with n
 Preparation runs concurrently with accepting connections and other runtime workers, uses the same serialized initialization as authenticated incoming sessions, and never enters remote focus or injects input. Cancellation/permission revocation interrupts pending preparation. Denying control continues to terminate active input through the live policy monitor; Apply closes the previous receiver with cooperative service shutdown. If no control-permitted peer remains, the replacement runtime does not request receiver authorization. Consent rejection/backend failure is visible in receiver status; startup does not repeatedly prompt. An explicitly authorized incoming request or a later explicit Apply/restart can retry.
 
 The former receiver was lazy: its initial `consent not requested` state changed only after an authenticated RemoteSessionStart. Apply and manual restart used the same restart operation, so a successful Apply alone did not establish receiver readiness; observed consent depended on incoming reconnect/request timing. Automated regressions cover deny→allow→Apply's managed lifecycle, proactive authorization without a network request, allow→deny→Apply, the connection-permission gate, revocation during pending consent and shutdown cancellation. Fresh-install portal-dialog and physical control acceptance remain required.
+
+## Interactive Remote Sessions v1
+
+The owned runtime additionally serves Display Protocol 1 on its existing pinned
+TLS listener and a private same-user native-window input bridge. Display and GUI
+failures stay independent of physical KVM, clipboard and file workers. Source
+window entry shares the focus gate; release restores physical capture eligibility.
+The socket is private and removed on cooperative shutdown; startup only removes
+a stale owned socket after taking the existing permanent runtime lock. No service
+start/enable is implied by opening a window. Both peers need Input Protocol 1.4.
+Installation also includes `REMOTE_SESSIONS.md`. See [test commands and dependencies](REMOTE_SESSIONS.md).

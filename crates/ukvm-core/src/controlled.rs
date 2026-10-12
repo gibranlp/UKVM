@@ -35,6 +35,25 @@ pub trait InputSink {
     {
         Box::pin(async { self.begin_session() })
     }
+    fn enter_window(
+        &mut self,
+        _target: ukvm_protocol::display::WindowTarget,
+        _x: f64,
+        _y: f64,
+    ) -> Result<(), String> {
+        Err("window entry unavailable".into())
+    }
+    fn enter_window_async(
+        &mut self,
+        target: ukvm_protocol::display::WindowTarget,
+        x: f64,
+        y: f64,
+    ) -> SinkFuture<'_>
+    where
+        Self: Send,
+    {
+        Box::pin(async move { self.enter_window(target, x, y) })
+    }
     fn enter_remote(&mut self, _entry: EdgePosition) -> Result<(), String> {
         Err("sink does not support remote entry".into())
     }

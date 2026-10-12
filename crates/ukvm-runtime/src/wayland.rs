@@ -35,6 +35,7 @@ enum PeerAvailability {
 
 pub(crate) mod clipboard;
 mod files;
+mod remote;
 
 struct Context {
     clipboard: clipboard::Clipboard,
@@ -151,7 +152,7 @@ pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Resul
         let _ = stop_tx.send(true);
         result.map_err(|e| e.to_string())
     };
-    let (signal_result, (), (), (), (), (), (), ()) = tokio::join!(
+    let (signal_result, (), (), (), (), (), (), (), ()) = tokio::join!(
         signal,
         receiver(&context, listener, stop.clone()),
         controller(&context, stop.clone()),
@@ -159,6 +160,7 @@ pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Resul
         peers(&context, stop.clone()),
         rearm_observer(&context, stop.clone()),
         clipboard::supervise(&context, stop.clone()),
+        remote::bridge(&context, stop.clone()),
         publish_status(&context, owner, stop),
     );
     for node in context.config.layout.topology() {
@@ -189,6 +191,7 @@ async fn publish_status(
                 let states = context.availability.lock().unwrap();
                 let snapshot = ownership::RuntimeSnapshot {
                     file_protocol_version: Some(ukvm_protocol::files::VERSION),
+                    display_protocol_version: Some(ukvm_protocol::display::VERSION),
                     clipboard: context.clipboard.snapshot(),
                     name: context.config.node.name.clone(),
                     node_id: context.identity.id.clone(),

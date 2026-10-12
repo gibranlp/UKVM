@@ -32,6 +32,8 @@ pub struct RuntimeSnapshot {
     #[serde(default)]
     pub file_protocol_version: Option<u16>,
     #[serde(default)]
+    pub display_protocol_version: Option<u16>,
+    #[serde(default)]
     pub clipboard: crate::wayland::clipboard::ClipboardStatus,
 }
 #[derive(Debug)]
