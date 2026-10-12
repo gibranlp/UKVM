@@ -16,7 +16,9 @@ futures-util = "0.3"
 pipewire = "0.9.2"
 winit = { version = "0.30", default-features = false, features = ["wayland", "wayland-dlopen", "rwh_06"] }
 softbuffer = { version = "0.4", default-features = false, features = ["wayland", "wayland-dlopen"] }
+turbojpeg = { version = "1.5.1", default-features = false, features = ["pkg-config"] }
 jpeg-encoder = "0.6"
+bytemuck = "1"
 font8x8 = "0.3"
 jpeg-decoder = { version = "0.3", default-features = false }
 reis = { version = "0.7.1", features = ["tokio"] }

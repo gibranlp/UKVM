@@ -1,4 +1,4 @@
-# Interactive Remote Sessions v1 — physical acceptance pending
+# Interactive Remote Sessions — performance follow-up
 
 `ukvm remote PEER` opens a native Wayland window for a pinned peer. The selected
 monitor appears after the peer approves its normal ScreenCast picker. Click the
@@ -9,11 +9,12 @@ open. Click again to request a new control lease. Losing window focus also
 releases control. Closing the window, display/input failure, permission loss,
 backend loss and runtime shutdown clean up held input.
 
-The user physically confirmed desktop delivery and window control on io after
-26ee11e, and Spectrum no longer froze during that attempt. The full modifier,
-release/resume, held-input cleanup and existing-feature acceptance sequence has
-not yet been reported complete. Remembered ScreenCast restoration and the new
-quality settings await physical testing. Existing M18–M20 evidence is unchanged.
+The user physically confirmed live viewing, mouse/keyboard/click/scroll,
+ScreenCast restoration across reconnect and reboot, and clean return to normal
+physical topology when closing the window. The performance follow-up described
+here has automated/local synthetic evidence only; perceptual improvement and
+real two-PC pipeline timings await the user's comparison. Existing M18–M20
+evidence is unchanged. See [performance measurements](REMOTE_PERFORMANCE.md).
 
 ## Architecture and ownership
 
@@ -31,29 +32,31 @@ joined. It neither alters nor resets M18's RemoteDesktop/InputCapture credential
 No external capture/codec programs, direct compositor capture, root input access,
 XWayland fallback or virtual/headless output creation is used.
 
-PipeWire maps packed BGRx/BGRA/RGBx/RGBA buffers. Capture copies validated stride,
-offset and size data into a replaceable slot. A separate codec actor downsizes
-without upscaling to fit 1920×1080, averages source pixels when reducing size,
-and encodes independent JPEG images at quality 92 with full 4:4:4 color resolution,
-targeting 30 FPS. This preserves small colored text better than the former
-quality-65/4:2:0 encoding. Highly noisy images may reduce quantization quality
-through 80/65/45 to stay below 2 MiB; color resolution and frame geometry remain
-unchanged. More bytes per frame can reduce FPS under the same 8 MiB/s cap. Portrait images also fit that bounding box. One native
-Wayland window uses winit/softbuffer; JPEG decoding checks dimensions and RGB24
-before bounded pixel allocation. The window uses bilinear scaling, cached per
-frame/window size, instead of point sampling. A header strip stays outside the
-remote content.
-Redraw requests have a monotonic 33 ms deadline. Winit wakeups/input events do
-not schedule additional frames before that deadline, including in a disconnected
-black window; missed deadlines are skipped rather than replayed.
+PipeWire maps packed BGRx/BGRA/RGBx/RGBA buffers. Capture copies validated
+stride, offset and size data into one replaceable raw slot. A dedicated codec
+actor wakes on publication and uses libjpeg-turbo's SIMD encoder directly on the
+packed pixels, without intermediate RGB conversion/downscaling. Defaults are
+native source resolution, JPEG quality 97, full 4:4:4 chroma, up to 60 FPS and a
+500 Mbps JPEG-payload video ceiling. The viewer can lower FPS, quality and
+bitrate explicitly. Incompressible frames try lower quality (80/65/45), retaining
+geometry/chroma, to fit the 8 MiB JPEG bound. Unsupported/bound-exceeding capture
+fails the display session safely.
 
-The PipeWire offer includes a native-size range up to 8192×8192 and accepts
-fixed-refresh sources up to 1000 Hz as well as damage-only streams. Buffer-copy
-and encoding throttles still target ~30 FPS, and the 64 MiB source bound remains.
-The former offer omitted the size range and capped source negotiation at 30 Hz,
-which could reject a monitor's fixed refresh rate before any frame appeared.
-The size/rate negotiation follows the official
-[PipeWire video capture example](https://docs.pipewire.org/page_tutorial5.html).
+The viewer validates JPEG dimensions before allocating at most 64 MiB of pixels,
+limits progressive scans, and decodes directly into the softbuffer pixel format.
+Decode and bilinear scaling run on a dedicated worker with latest-only input and
+output slots. Native-size scaling shares the decoded pixel storage. Coalesced
+winit notifications submit ready frames promptly without an unbounded GUI event
+queue. The window requests native content size when it fits the local monitor;
+the compositor may override that request. Letterboxing and the 48-pixel status
+header remain independent of input mapping. Status refreshes have bounded timer
+wakeups; baseline mode retains the previous 33 ms refresh cadence.
+
+The PipeWire format offer includes native sizes up to 8192 per dimension, with
+at most 16,777,216 pixels, and accepts fixed refresh up to 1000 Hz or damage-only
+streams. Copies are throttled to the requested FPS; a refresh range is required
+because many monitor nodes advertise a fixed native rate. Negotiation follows
+the official [PipeWire video capture example](https://docs.pipewire.org/page_tutorial5.html).
 
 Clicking connects to the local runtime's private, same-user Unix input bridge.
 That runtime reserves its existing focus gate, closes any idle physical capture,
@@ -81,34 +84,54 @@ audio, recording, multiple viewing monitors or automatic headless setup exists.
 
 ## Display protocol and security
 
-`ukvm-display/1` is a separate ALPN connection on the existing runtime TCP
+`ukvm-display/2` is a separate ALPN connection on the existing runtime TCP
 listener. It uses the same TLS 1.3 identity, exact certificate pins and connection
 permission. The viewer verifies the authenticated certificate ID. Discovery and
 aliases remain address/name hints, never authorization. No pixels use the input,
 clipboard or file-transfer channel.
 
-Display v1 is a provisional fixed-integer bincode protocol with the existing
-four-byte big-endian framing pattern, independently bounded to 2 MiB + 256 bytes.
-Messages are Hello(version=1), Ready(interactive permission), Frame and
-Ack(sequence). JPEG is capped at 2 MiB; encoded dimensions at 1920×1080; mapping
+Display v2 is a fixed-integer bincode protocol with four-byte big-endian
+length framing, bounded to 8 MiB + 1024 bytes. Messages are Hello(version=2),
+Configure(bounded video preferences), Ready(interactive permission), Frame and
+Ack(sequence, monotonic receive/send timestamps). Frames include only numeric
+performance metadata in addition to the existing geometry and JPEG. JPEG is
+capped at 8 MiB; encoded dimensions at 8192 each and 16,777,216 pixels; mapping
 IDs at 128 bytes; logical geometry at bounded 16384-pixel spans and ±32768
-coordinates. Bad versions, lengths, trailing data, JPEG metadata, sequence
-regressions, rates and unexpected messages fail the session. Debug output omits
-pixel bytes. No image contents or keys are logged or exposed in frontend JSON.
+coordinates. Bad versions/lengths/trailing data, nonfinite capture rates,
+JPEG metadata, sequence regressions, rates and unexpected messages fail the
+session. Pixel storage is reference-counted locally to avoid deep frame clones;
+its wire representation remains an ordinary bounded byte vector. Debug output
+omits pixel bytes. No screen contents, input events or secrets appear in metrics.
 
-There is one display capture slot across peers, one pending raw/encoded/window
-frame per stage and at most one acknowledged frame in flight. New frames replace
-stale ones. A stalled write closes within one second; reads/acks within five.
-Consent has a 120-second server limit. Video is capped at 8 MiB/s with a maximum
-30 FPS target; receiving rejects more than 40 frames/second. Capture source
-buffers are bounded to 8192 per dimension and 64 MiB packed pixels. Old images
-may be repeated once per second on damage-only sources; portal closure or a
-PipeWire error ends sharing. There is no growing video backlog or retransmission
-of application-stale frames. Input runs on independent tasks/sockets; capture and
-encoding run on dedicated threads. No encoder work runs on the input executor.
-Shared network/CPU resources cannot guarantee hardware QoS on a saturated LAN;
-JPEG may lower effective FPS on slow CPUs/links. Future H.264/hardware codecs
-require a new negotiated display revision, not a replacement input system.
+There is one display capture slot across peers, one pending raw/encoded/decode/
+prepared frame at each stage and one acknowledged frame in flight. New frames
+replace stale ones; consumers skip missed deadlines. A stalled socket write
+closes within one second; reads/acks within five. Consent has a 120-second server
+limit. Receiver rate checks allow at most 75 frames/second around the 60 FPS
+target. Source pixels and render allocations remain bounded to 64 MiB each.
+Damage-only sources repeat their latest image once per second for liveness;
+those old images have correspondingly old capture ages.
+
+Video pacing accounts for network transmission time once. Backpressure reduces
+sent FPS and drops superseded video before it can build a backlog. When an
+exchange exceeds the requested FPS period, pacing leaves about 10% additional
+headroom instead of continuously saturating the video socket. Socket send
+buffers are limited, and Linux applies a small not-sent threshold and best-effort
+CS1 lower-priority marking. Input uses its existing separate sockets, focus gate,
+event queue and injector. Codec work and display serialization/deserialization
+run off the input executor; input never waits for frame decoding/presentation.
+The local window-input bridge keeps one periodic policy timer instead of doing
+an extra immediate policy read for every pointer message. Actual wire priority
+still depends on host/router queue disciplines; saturated shared hardware cannot
+provide an unconditional QoS guarantee. Native 4K CPU JPEG can remain expensive
+and bandwidth-limited. H.264/hardware paths are future work and require explicit
+codec negotiation; no such path is claimed by this release.
+
+Both peers must update for Display v2; older display channels fail closed.
+Input 1.4, Pairing 2, Clipboard 1, File 1 and all consent/trust records remain
+unchanged. `--baseline` emulates the earlier 1080p/30 FPS quality-92 software JPEG,
+GUI decode/scale and post-ack pacing within Display v2 for controlled comparison.
+It is not byte-for-byte replay of the old executable.
 The viewer allows twelve seconds for its first frame after Ready, matching the
 server's ten-second usable-buffer deadline; subsequent reads use five seconds.
 
@@ -158,11 +181,15 @@ Existing ashpd/zbus/reis and rustls/tokio are reused. New Linux dependencies:
 pipewire 0.9.2 (SPA/PipeWire bindings, MIT), winit 0.30 (native Wayland input/window,
 Apache-2.0), softbuffer 0.4 (software presentation, MIT/Apache-2.0), jpeg-encoder
 0.6 (MIT/Apache-2.0/IJG), jpeg-decoder 0.3 without Rayon (MIT/Apache-2.0), and
-font8x8 0.3 (minimal status strip, MIT). Versions are pinned in Cargo.lock; declared
-Rust requirements remain compatible with the workspace Rust 1.87 MSRV. Build
+font8x8 0.3 (minimal status strip, MIT). The performance pass adds turbojpeg 1.5.1
+(MIT/Unlicense) with system libjpeg-turbo >=3.0, bytemuck 1 (MIT/Apache-2.0/Zlib)
+for safe pixel-slice casting, and socket2 0.6 (MIT/Apache-2.0) for bounded video
+socket backlog. Pure Rust JPEG crates remain for explicit baseline comparison. Versions are pinned in Cargo.lock; declared
+workspace MSRV remains Rust 1.87; this pass was validated with the installed stable toolchain. Build
 requires PipeWire/SPA headers, pkg-config and libclang; runtime requires PipeWire,
 a sanctioned ScreenCast backend, and a native Wayland session. On Arch/SpectrumOS,
-the existing setup script includes clang, libpipewire and libxkbcommon.
+the existing setup script includes clang, libpipewire, libjpeg-turbo and libxkbcommon. No codec executable
+or external capture process is used.
 
 ## Two-PC physical test
 
@@ -170,6 +197,7 @@ After the published commit is available, in the checkout on **both** PCs:
 
 ```sh
 git pull --ff-only
+sudo pacman -S --needed libjpeg-turbo
 cargo build --release --locked --workspace
 ./target/release/ukvm version
 ./target/release/ukvm install
@@ -256,7 +284,11 @@ a display-only failure; it must not grab local input or stop physical KVM.
 Report which PC stalls, whether the ScreenCast picker appeared, and the service
 error. Do not reset trust or portal restore tokens to troubleshoot video.
 
-## Remembered sharing and quality retest
+## Historical Display 1 consent/quality retest (da69acf)
+
+This records the earlier Display 1 build. The user subsequently confirmed
+remembered ScreenCast sharing across reconnect/reboot and end-to-end control.
+Display 2 bounds and performance comparison above supersede these image limits.
 
 Local validation passed fmt, workspace check, tests (289 passed, zero failures,
 five opt-in tests ignored), Clippy with warnings denied, and debug/release builds.

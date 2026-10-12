@@ -48,7 +48,7 @@ the input receiver or discovery. See [CLIPBOARD.md](CLIPBOARD.md) for encoding a
 
 Independent ALPN `ukvm-files/1`, pinned mutual TLS, bounded Hello/Offer/Accepted/Rejected, indexed 64 KiB Chunk/Ack, FileEnd(size,SHA-256), Complete/Result and Cancel. Portable UTF-8 path component arrays; no platform paths/MIME extensions interpreted. Input and clipboard versions remain unchanged. Older nodes retain their input/clipboard behavior and reject unsupported file channels. See FILE_TRANSFER.md for framing and limits.
 
-## Interactive window input (1.4) and Display Protocol 1
+## Interactive window input (1.4) and Display Protocol 2
 
 Input 1.4 adds WindowSessionStart, WindowEntry (bounded logical target, optional
 mapping ID and initial position), WindowEntered acknowledgement, and
@@ -57,7 +57,9 @@ They reuse RemoteSessionAccept, Input, SessionEnd, heartbeats and existing held-
 cleanup; no topology entry/relative motion or inverse-edge return is enabled in
 a window lease. Absolute input is rejected in physical sessions. Both nodes must
 use 1.4; 1.3/older fail closed at Hello. Pairing 2, Clipboard 1 and File 1 remain
-unchanged. `ukvm-display/1` is a separate pinned TLS ALPN with independently bounded
-Hello/Ready/JPEG Frame/Ack messages and no input payloads. See
-[REMOTE_SESSIONS.md](REMOTE_SESSIONS.md) for the complete reviewed v1 bounds and
-lifecycle; physical acceptance remains pending.
+unchanged. `ukvm-display/2` is a separate pinned TLS ALPN with independently bounded
+Hello/Configure/Ready/JPEG Frame/timestamped Ack messages and no input payloads. See
+[REMOTE_SESSIONS.md](REMOTE_SESSIONS.md) for the complete reviewed bounds and
+lifecycle. The user confirmed remote sessions end to end; this performance
+revision awaits physical comparison. Numeric telemetry supports clock-offset
+estimates without trusting wall-clock synchronization. Input 1.4 is unchanged.

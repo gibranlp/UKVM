@@ -55,7 +55,7 @@ run() {
 echo "UKVM Arch Linux test-node setup"
 echo "Installing build tools, portal trial prerequisites, Git, CA certificates and Arch's rustup package."
 echo "Pacman will show the full upgrade and request confirmation."
-run sudo pacman -Syu --needed base-devel ca-certificates clang cmake git hyprwayland-scanner libpipewire libxkbcommon ninja pkgconf rustup
+run sudo pacman -Syu --needed base-devel ca-certificates clang cmake git hyprwayland-scanner libpipewire libjpeg-turbo libxkbcommon ninja pkgconf rustup
 
 echo "Installing stable Rust, rustfmt and Clippy for this user."
 run rustup toolchain install stable --profile minimal --component clippy,rustfmt

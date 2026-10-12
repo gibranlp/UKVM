@@ -12,14 +12,17 @@ injector. Ctrl+Alt+Shift+Escape releases control while viewing stays open; click
 again to resume. The receiver must explicitly allow `view-screen`, and interactive
 control additionally needs `control-this-node` plus normal portal consent.
 
-This Linux v1 implementation targets JPEG video up to 1080p/30 FPS on a separate
-pinned TLS display channel. The user confirmed viewing and window control; full
-physical acceptance is pending. Official ScreenCast persistence can remember the
-approved monitor on supporting backends. Quality-92/full-color JPEG and improved
-scaling target clearer text; remembered sharing and quality still need a retest.
-Both nodes need
+The user confirmed viewing/control, remembered ScreenCast sharing across reconnect
+and reboot, and return to physical topology on close. The performance follow-up
+uses native-resolution SIMD JPEG, quality 97/full color, up to 60 FPS, and decode/
+scaling off the input window thread. It awaits physical before/after comparison.
+Both nodes need Display Protocol 2 and
 Input Protocol 1.4; identities/pairing are preserved. Read
 [build prerequisites, limitations and exact two-PC test commands](docs/REMOTE_SESSIONS.md).
+
+For pipeline measurements and LAN video settings, run `ukvm remote io --stats`.
+Compare with `ukvm remote io --baseline --stats`; both nodes require Display 2
+(input remains 1.4). See [performance comparison](docs/REMOTE_PERFORMANCE.md).
 
 ## Clipboard sharing
 

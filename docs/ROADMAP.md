@@ -31,9 +31,9 @@ This sequence is directional, not a release commitment.
 
 M20 secure file transfer is implemented for Linux with automated protocol/storage/frontend validation; two-machine physical acceptance remains pending. M18 Linux control/persistence and M19 clipboard physical acceptance were confirmed by the user. Windows/macOS are not started. See FILE_TRANSFER.md.
 
-21. **Interactive Remote Sessions v1 (implemented; physical acceptance pending):**
+21. **Interactive Remote Sessions (end-to-end physically confirmed; performance comparison pending):**
     native Linux Wayland `ukvm remote PEER`, permissioned ScreenCast/PipeWire,
-    bounded JPEG Display Protocol 1 and independent view-screen default deny.
+    bounded SIMD JPEG Display Protocol 2 and independent view-screen default deny.
     Clicking leases existing runtime focus/input transport/RemoteDesktop/EIS;
     emergency release preserves viewing. Input 1.4; pairing/clipboard/files unchanged.
     No audio, recording, multiple viewing monitors, headless output, Windows or macOS.

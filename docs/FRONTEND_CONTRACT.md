@@ -149,8 +149,12 @@ Permission objects add `view_screen` (default false when absent). Receiver-side
 `peer allow|deny PEER view-screen --json` applies live on the new runtime and
 returns `apply_required:false`, `apply_command:null`; a running older runtime must
 be restarted first. Trust, viewing, control, clipboard and files remain separate.
-Runtime snapshots add nullable `display_protocol_version` (1 in this release).
+Runtime snapshots add nullable `display_protocol_version` (2 in this release).
 `ukvm remote PEER` launches a native Wayland window and is deliberately a window
 command rather than a JSON stream. The existing remote-input permission and Apply
 semantics stay unchanged. No frame bytes, pixels or key payloads enter JSON.
 See [REMOTE_SESSIONS.md](REMOTE_SESSIONS.md) for behavior and physical tests.
+
+Remote performance comparison uses `ukvm remote PEER --stats` (five-second
+privacy-safe textual diagnostics), with `--baseline` for the prior codec/cadence.
+`--fps`, `--quality` and `--bitrate` affect video only; see REMOTE_PERFORMANCE.md.

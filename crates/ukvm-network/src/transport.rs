@@ -248,6 +248,7 @@ pub async fn accept_runtime(
     .map_err(|_| "TLS peer authentication failed".to_string())?;
     let mut stream = TlsStream::from(tls);
     if stream.get_ref().1.alpn_protocol() == Some(crate::display::ALPN) {
+        crate::display::configure_socket(stream.get_ref().0);
         let certificate = stream
             .get_ref()
             .1

@@ -1,10 +1,96 @@
-//! Display v1: independent JPEG images; never carries input or grants authority.
+//! Display v2: independent JPEG images; never carries input or grants authority.
 use serde::{Deserialize, Serialize};
-pub const VERSION: u16 = 1;
-pub const MAX_JPEG: usize = 2 * 1024 * 1024;
-pub const MAX_FRAME: usize = MAX_JPEG + 256;
-pub const MAX_WIDTH: u32 = 1920;
-pub const MAX_HEIGHT: u32 = 1080;
+pub const VERSION: u16 = 2;
+pub const MAX_JPEG: usize = 8 * 1024 * 1024;
+pub const MAX_FRAME: usize = MAX_JPEG + 1024;
+pub const MAX_WIDTH: u32 = 8192;
+pub const MAX_HEIGHT: u32 = 8192;
+/// Viewer preferences are bounded independently of trust and portal consent.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Options {
+    pub baseline: bool,
+    pub fps: u16,
+    pub quality: u8,
+    pub mbps: u16,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            baseline: false,
+            fps: 60,
+            quality: 97,
+            mbps: 500,
+        }
+    }
+}
+impl Options {
+    pub fn baseline() -> Self {
+        Self {
+            baseline: true,
+            fps: 30,
+            quality: 92,
+            mbps: 67,
+        }
+    }
+    pub fn validate(self) -> Result<(), String> {
+        if self.baseline && self != Self::baseline() {
+            return Err("baseline uses fixed FPS, quality and bitrate settings".into());
+        }
+        if !(1..=60).contains(&self.fps)
+            || !(45..=100).contains(&self.quality)
+            || !(10..=1000).contains(&self.mbps)
+        {
+            return Err("invalid display preferences".into());
+        }
+        Ok(())
+    }
+    pub fn interval(self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(1. / f64::from(self.fps))
+    }
+}
+/// Four monotonic timestamps estimate viewer-minus-source clock offset.
+/// Half the exchange delay expresses uncertainty from network asymmetry.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ClockEstimate {
+    pub offset_us: i64,
+    pub uncertainty_us: u64,
+}
+impl ClockEstimate {
+    pub fn exchange(t1: u64, t2: u64, t3: u64, t4: u64) -> Result<Self, String> {
+        let roundtrip = t4.checked_sub(t1).ok_or("clock exchange regressed")?;
+        let processing = t3
+            .checked_sub(t2)
+            .ok_or("clock acknowledgement regressed")?;
+        let delay = roundtrip
+            .checked_sub(processing)
+            .ok_or("invalid clock exchange delay")?;
+        let offset = ((i128::from(t2) - i128::from(t1)) + (i128::from(t3) - i128::from(t4))) / 2;
+        Ok(Self {
+            offset_us: i64::try_from(offset).map_err(|_| "clock offset exceeds bounds")?,
+            uncertainty_us: delay / 2,
+        })
+    }
+}
+/// Durations, never wall-clock timestamps or screen contents.
+#[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq)]
+pub struct Telemetry {
+    pub sent_us: u64,
+    pub clock: Option<ClockEstimate>,
+    pub encoded_depth: u8,
+    pub raw_depth: u8,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub capture_fps: f64,
+    pub copy_us: u64,
+    pub encode_queue_us: u64,
+    pub encode_us: u64,
+    pub source_age_us: u64,
+    pub previous_ack_us: u64,
+    pub pipewire_dropped: u64,
+    pub capture_throttled: u64,
+    pub raw_dropped: u64,
+    pub encoded_dropped: u64,
+}
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ScreenRect {
     pub x: i32,
@@ -60,13 +146,14 @@ impl WindowTarget {
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 pub struct Frame {
     pub sequence: u64,
+    pub telemetry: Telemetry,
     pub width: u32,
     pub height: u32,
     /// Portal compositor geometry, not encoded pixel dimensions. None is view-only.
     pub screen: Option<ScreenRect>,
     pub origin_known: bool,
     pub mapping_id: Option<String>,
-    pub jpeg: Vec<u8>,
+    pub jpeg: std::sync::Arc<Vec<u8>>,
 }
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,6 +170,11 @@ impl Frame {
             || self.height == 0
             || self.width > MAX_WIDTH
             || self.height > MAX_HEIGHT
+            || u64::from(self.width) * u64::from(self.height) > 16_777_216
+            || self.telemetry.encoded_depth > 1
+            || self.telemetry.raw_depth > 1
+            || !self.telemetry.capture_fps.is_finite()
+            || self.telemetry.capture_fps < 0.
             || self.jpeg.is_empty()
             || self.jpeg.len() > MAX_JPEG
         {
@@ -109,9 +201,16 @@ impl Frame {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     Hello(u16),
-    Ready { interactive: bool },
+    Configure(Options),
+    Ready {
+        interactive: bool,
+    },
     Frame(Frame),
-    Ack(u64),
+    Ack {
+        sequence: u64,
+        received_us: u64,
+        sent_us: u64,
+    },
 }
 impl Message {
     pub fn validate(&self) -> Result<(), String> {
@@ -120,6 +219,7 @@ impl Message {
                 Err("incompatible display version".into())
             }
             Self::Frame(frame) => frame.validate(),
+            Self::Configure(options) => options.validate(),
             _ => Ok(()),
         }
     }
@@ -128,21 +228,72 @@ impl Message {
 mod tests {
     use super::*;
     #[test]
+    fn clock_estimate_accounts_for_processing_offset_and_asymmetry() {
+        // Viewer clock is 1 second ahead; symmetric 100us each way,
+        // with 50us viewer processing excluded from transit uncertainty.
+        let estimate = ClockEstimate::exchange(100, 1_000_200, 1_000_250, 350).unwrap();
+        assert_eq!(estimate.offset_us, 1_000_000);
+        assert_eq!(estimate.uncertainty_us, 100);
+        let asymmetric = ClockEstimate::exchange(100, 1_000_150, 1_000_200, 350).unwrap();
+        assert_eq!(asymmetric.offset_us, 999_950);
+        assert_eq!(asymmetric.uncertainty_us, 100);
+        assert!(ClockEstimate::exchange(100, 200, 199, 300).is_err());
+        assert!(ClockEstimate::exchange(100, 200, 500, 300).is_err());
+        assert!(ClockEstimate::exchange(100, 200, 200, 99).is_err());
+        assert!(ClockEstimate::exchange(0, u64::MAX, u64::MAX, 0).is_err());
+    }
+    #[test]
+    fn video_preferences_fail_closed_and_do_not_change_authority() {
+        Options::default().validate().unwrap();
+        Options::baseline().validate().unwrap();
+        for invalid in [
+            Options {
+                fps: 0,
+                ..Options::default()
+            },
+            Options {
+                fps: 61,
+                ..Options::default()
+            },
+            Options {
+                quality: 101,
+                ..Options::default()
+            },
+            Options {
+                mbps: 1001,
+                ..Options::default()
+            },
+        ] {
+            assert!(Message::Configure(invalid).validate().is_err());
+        }
+        assert!(Message::Hello(1).validate().is_err());
+    }
+    #[test]
     fn bounded_geometry_and_frames() {
         let mut frame = Frame {
             sequence: 1,
+            telemetry: Telemetry::default(),
             width: 1920,
             height: 1080,
             screen: None,
             origin_known: false,
             mapping_id: None,
-            jpeg: vec![1],
+            jpeg: std::sync::Arc::new(vec![1]),
         };
         frame.validate().unwrap();
+        let cloned = frame.clone();
+        assert!(std::sync::Arc::ptr_eq(&cloned.jpeg, &frame.jpeg));
+        frame.telemetry.capture_fps = f64::NAN;
+        assert!(frame.validate().is_err());
+        frame.telemetry.capture_fps = 0.;
+        frame.width = 8192;
+        frame.height = 8192;
+        assert!(frame.validate().is_err());
+        frame.height = 1080;
         frame.width = u32::MAX;
         assert!(frame.validate().is_err());
         frame.width = 1920;
-        frame.jpeg = vec![0; MAX_JPEG + 1];
+        frame.jpeg = std::sync::Arc::new(vec![0; MAX_JPEG + 1]);
         assert!(frame.validate().is_err());
         assert!(ScreenRect {
             x: i32::MIN,
@@ -152,7 +303,7 @@ mod tests {
         }
         .validate()
         .is_err());
-        assert!(Message::Hello(2).validate().is_err());
+        assert!(Message::Hello(1).validate().is_err());
     }
     #[test]
     fn logical_fractions_are_independent_of_video_resolution() {

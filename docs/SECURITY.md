@@ -83,13 +83,13 @@ File Protocol 1 runs on a separate pinned mutual-TLS ALPN channel, never discove
 
 Screen pixels require separate `view-screen` default-deny permission and legitimate
 ScreenCast consent, independently of `control-this-node`, input portal authority,
-clipboard and files. Display v1 uses a separate pinned mTLS ALPN channel, bounded
+clipboard and files. Display v2 uses a separate pinned mTLS ALPN channel, bounded
 JPEG frames, acknowledgements, timeouts and latest-frame slots. Window input is
 Input Protocol 1.4 on the existing input Sender/ExclusiveSink/shared RemoteDesktop
 EIS grant, with both viewing and control permission. A private same-user local
 socket only leases runtime input focus; it cannot mutate trust, consent or service
 state. Revocation/disconnect/release clean held input and focus. No pixels or
-keys are logged. Physical acceptance is pending. See [remote sessions](REMOTE_SESSIONS.md)
+keys are logged. The user confirmed end-to-end operation; the performance revision awaits physical comparison. See [remote sessions](REMOTE_SESSIONS.md)
 for protocol bounds, coordinate matching, permission checks and testing.
 
 ScreenCast v4+ remembered monitor consent uses a separate private, single-use
@@ -99,3 +99,10 @@ approval, portal-side revocation/expiry and unsupported backends retain normal
 consent. Credential-bearing failures use fixed errors and status contains no
 restore data. Confirmed authorization reset now forgets ScreenCast alongside the
 two input credentials, after stopping the owned runtime and locking all grants.
+
+Display Protocol 2 adds bounded video-only preferences and numeric monotonic
+timing metadata. Neither can grant input/viewing authority. JPEG payloads are
+bounded to 8 MiB, decoded pixels to 64 MiB, pending video to one frame per stage,
+and outstanding frames to one. The receiver checks image geometry before codec
+allocation. Clock estimates are diagnostics only and never authenticate or order
+input. Performance reports exclude pixels, input contents and portal tokens.

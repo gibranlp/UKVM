@@ -15,9 +15,13 @@ use std::{
     time::{Duration, Instant},
 };
 use ukvm_core::remote::Latest;
-use ukvm_protocol::display::{Frame, ScreenRect};
+use ukvm_protocol::display::{Frame, Options, ScreenRect, Telemetry};
+pub struct Encoded {
+    pub frame: Frame,
+    pub captured: Instant,
+}
 pub struct Capture {
-    pub frames: Arc<Latest<Frame>>,
+    pub frames: Arc<Latest<Encoded>>,
     pub error: Arc<std::sync::Mutex<Option<String>>>,
     pub session: Session<Screencast>,
     stop: Arc<AtomicBool>,
@@ -33,7 +37,7 @@ impl Drop for Capture {
     }
 }
 impl Capture {
-    pub async fn open(connection: zbus::Connection) -> Result<Self, String> {
+    pub async fn open(connection: zbus::Connection, options: Options) -> Result<Self, String> {
         let portal = Screencast::with_connection(connection.clone())
             .await
             .map_err(|e| e.to_string())?;
@@ -78,7 +82,7 @@ impl Capture {
         let capture = std::thread::Builder::new()
             .name("ukvm-pipewire".into())
             .spawn(move || {
-                if let Err(e) = pipewire(fd, node, worker_raw, worker_stop) {
+                if let Err(e) = pipewire(fd, node, worker_raw, worker_stop, options) {
                     *worker_error.lock().unwrap() = Some(e);
                 }
             })
@@ -92,10 +96,46 @@ impl Capture {
                 let mut sequence = 0;
                 while !worker_stop.load(Ordering::Acquire) {
                     let started = Instant::now();
-                    if let Some(raw) = raw.take() {
-                        match encode(raw, screen, origin_known, mapping_id.clone(), sequence) {
-                            Ok(frame) => {
-                                worker_frames.replace(frame);
+                    let next = if options.baseline {
+                        raw.take()
+                    } else {
+                        raw.wait_take(Duration::from_millis(20))
+                    };
+                    if let Some(raw_frame) = next {
+                        let captured = raw_frame.captured;
+                        let telemetry = raw_frame.telemetry;
+                        let encoding = Instant::now();
+                        match if options.baseline {
+                            encode(
+                                raw_frame,
+                                screen,
+                                origin_known,
+                                mapping_id.clone(),
+                                sequence,
+                            )
+                        } else {
+                            encode_fast(
+                                raw_frame,
+                                screen,
+                                origin_known,
+                                mapping_id.clone(),
+                                sequence,
+                                options.quality,
+                            )
+                        } {
+                            Ok(mut frame) => {
+                                frame.telemetry = Telemetry {
+                                    encode_queue_us: encoding
+                                        .duration_since(captured)
+                                        .saturating_sub(Duration::from_micros(telemetry.copy_us))
+                                        .as_micros()
+                                        as u64,
+                                    encode_us: encoding.elapsed().as_micros() as u64,
+                                    raw_dropped: raw.dropped(),
+                                    raw_depth: raw.depth() as u8,
+                                    ..telemetry
+                                };
+                                worker_frames.replace(Encoded { frame, captured });
                                 sequence += 1;
                             }
                             Err(e) => {
@@ -104,7 +144,11 @@ impl Capture {
                             }
                         }
                     }
-                    std::thread::sleep(Duration::from_millis(33).saturating_sub(started.elapsed()));
+                    if options.baseline {
+                        std::thread::sleep(
+                            Duration::from_millis(33).saturating_sub(started.elapsed()),
+                        );
+                    }
                 }
             });
         match encoder {
@@ -169,6 +213,8 @@ async fn authorize_monitor(
 }
 
 struct Raw {
+    captured: Instant,
+    telemetry: Telemetry,
     width: u32,
     height: u32,
     stride: usize,
@@ -216,15 +262,65 @@ fn encode(
     let jpeg = encode_jpeg(&rgb, width, height)?;
     let frame = Frame {
         sequence,
+        telemetry: Telemetry::default(),
         width,
         height,
         screen,
         origin_known,
         mapping_id,
-        jpeg,
+        jpeg: Arc::new(jpeg),
     };
     frame.validate()?;
     Ok(frame)
+}
+fn encode_fast(
+    raw: Raw,
+    screen: Option<ScreenRect>,
+    origin_known: bool,
+    mapping_id: Option<String>,
+    sequence: u64,
+    quality: u8,
+) -> Result<Frame, String> {
+    let mut compressor =
+        turbojpeg::Compressor::new().map_err(|_| "TurboJPEG initialization failed")?;
+    compressor
+        .set_subsamp(turbojpeg::Subsamp::None)
+        .map_err(|_| "JPEG chroma configuration failed")?;
+    let image = turbojpeg::Image {
+        pixels: raw.pixels.as_slice(),
+        width: raw.width as usize,
+        pitch: raw.stride,
+        height: raw.height as usize,
+        format: if raw.bgr {
+            turbojpeg::PixelFormat::BGRX
+        } else {
+            turbojpeg::PixelFormat::RGBX
+        },
+    };
+    // Fixed output bound: incompressible frames lower quantization quality rather
+    // than allocating an unbounded codec buffer or blocking input.
+    let mut jpeg = vec![0; ukvm_protocol::display::MAX_JPEG];
+    for quality in [quality, quality.min(80), quality.min(65), quality.min(45)] {
+        compressor
+            .set_quality(i32::from(quality))
+            .map_err(|_| "JPEG quality configuration failed")?;
+        if let Ok(len) = compressor.compress_to_slice(image, &mut jpeg) {
+            jpeg.truncate(len);
+            let frame = Frame {
+                sequence,
+                telemetry: Telemetry::default(),
+                width: raw.width,
+                height: raw.height,
+                screen,
+                origin_known,
+                mapping_id,
+                jpeg: Arc::new(jpeg),
+            };
+            frame.validate()?;
+            return Ok(frame);
+        }
+    }
+    Err("JPEG cannot fit bounded frame".into())
 }
 fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
     // Full chroma resolution matters for small colored text. Only lower JPEG
@@ -241,17 +337,36 @@ fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
                 jpeg_encoder::ColorType::Rgb,
             )
             .map_err(|_| "display JPEG encoding failed")?;
-        if jpeg.len() <= ukvm_protocol::display::MAX_JPEG {
+        if jpeg.len() <= 2 * 1024 * 1024 {
             return Ok(jpeg);
         }
     }
     Err("display JPEG exceeds frame bound after quality reduction".into())
 }
 
+// Drain available capture buffers to the newest, recycling older ones through
+// Buffer::drop. Bound the work even if a producer continually replenishes them.
+fn take_newest<T>(mut first: T, mut dequeue: impl FnMut() -> Option<T>) -> (T, u64) {
+    let mut dropped = 0;
+    for _ in 0..32 {
+        let Some(next) = dequeue() else {
+            break;
+        };
+        first = next;
+        dropped += 1;
+    }
+    (first, dropped)
+}
 struct Data {
     format: spa::param::video::VideoInfoRaw,
     last: Instant,
+    next: Instant,
     initial_size: Option<(u32, u32)>,
+    started: Instant,
+    count: u64,
+    dropped: u64,
+    throttled: u64,
+    options: Options,
     raw: Arc<Latest<Raw>>,
     error: Arc<std::sync::Mutex<Option<String>>>,
 }
@@ -260,6 +375,7 @@ fn pipewire(
     node: u32,
     raw: Arc<Latest<Raw>>,
     stop: Arc<AtomicBool>,
+    options: Options,
 ) -> Result<(), String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| e.to_string())?;
@@ -275,7 +391,13 @@ fn pipewire(
         .add_local_listener_with_user_data(Data {
             format: Default::default(),
             last: Instant::now() - Duration::from_secs(1),
+            next: Instant::now(),
             initial_size: None,
+            started: Instant::now(),
+            count: 0,
+            dropped: 0,
+            throttled: 0,
+            options,
             raw,
             error: failure.clone(),
         })
@@ -306,7 +428,18 @@ fn pipewire(
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
-            if data.last.elapsed() < Duration::from_millis(33) {
+            if !data.options.baseline {
+                let (newest, dropped) = take_newest(buffer, || stream.dequeue_buffer());
+                buffer = newest;
+                data.dropped += dropped;
+            }
+            let now = Instant::now();
+            if if data.options.baseline {
+                data.last.elapsed() < Duration::from_millis(33)
+            } else {
+                now < data.next
+            } {
+                data.throttled += 1;
                 return;
             }
             let size = data.format.size();
@@ -363,7 +496,21 @@ fn pipewire(
             else {
                 return;
             };
+            data.count += 1;
+            let captured = Instant::now();
+            let pixels = bytes[offset..end].to_vec();
             data.raw.replace(Raw {
+                captured,
+                telemetry: Telemetry {
+                    pipewire_dropped: data.dropped,
+                    capture_throttled: data.throttled,
+                    source_width: size.width,
+                    source_height: size.height,
+                    copy_us: captured.elapsed().as_micros() as u64,
+                    capture_fps: data.count as f64
+                        / data.started.elapsed().as_secs_f64().max(0.001),
+                    ..Default::default()
+                },
                 width: size.width,
                 height: size.height,
                 stride,
@@ -371,9 +518,13 @@ fn pipewire(
                     format,
                     spa::param::video::VideoFormat::BGRx | spa::param::video::VideoFormat::BGRA
                 ),
-                pixels: bytes[offset..end].to_vec(),
+                pixels,
             });
             data.last = Instant::now();
+            data.next += data.options.interval();
+            if data.next <= now {
+                data.next = now + data.options.interval();
+            }
         })
         .register()
         .map_err(|e| e.to_string())?;
@@ -446,10 +597,10 @@ fn video_format() -> Result<Vec<u8>, String> {
             Choice,
             Range,
             Fraction,
-            spa::utils::Fraction { num: 30, denom: 1 },
+            spa::utils::Fraction { num: 60, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
             // Some portal sources advertise the monitor's fixed refresh rate.
-            // Accept it and throttle buffer copies/encoding locally to ~30 FPS.
+            // Accept it and throttle buffer copies locally to the requested FPS.
             spa::utils::Fraction {
                 num: 1000,
                 denom: 1
@@ -474,6 +625,62 @@ pub async fn portal_connection() -> Result<PortalConnection, String> {
 mod tests {
     use super::*;
     #[test]
+    fn capture_draining_prefers_newest_and_bounds_callback_work() {
+        let mut ready = std::collections::VecDeque::from_iter(1..=40);
+        let (newest, dropped) = take_newest(0, || ready.pop_front());
+        assert_eq!((newest, dropped), (32, 32));
+        assert_eq!(ready.len(), 8);
+        let (newest, dropped) = take_newest(newest, || ready.pop_front());
+        assert_eq!((newest, dropped), (40, 8));
+    }
+    #[test]
+    fn simd_encoding_keeps_native_geometry_chroma_and_fine_detail() {
+        let pixels: Vec<u8> = (0..4096 * 2)
+            .flat_map(|x| {
+                if x % 2 == 0 {
+                    [255, 0, 0, 0]
+                } else {
+                    [0, 0, 255, 0]
+                }
+            })
+            .collect();
+        let frame = encode_fast(
+            Raw {
+                captured: Instant::now(),
+                telemetry: Default::default(),
+                width: 4096,
+                height: 2,
+                stride: 4096 * 4,
+                bgr: false,
+                pixels: pixels.clone(),
+            },
+            None,
+            false,
+            None,
+            0,
+            97,
+        )
+        .unwrap();
+        assert_eq!((frame.width, frame.height), (4096, 2));
+        assert_eq!(
+            turbojpeg::read_header(&frame.jpeg).unwrap().subsamp,
+            turbojpeg::Subsamp::None
+        );
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg.as_slice()));
+        let rgb = decoder.decode().unwrap();
+        let expected: Vec<u8> = pixels
+            .chunks_exact(4)
+            .flat_map(|p| p[..3].iter().copied())
+            .collect();
+        let mae = rgb
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / rgb.len() as f64;
+        assert!(mae < 3., "colored-edge mean error {mae}");
+    }
+    #[test]
     fn full_color_resolution_preserves_small_colored_text_edges() {
         let pixels: Vec<u8> = (0..64 * 16)
             .flat_map(|x| {
@@ -486,6 +693,8 @@ mod tests {
             .collect();
         let frame = encode(
             Raw {
+                captured: Instant::now(),
+                telemetry: Telemetry::default(),
                 width: 64,
                 height: 16,
                 stride: 64 * 4,
@@ -498,7 +707,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg));
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg.as_slice()));
         let rgb = decoder.decode().unwrap();
         let expected: Vec<u8> = pixels
             .chunks_exact(4)
@@ -519,6 +728,8 @@ mod tests {
         let pixels = [0, 0, 0, 0, 255, 255, 255, 0].repeat(1920 * 2);
         let frame = encode(
             Raw {
+                captured: Instant::now(),
+                telemetry: Telemetry::default(),
                 width: 3840,
                 height: 2,
                 stride: 3840 * 4,
@@ -531,7 +742,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg));
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg.as_slice()));
         let rgb = decoder.decode().unwrap();
         assert!(rgb.iter().all(|value| value.abs_diff(128) < 4));
     }
@@ -597,6 +808,8 @@ mod tests {
     #[test]
     fn encoding_preserves_aspect_ratio_and_bgr_channels() {
         let raw = Raw {
+            captured: Instant::now(),
+            telemetry: Telemetry::default(),
             width: 3840,
             height: 2,
             stride: 3840 * 4,
@@ -605,7 +818,7 @@ mod tests {
         };
         let frame = encode(raw, None, false, None, 1).unwrap();
         assert_eq!((frame.width, frame.height), (1920, 1));
-        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg));
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg.as_slice()));
         let rgb = decoder.decode().unwrap();
         assert!(rgb[0] > 240 && rgb[1] < 10 && rgb[2] < 10);
     }
@@ -614,3 +827,51 @@ mod tests {
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod persistence_tests;
+
+/// Reproducible synthetic desktop benchmark; never captures a user's screen.
+#[cfg(test)]
+#[test]
+#[ignore = "manual release-mode performance measurement"]
+fn profile_desktop_codec() {
+    for (width, height) in [(1366, 768), (1920, 1080), (3840, 2160)] {
+        for baseline in [true, false] {
+            let pixels: Vec<u8> = (0..height)
+                .flat_map(|y| {
+                    (0..width).flat_map(move |x| {
+                        let ink = (y % 24 < 12 && x % 12 < 2) || x % 160 == 0;
+                        if ink {
+                            [32, 80, 160, 0]
+                        } else {
+                            [235, 235, 235, 0]
+                        }
+                    })
+                })
+                .collect();
+            let mut times = Vec::new();
+            for _ in 0..12 {
+                let raw = Raw {
+                    captured: Instant::now(),
+                    telemetry: Telemetry::default(),
+                    width,
+                    height,
+                    stride: width as usize * 4,
+                    bgr: true,
+                    pixels: pixels.clone(),
+                };
+                let start = Instant::now();
+                let frame = if baseline {
+                    encode(raw, None, false, None, 0)
+                } else {
+                    encode_fast(raw, None, false, None, 0, 97)
+                }
+                .unwrap();
+                let encode_ms = start.elapsed().as_secs_f64() * 1000.;
+                let bytes = frame.jpeg.len();
+                let (decode_ms, scale_ms) = super::window::profile_frame(frame, baseline);
+                times.push((encode_ms, decode_ms, scale_ms, bytes));
+            }
+            let n = times.len() as f64;
+            eprintln!("synthetic baseline={baseline} {width}x{height}: encode_mean_ms={:.2} decode_mean_ms={:.2} scale_mean_ms={:.2} jpeg_bytes={}", times.iter().map(|t|t.0).sum::<f64>()/n, times.iter().map(|t|t.1).sum::<f64>()/n,times.iter().map(|t|t.2).sum::<f64>()/n, times[0].3);
+        }
+    }
+}

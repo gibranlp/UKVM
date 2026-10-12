@@ -19,13 +19,18 @@ pub(super) async fn display_session(
             .map(|_| ())
     };
     check()?;
+    let clock = std::time::Instant::now();
     if display::read(stream).await? != Message::Hello(VERSION) {
-        return Err("expected display v1 Hello".into());
+        return Err("expected display v2 Hello".into());
     }
+    let Message::Configure(options) = display::read(stream).await? else {
+        return Err("expected display preferences".into());
+    };
+    options.validate()?;
     let bus = zbus_connection().await?;
     let result=async {
         let capture= {
-            let open=ukvm_platform::remote::capture::Capture::open(bus.clone());
+            let open=ukvm_platform::remote::capture::Capture::open(bus.clone(), options);
             tokio::pin!(open);
             let deadline=tokio::time::sleep(Duration::from_secs(120));tokio::pin!(deadline);
             let mut policy=tokio::time::interval(Duration::from_millis(100));
@@ -45,31 +50,48 @@ pub(super) async fn display_session(
         let mut closed=capture.session.receive_closed().await.map_err(|e|e.to_string())?;
             let mut last=None;
             let mut previous_send=std::time::Instant::now()-Duration::from_secs(1);
-            let mut ticks=tokio::time::interval(Duration::from_millis(33));
+            let mut ticks=tokio::time::interval(if options.baseline { Duration::from_millis(33) } else { Duration::from_millis(4) });
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut next_send=std::time::Instant::now();
+            let mut previous_ack_us=0;
+            let mut estimate=None;
+            let mut policy_checked=std::time::Instant::now()-Duration::from_secs(1);
             let mut first_frame=std::time::Instant::now();
             loop {
                 tokio::select! {_=cancelled(&mut stop)=>return Ok(()),_=closed.next()=>return Err("ScreenCast portal session closed".into()),_=ticks.tick()=>{}}
+                if policy_checked.elapsed()>=Duration::from_millis(100) {
                 check()?;
+                policy_checked=std::time::Instant::now();
                 let allowed=TrustStore::load(&context.trust_dir)?.authorize(peer,SessionPermission::ControlThisNode).is_ok();
                 if allowed!=interactive {display::write(stream,&Message::Ready{interactive:allowed}).await?;interactive=allowed;}
+                }
                 if std::time::Instant::now()<next_send {continue;}
                 if let Some(error)=capture.error.lock().unwrap().clone() {return Err(error);}
                 let new=capture.frames.take();
                 if new.is_some() {last=new;first_frame=std::time::Instant::now();}
                 else if previous_send.elapsed()<Duration::from_secs(1) {continue;}
-                let Some(frame)=last.as_ref() else {
+                let Some(encoded)=last.as_ref() else {
                     if first_frame.elapsed()>Duration::from_secs(10) {return Err("PipeWire supplied no usable frames".into());}
                     continue;
                 };
+                let mut frame=encoded.frame.clone();
+                frame.telemetry.sent_us=clock.elapsed().as_micros() as u64;
+                frame.telemetry.clock=estimate;
+                frame.telemetry.encoded_depth=capture.frames.depth() as u8;
+                let source_sent_us=frame.telemetry.sent_us;
+                frame.telemetry.source_age_us=encoded.captured.elapsed().as_micros() as u64;
+                frame.telemetry.previous_ack_us=previous_ack_us;
+                frame.telemetry.encoded_dropped=capture.frames.dropped();
                 let sequence=frame.sequence;
+                let bytes=frame.jpeg.len();
+                let sent=std::time::Instant::now();
                 let send=async {
                     let guard=permission_guard(&context.trust_dir,peer,SessionPermission::ViewScreen)?;
-                    display::write(stream,&Message::Frame(frame.clone())).await?;
+                    display::write(stream,&Message::Frame(frame)).await?;
                     drop(guard);
-                    if display::read(stream).await?!=Message::Ack(sequence) {return Err("display acknowledgement out of order".into());}
-                    Ok::<_,String>(())
+                    let Message::Ack { sequence:ack,received_us,sent_us }=display::read(stream).await? else { return Err("expected display acknowledgement".into()); };
+                    if ack!=sequence { return Err("display acknowledgement out of order".into()); }
+                    ukvm_protocol::display::ClockEstimate::exchange(source_sent_us,received_us,sent_us,clock.elapsed().as_micros() as u64)
                 };
                 tokio::pin!(send);
                 let mut policy=tokio::time::interval(Duration::from_millis(100));
@@ -77,10 +99,14 @@ pub(super) async fn display_session(
                     _=cancelled(&mut stop)=>return Ok(()),
                     _=closed.next()=>return Err("ScreenCast portal session closed".into()),
                     _=policy.tick()=>check()?,
-                    result=&mut send=>{result?;break;},
+                    result=&mut send=>{estimate=Some(result?);break;},
                 }}
                 previous_send=std::time::Instant::now();
-                next_send=previous_send+Duration::from_secs_f64(frame.jpeg.len() as f64/(8.*1024.*1024.));
+                previous_ack_us=sent.elapsed().as_micros() as u64;
+                // Budget from START of transmission. Never add network time a
+                // second time. One in-flight frame and latest encoded slot bound
+                // both socket backlog and capture backlog under congestion.
+                next_send=ukvm_core::remote::video_deadline(sent,previous_send,bytes,options);
             }
         }.await;
         let _=tokio::time::timeout(Duration::from_secs(2),capture.session.close()).await;
@@ -179,9 +205,9 @@ async fn window_input(
         }
         // Report control only after receiver focus and EIS window entry succeed.
         ukvm_network::write_frame(&mut local,&WireMessage::RemoteSessionAccept).await?;
+        let mut policy=tokio::time::interval(Duration::from_millis(100));
         loop {
             let read=ukvm_network::read_frame(&mut local);tokio::pin!(read);
-            let mut policy=tokio::time::interval(Duration::from_millis(100));
             let message=loop {tokio::select! {
                 _=cancelled(&mut stop)=>return Ok(()),
                 _=sender.alive.changed()=>{if !*sender.alive.borrow(){return Err("peer input disconnected".into());}},

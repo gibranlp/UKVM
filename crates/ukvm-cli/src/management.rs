@@ -497,7 +497,10 @@ fn permission(args: &[String]) -> Result<Value, String> {
     }
     if permission == SessionPermission::ViewScreen {
         let live = runtime();
-        if live["state"] == "running" && live["snapshot"]["display_protocol_version"] != json!(1) {
+        if live["state"] == "running"
+            && live["snapshot"]["display_protocol_version"]
+                != json!(ukvm_protocol::display::VERSION)
+        {
             return Err(
                 "Restart UKVM to load remote sessions before changing viewing permissions".into(),
             );

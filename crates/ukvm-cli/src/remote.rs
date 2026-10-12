@@ -11,24 +11,22 @@ use ukvm_network::{
 };
 use ukvm_platform::remote::window::{self, Command, Shared};
 use ukvm_protocol::{
-    display::{Message, VERSION},
+    display::{Message, Options, VERSION},
     WireMessage,
 };
 pub fn command(args: &[String]) -> ExitCode {
     if matches!(args,[flag] if flag=="--help"||flag=="-h") {
-        println!("Usage: ukvm remote PEER\nView a pinned peer's selected monitor; click to control.\nCtrl+Alt+Shift+Escape releases control and leaves viewing open.\nReceiver requires view-screen; control additionally requires control-this-node.\nInteractive use requires ukvm run (or its user service) on both computers.");
+        println!("Usage: ukvm remote PEER [--stats] [--baseline] [--fps 1..60] [--quality 45..100] [--bitrate 10..1000]\n--bitrate is a video ceiling in Mbps; --stats prints privacy-safe pipeline metrics every 5s.\n--baseline compares the previous 1080p/30 FPS software JPEG path.\nView a pinned peer's selected monitor; click to control.\nCtrl+Alt+Shift+Escape releases control and leaves viewing open.\nReceiver requires view-screen; control additionally requires control-this-node.\nInteractive use requires ukvm run (or its user service) on both computers.");
         return ExitCode::SUCCESS;
     }
     let result = (|| {
-        let [peer] = args else {
-            return Err("usage: ukvm remote PEER".into());
-        };
+        let (peer, options, stats) = preferences(args)?;
         let trust = default_trust_dir()?;
         let store = TrustStore::load(&trust)?;
-        let peer = store.find(peer).ok_or("unknown pinned peer")?.clone();
+        let peer = store.find(&peer).ok_or("unknown pinned peer")?.clone();
         store.authorize(&peer.id, SessionPermission::Connect)?;
         let identity = Identity::load_or_create(&default_state_dir()?)?;
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::with_options(options));
         let worker_shared = shared.clone();
         let (commands, rx) = mpsc::channel(256);
         let (stop_tx, stop) = watch::channel(false);
@@ -66,7 +64,19 @@ pub fn command(args: &[String]) -> ExitCode {
                     };
                     tokio::pin!(signal);
                     let sessions = async {
-                        tokio::join!(viewing, input);
+                        let diagnostics=async {
+                            if !stats { cancelled(&mut stop.clone()).await; return; }
+                            let started=std::time::Instant::now();
+                            let mut ticks=tokio::time::interval(Duration::from_secs(5));
+                            ticks.tick().await;
+                            let mut cancelled_stop=stop.clone();
+                            loop { tokio::select! {
+                                _=cancelled(&mut cancelled_stop)=>break,
+                                _=ticks.tick()=>eprintln!("{}",worker_shared.report(started.elapsed())),
+                            }}
+                            eprintln!("{}",worker_shared.report(started.elapsed()));
+                        };
+                        tokio::join!(viewing, input, diagnostics);
                     };
                     tokio::pin!(sessions);
                     tokio::select! {_=&mut sessions=>{},_=&mut signal=>{sessions.await;}}
@@ -84,6 +94,28 @@ pub fn command(args: &[String]) -> ExitCode {
         Err(e) => super::fail(&e),
     }
 }
+fn preferences(args: &[String]) -> Result<(String, Options, bool), String> {
+    let mut options = if args.iter().any(|a| a == "--baseline") {
+        Options::baseline()
+    } else {
+        Options::default()
+    };
+    let mut peer = None;
+    let mut stats = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--stats"=>stats=true,"--baseline"=>{},
+            "--fps"=>options.fps=args.next().ok_or("missing FPS")?.parse().map_err(|_|"invalid FPS")?,
+            "--quality"=>options.quality=args.next().ok_or("missing quality")?.parse().map_err(|_|"invalid quality")?,
+            "--bitrate"=>options.mbps=args.next().ok_or("missing bitrate")?.parse().map_err(|_|"invalid bitrate")?,
+            _ if !arg.starts_with('-') && peer.is_none()=>peer=Some(arg.clone()),
+            _=>return Err("usage: ukvm remote PEER [--stats] [--baseline] [--fps N] [--quality N] [--bitrate Mbps]".into()),
+        }
+    }
+    options.validate()?;
+    Ok((peer.ok_or("missing pinned peer")?, options, stats))
+}
 async fn cancelled(stop: &mut watch::Receiver<bool>) {
     if !*stop.borrow() {
         let _ = stop.changed().await;
@@ -96,6 +128,7 @@ async fn view(
     shared: &Shared,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
+    let clock = std::time::Instant::now();
     let certificate = cert_path(trust, &peer.id);
     let mut addresses = Vec::new();
     if let Some(address) = &peer.address {
@@ -130,6 +163,7 @@ async fn view(
         "no pinned display endpoint; update both computers and check view-screen permission",
     )?;
     display::write(&mut stream, &Message::Hello(VERSION)).await?;
+    display::write(&mut stream, &Message::Configure(shared.options)).await?;
     shared.state.lock().unwrap().message = "Waiting for peer's screen-sharing consent".into();
     let ready = tokio::select! {_=cancelled(&mut stop)=>return Ok(()),ready=display::read_until(&mut stream,Duration::from_secs(125))=>ready?};
     let Message::Ready { interactive } = ready else {
@@ -157,6 +191,8 @@ async fn view(
                 }
             }
         };
+        let received = std::time::Instant::now();
+        let received_us = clock.elapsed().as_micros() as u64;
         let frame = match message {
             Message::Frame(frame) => frame,
             Message::Ready { interactive } => {
@@ -181,14 +217,30 @@ async fn view(
             rate = std::time::Instant::now();
         }
         frames += 1;
-        if frames > 40 {
+        if frames > 75 {
             return Err("display frame rate exceeds limit".into());
         }
         last_sequence = Some(frame.sequence);
         let sequence = frame.sequence;
-        shared.frames.replace(frame);
+        {
+            let mut stats = shared.performance.lock().unwrap();
+            stats.receive(&frame);
+        }
+        shared.frames.replace(window::Received {
+            received_us,
+            frame,
+            received,
+        });
         shared.state.lock().unwrap().connected = true;
-        display::write(&mut stream, &Message::Ack(sequence)).await?;
+        display::write(
+            &mut stream,
+            &Message::Ack {
+                sequence,
+                received_us,
+                sent_us: clock.elapsed().as_micros() as u64,
+            },
+        )
+        .await?;
     }
 }
 async fn source(
@@ -291,5 +343,37 @@ async fn shutdown_signal() {
         tokio::select! {_=tokio::signal::ctrl_c()=>{},_=term.recv()=>{}}
     } else {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+    #[test]
+    fn performance_preferences_are_explicit_and_bounded() {
+        assert_eq!(
+            preferences(&args("io --stats")).unwrap(),
+            ("io".into(), Options::default(), true)
+        );
+        assert_eq!(
+            preferences(&args("--baseline io")).unwrap().1,
+            Options::baseline()
+        );
+        let (_, options, _) = preferences(&args("io --quality 99 --fps 45 --bitrate 150")).unwrap();
+        assert_eq!((options.quality, options.fps, options.mbps), (99, 45, 150));
+        for invalid in [
+            "io --fps 61",
+            "io --fps",
+            "io --quality 101",
+            "io --bitrate 0",
+            "io --unexpected",
+            "io other",
+            "",
+        ] {
+            assert!(preferences(&args(invalid)).is_err());
+        }
     }
 }

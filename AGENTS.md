@@ -92,3 +92,11 @@ scaling, retaining 1080p/frame/bandwidth bounds. Remembered ScreenCast restorati
 and improved image quality require physical acceptance. Confirmed authorization
 reset now forgets all three portal credentials; do not reset accepted input
 credentials just to test screen sharing.
+
+M21 performance follow-up: the user confirmed remote viewing/control, persisted
+ScreenCast consent across reconnect/reboot and topology restoration on close.
+Display Protocol 2 adds video preferences and privacy-safe stage/clock metrics.
+Native-resolution SIMD JPEG and off-UI decode/scaling retain the same consent,
+input transport/focus/EIS and trust architecture. Performance improvements have
+local synthetic evidence only until the user compares both PCs. Read
+docs/REMOTE_PERFORMANCE.md; do not reset saved portal authorization.
