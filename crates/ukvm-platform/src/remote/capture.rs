@@ -1,6 +1,7 @@
 //! Consent-scoped ScreenCast/PipeWire. No compositor IPC or capture subprocesses.
+use crate::linux_wayland::authorization::{Authorization, Context, Kind};
 use ashpd::desktop::{
-    screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType},
+    screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType, Streams},
     PersistMode, Session,
 };
 use pipewire::{self as pw, properties::properties, spa};
@@ -21,6 +22,7 @@ pub struct Capture {
     pub session: Session<Screencast>,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    _authorization: Authorization,
 }
 impl Drop for Capture {
     fn drop(&mut self) {
@@ -32,35 +34,18 @@ impl Drop for Capture {
 }
 impl Capture {
     pub async fn open(connection: zbus::Connection) -> Result<Self, String> {
-        let portal = Screencast::with_connection(connection)
+        let portal = Screencast::with_connection(connection.clone())
             .await
             .map_err(|e| e.to_string())?;
+        let mut authorization = Authorization::begin(
+            Kind::ScreenCast,
+            Context::on_bus(&connection, portal.version()).await?,
+        )?;
         let session = portal
             .create_session(Default::default())
             .await
-            .map_err(|e| e.to_string())?;
-        portal
-            .select_sources(
-                &session,
-                SelectSourcesOptions::default()
-                    .set_sources(Some(SourceType::Monitor.into()))
-                    .set_multiple(false)
-                    .set_cursor_mode(CursorMode::Embedded)
-                    .set_persist_mode(PersistMode::DoNot),
-            )
-            .await
-            .map_err(|e| e.to_string())?
-            .response()
-            .map_err(|e| e.to_string())?;
-        let response = portal
-            .start(&session, None, Default::default())
-            .await
-            .map_err(|e| e.to_string())?
-            .response()
-            .map_err(|e| e.to_string())?;
-        if response.streams().len() != 1 {
-            return Err("ScreenCast must supply exactly one monitor".into());
-        }
+            .map_err(|_| "ScreenCast CreateSession failed")?;
+        let response = authorize_monitor(&portal, &session, &mut authorization).await?;
         let stream = &response.streams()[0];
         let mapping_id = stream.mapping_id().map(str::to_owned);
         let origin_known = stream.position().is_some();
@@ -129,6 +114,7 @@ impl Capture {
                 session,
                 stop,
                 threads: vec![capture, encoder],
+                _authorization: authorization,
             }),
             Err(e) => {
                 stop.store(true, Ordering::Release);
@@ -138,6 +124,50 @@ impl Capture {
         }
     }
 }
+// Credential-bearing requests use fixed errors: portal responses may include
+// private restore state and must never be formatted into logs or status.
+async fn authorize_monitor(
+    portal: &Screencast,
+    session: &Session<Screencast>,
+    authorization: &mut Authorization,
+) -> Result<Streams, String> {
+    let restoring = portal.version() >= 4 && authorization.restore_token().is_some();
+    let mut options = SelectSourcesOptions::default()
+        .set_sources(Some(SourceType::Monitor.into()))
+        .set_multiple(false)
+        .set_cursor_mode(CursorMode::Embedded);
+    if portal.version() >= 4 {
+        options = options
+            .set_persist_mode(PersistMode::ExplicitlyRevoked)
+            .set_restore_token(authorization.restore_token());
+    }
+    portal.select_sources(session, options).await
+        .and_then(|request| request.response())
+        .map_err(|_| "ScreenCast SelectSources denied or failed; retry normal portal approval (any restore token was consumed)")?;
+    let response = portal.start(session, None, Default::default()).await
+        .and_then(|request| request.response())
+        .map_err(|_| "ScreenCast Start denied or failed; retry normal portal approval (any restore token was consumed)")?;
+    if response.streams().len() != 1 {
+        return Err("ScreenCast must supply exactly one monitor".into());
+    }
+    if response.streams()[0]
+        .source_type()
+        .is_some_and(|kind| kind != SourceType::Monitor)
+    {
+        return Err("ScreenCast did not grant the requested monitor".into());
+    }
+    authorization.granted(if portal.version() >= 4 {
+        response.restore_token()
+    } else {
+        None
+    })?;
+    eprintln!(
+        "[wayland] ScreenCast authorized; restore_attempted={restoring} remembered={} (restoration remains portal-controlled)",
+        portal.version() >= 4 && response.restore_token().is_some()
+    );
+    Ok(response)
+}
+
 struct Raw {
     width: u32,
     height: u32,
@@ -158,28 +188,32 @@ fn encode(
     let width = (f64::from(raw.width) * scale).floor().max(1.) as u32;
     let height = (f64::from(raw.height) * scale).floor().max(1.) as u32;
     let mut rgb = vec![0; (width * height * 3) as usize];
+    // Average every source pixel represented by a destination pixel. Point
+    // sampling used to discard thin glyph strokes on high-DPI/4K desktops.
     for y in 0..height {
+        let top = y * raw.height / height;
+        let bottom = (y + 1) * raw.height / height;
         for x in 0..width {
-            let source = (u64::from(y) * u64::from(raw.height) / u64::from(height)) as usize
-                * raw.stride
-                + (u64::from(x) * u64::from(raw.width) / u64::from(width)) as usize * 4;
+            let left = x * raw.width / width;
+            let right = (x + 1) * raw.width / width;
+            let mut sum = [0u32; 3];
+            for sy in top..bottom {
+                for sx in left..right {
+                    let source = sy as usize * raw.stride + sx as usize * 4;
+                    for (channel, total) in sum.iter_mut().enumerate() {
+                        *total += u32::from(raw.pixels[source + channel]);
+                    }
+                }
+            }
+            let count = (bottom - top) * (right - left);
             let dest = ((y * width + x) * 3) as usize;
-            let pixel = &raw.pixels[source..source + 3];
-            rgb[dest..dest + 3].copy_from_slice(pixel);
-            if raw.bgr {
-                rgb.swap(dest, dest + 2);
+            for channel in 0..3 {
+                let source_channel = if raw.bgr { 2 - channel } else { channel };
+                rgb[dest + channel] = ((sum[source_channel] + count / 2) / count) as u8;
             }
         }
     }
-    let mut jpeg = Vec::new();
-    jpeg_encoder::Encoder::new(&mut jpeg, 65)
-        .encode(
-            &rgb,
-            width as u16,
-            height as u16,
-            jpeg_encoder::ColorType::Rgb,
-        )
-        .map_err(|_| "display JPEG encoding failed")?;
+    let jpeg = encode_jpeg(&rgb, width, height)?;
     let frame = Frame {
         sequence,
         width,
@@ -192,6 +226,28 @@ fn encode(
     frame.validate()?;
     Ok(frame)
 }
+fn encode_jpeg(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    // Full chroma resolution matters for small colored text. Only lower JPEG
+    // quantization quality when a noisy image would exceed the wire bound.
+    for quality in [92, 80, 65, 45] {
+        let mut jpeg = Vec::new();
+        let mut encoder = jpeg_encoder::Encoder::new(&mut jpeg, quality);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::R_4_4_4);
+        encoder
+            .encode(
+                rgb,
+                width as u16,
+                height as u16,
+                jpeg_encoder::ColorType::Rgb,
+            )
+            .map_err(|_| "display JPEG encoding failed")?;
+        if jpeg.len() <= ukvm_protocol::display::MAX_JPEG {
+            return Ok(jpeg);
+        }
+    }
+    Err("display JPEG exceeds frame bound after quality reduction".into())
+}
+
 struct Data {
     format: spa::param::video::VideoInfoRaw,
     last: Instant,
@@ -418,6 +474,86 @@ pub async fn portal_connection() -> Result<PortalConnection, String> {
 mod tests {
     use super::*;
     #[test]
+    fn full_color_resolution_preserves_small_colored_text_edges() {
+        let pixels: Vec<u8> = (0..64 * 16)
+            .flat_map(|x| {
+                if x % 2 == 0 {
+                    [255, 0, 0, 0]
+                } else {
+                    [0, 0, 255, 0]
+                }
+            })
+            .collect();
+        let frame = encode(
+            Raw {
+                width: 64,
+                height: 16,
+                stride: 64 * 4,
+                bgr: false,
+                pixels: pixels.clone(),
+            },
+            None,
+            false,
+            None,
+            0,
+        )
+        .unwrap();
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg));
+        let rgb = decoder.decode().unwrap();
+        let expected: Vec<u8> = pixels
+            .chunks_exact(4)
+            .flat_map(|p| p[..3].iter().copied())
+            .collect();
+        let error: u64 = rgb
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum();
+        assert!(
+            error / (rgb.len() as u64) < 12,
+            "fine color edges must remain distinct"
+        );
+    }
+    #[test]
+    fn downscaling_preserves_thin_details_instead_of_discarding_them() {
+        let pixels = [0, 0, 0, 0, 255, 255, 255, 0].repeat(1920 * 2);
+        let frame = encode(
+            Raw {
+                width: 3840,
+                height: 2,
+                stride: 3840 * 4,
+                bgr: false,
+                pixels,
+            },
+            None,
+            false,
+            None,
+            0,
+        )
+        .unwrap();
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(frame.jpeg));
+        let rgb = decoder.decode().unwrap();
+        assert!(rgb.iter().all(|value| value.abs_diff(128) < 4));
+    }
+    #[test]
+    fn noisy_full_hd_frames_keep_the_wire_bound_and_dimensions() {
+        let mut state = 0x123456789abcdefu64;
+        let rgb: Vec<u8> = (0..1920 * 1080 * 3)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let jpeg = encode_jpeg(&rgb, 1920, 1080).unwrap();
+        assert!(jpeg.len() <= ukvm_protocol::display::MAX_JPEG);
+        let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(jpeg));
+        decoder.read_info().unwrap();
+        let info = decoder.info().unwrap();
+        assert_eq!((info.width, info.height), (1920, 1080));
+    }
+    #[test]
     fn capture_offer_accepts_native_resolution_and_high_refresh_sources() {
         use spa::{
             param::format::FormatProperties,
@@ -474,3 +610,7 @@ mod tests {
         assert!(rgb[0] > 240 && rgb[1] < 10 && rgb[2] < 10);
     }
 }
+
+#[cfg(test)]
+#[path = "persistence_tests.rs"]
+mod persistence_tests;

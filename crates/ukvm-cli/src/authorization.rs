@@ -10,12 +10,12 @@ pub fn status(remote_version: Option<u32>, capture_version: Option<u32>) -> Valu
                 json!({"state": "unavailable", "active": false, "remembered": false, "persistence_api_supported": null, "reason": "storage_unavailable", "error": error})
             }
         };
-        json!({"remote_desktop": view(Kind::RemoteDesktop, remote_version), "input_capture": view(Kind::InputCapture, capture_version)})
+        json!({"remote_desktop": view(Kind::RemoteDesktop, remote_version), "input_capture": view(Kind::InputCapture, capture_version), "screen_cast": view(Kind::ScreenCast, None)})
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (remote_version, capture_version);
-        json!({"remote_desktop": {"state": "unsupported"}, "input_capture": {"state": "unsupported"}})
+        json!({"remote_desktop": {"state": "unsupported"}, "input_capture": {"state": "unsupported"}, "screen_cast": {"state": "unsupported"}})
     }
 }
 
@@ -23,6 +23,7 @@ pub fn print_status(data: &Value) {
     for (key, label) in [
         ("remote_desktop", "Remote control authorization"),
         ("input_capture", "Input capture authorization"),
+        ("screen_cast", "Screen sharing authorization"),
     ] {
         let value = &data[key];
         let state = match value["state"].as_str().unwrap_or("unavailable") {

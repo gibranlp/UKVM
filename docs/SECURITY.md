@@ -91,3 +91,11 @@ socket only leases runtime input focus; it cannot mutate trust, consent or servi
 state. Revocation/disconnect/release clean held input and focus. No pixels or
 keys are logged. Physical acceptance is pending. See [remote sessions](REMOTE_SESSIONS.md)
 for protocol bounds, coordinate matching, permission checks and testing.
+
+ScreenCast v4+ remembered monitor consent uses a separate private, single-use
+credential in the existing authorization store. Only a successful Start can
+renew it; the token never grants peer trust or viewing/control permission. First
+approval, portal-side revocation/expiry and unsupported backends retain normal
+consent. Credential-bearing failures use fixed errors and status contains no
+restore data. Confirmed authorization reset now forgets ScreenCast alongside the
+two input credentials, after stopping the owned runtime and locking all grants.

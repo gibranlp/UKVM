@@ -82,3 +82,13 @@ M19 implements separate opt-in plain-text clipboard synchronization; read docs/C
 M20 implements independent opt-in secure file transfer for Linux. Read docs/FILE_TRANSFER.md, FRONTEND_CONTRACT.md and SECURITY.md before changing it. File Protocol 1 uses a separate pinned mutual-TLS ALPN channel, bounded streaming, per-peer receive-files default deny, live policy guards, private staging and SHA-256 verified atomic no-replace publication. Filesystem operations belong behind ukvm-platform::files. Contents/digests never appear in logs or frontend JSON. M18 persistence/control and M19 Spectrum/Hellgen clipboard/widget are user-confirmed physically accepted. M20 physical acceptance is pending; Windows/macOS remain unstarted. Earlier scope/acceptance notes above are historical.
 
 M21 implements Linux Wayland Interactive Remote Sessions v1 (`ukvm remote PEER`): separate default-deny view-screen permission, ScreenCast/PipeWire/JPEG Display Protocol 1, native window input through the existing runtime focus gate, pinned input transport and shared RemoteDesktop/EIS injector. Input Protocol 1.4 is required on both nodes; Pairing 2, Clipboard 1 and File 1 are unchanged. Read docs/REMOTE_SESSIONS.md before changing display/window input. Physical acceptance is pending. No audio, recording, multi-monitor viewing, automatic headless output, Windows or macOS is implemented. Preserve the earlier accepted input/portal/clipboard lifecycle and M20 scope.
+
+M21 follow-up: the user physically confirmed io viewing/window control and that
+Spectrum no longer freezes after 26ee11e. Full cleanup/release/regression acceptance
+remains pending. ScreenCast v4+ now requests official persistent monitor consent
+using its own private single-use credential; unsupported/non-persisting backends
+still require local approval. JPEG uses quality 92/full 4:4:4 color and improved
+scaling, retaining 1080p/frame/bandwidth bounds. Remembered ScreenCast restoration
+and improved image quality require physical acceptance. Confirmed authorization
+reset now forgets all three portal credentials; do not reset accepted input
+credentials just to test screen sharing.

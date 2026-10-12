@@ -13,7 +13,11 @@ again to resume. The receiver must explicitly allow `view-screen`, and interacti
 control additionally needs `control-this-node` plus normal portal consent.
 
 This Linux v1 implementation targets JPEG video up to 1080p/30 FPS on a separate
-pinned TLS display channel. **Physical acceptance is pending.** Both nodes need
+pinned TLS display channel. The user confirmed viewing and window control; full
+physical acceptance is pending. Official ScreenCast persistence can remember the
+approved monitor on supporting backends. Quality-92/full-color JPEG and improved
+scaling target clearer text; remembered sharing and quality still need a retest.
+Both nodes need
 Input Protocol 1.4; identities/pairing are preserved. Read
 [build prerequisites, limitations and exact two-PC test commands](docs/REMOTE_SESSIONS.md).
 

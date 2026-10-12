@@ -9,16 +9,23 @@ open. Click again to request a new control lease. Losing window focus also
 releases control. Closing the window, display/input failure, permission loss,
 backend loss and runtime shutdown clean up held input.
 
-This version is implemented and covered by automated tests. Desktop delivery,
-compositor key handling, perceived latency and the combined two-PC workflow have
-not been physically accepted. Existing M18–M20 acceptance evidence is unchanged.
+The user physically confirmed desktop delivery and window control on io after
+26ee11e, and Spectrum no longer froze during that attempt. The full modifier,
+release/resume, held-input cleanup and existing-feature acceptance sequence has
+not yet been reported complete. Remembered ScreenCast restoration and the new
+quality settings await physical testing. Existing M18–M20 evidence is unchanged.
 
 ## Architecture and ownership
 
 The platform capture backend uses a private D-Bus connection, official
 ScreenCast CreateSession/SelectSources/Start/OpenPipeWireRemote, and the returned
 restricted PipeWire FD. It requests one monitor with an embedded cursor and
-no persistent ScreenCast permission. Consent cancellation/disconnect/shutdown
+official ScreenCast v4+ persistence until explicitly revoked. Its returned
+single-use restore token uses the existing private authorization store under its
+own ScreenCast record, separate from RemoteDesktop/InputCapture. The first local
+approval remains mandatory; when the backend honors saved consent, subsequent
+connections restore the selected monitor without another picker. Backend
+revocation, missing outputs or unavailable persistence require normal consent. Consent cancellation/disconnect/shutdown
 closes that private connection and the session; capture and codec actors are
 joined. It neither alters nor resets M18's RemoteDesktop/InputCapture credentials.
 No external capture/codec programs, direct compositor capture, root input access,
@@ -26,10 +33,16 @@ XWayland fallback or virtual/headless output creation is used.
 
 PipeWire maps packed BGRx/BGRA/RGBx/RGBA buffers. Capture copies validated stride,
 offset and size data into a replaceable slot. A separate codec actor downsizes
-without upscaling to fit 1920×1080 and encodes independent JPEG images at quality
-65, targeting 30 FPS. Portrait images also fit that bounding box. One native
+without upscaling to fit 1920×1080, averages source pixels when reducing size,
+and encodes independent JPEG images at quality 92 with full 4:4:4 color resolution,
+targeting 30 FPS. This preserves small colored text better than the former
+quality-65/4:2:0 encoding. Highly noisy images may reduce quantization quality
+through 80/65/45 to stay below 2 MiB; color resolution and frame geometry remain
+unchanged. More bytes per frame can reduce FPS under the same 8 MiB/s cap. Portrait images also fit that bounding box. One native
 Wayland window uses winit/softbuffer; JPEG decoding checks dimensions and RGB24
-before bounded pixel allocation. A header strip stays outside the remote content.
+before bounded pixel allocation. The window uses bilinear scaling, cached per
+frame/window size, instead of point sampling. A header strip stays outside the
+remote content.
 Redraw requests have a monotonic 33 ms deadline. Winit wakeups/input events do
 not schedule additional frames before that deadline, including in a disconnected
 black window; missed deadlines are skipped rather than replayed.
@@ -242,3 +255,39 @@ Confirm that the service's executable is the intended build as well as the CLI:
 a display-only failure; it must not grab local input or stop physical KVM.
 Report which PC stalls, whether the ScreenCast picker appeared, and the service
 error. Do not reset trust or portal restore tokens to troubleshoot video.
+
+## Remembered sharing and quality retest
+
+Local validation passed fmt, workspace check, tests (289 passed, zero failures,
+five opt-in tests ignored), Clippy with warnings denied, and debug/release builds.
+No new dependencies or input/display protocol versions were added by this follow-up.
+
+Update both PCs with the commands above; Spectrum is redeployed automatically
+by the development workflow. On io, the first connection after this update still
+needs local ScreenCast approval. Select the intended monitor and choose the
+portal's remember/skip-future-prompts option if offered. UKVM never selects that
+choice for you. Then on io:
+
+```sh
+~/.local/bin/ukvm authorization status
+```
+
+Screen sharing must report Persistent (remembered). A missing token means the
+backend did not persist consent; unattended viewing is not established. Close the
+viewer, reopen `~/.local/bin/ukvm remote io` on Spectrum, and verify it connects
+without touching io. Repeat after a UKVM service restart, logout/login and reboot
+on io. A logged-in supported Wayland session is still required; no display-manager
+or headless access is added. Journal diagnostics report restore-attempt/token
+presence only and cannot establish that a picker was skipped.
+
+Check colored terminal text, small fonts, icons and scrolling in the new image.
+Compare in a larger/maximized window. Encoded frames remain at most 1920×1080, so
+a 4K monitor is still reduced and cannot have native 4K text fidelity. Quality
+increases can reduce video FPS on slow CPUs/LANs; input stays on its independent
+transport with existing cleanup and bounded latest-frame queues.
+
+`ukvm authorization reset` now explicitly forgets all three portal credentials,
+including ScreenCast, after its existing confirmation and owned-runtime shutdown.
+It leaves UKVM stopped. Do not use reset for this retest: it would discard the
+already accepted input grants as well. Revoke individual screen-sharing consent
+through the desktop's portal controls when available.

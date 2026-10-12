@@ -74,6 +74,7 @@ pub fn run(
         window: None,
         surface: None,
         image: None,
+        scaled: None,
         cursor: (0., 0.),
         keys: HashSet::new(),
         modifiers: winit::keyboard::ModifiersState::empty(),
@@ -104,6 +105,7 @@ struct App {
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
     image: Option<Image>,
+    scaled: Option<Scaled>,
     cursor: (f64, f64),
     keys: HashSet<u32>,
     modifiers: winit::keyboard::ModifiersState,
@@ -185,6 +187,7 @@ impl App {
     fn redraw(&mut self) -> Result<(), String> {
         if let Some(frame) = self.shared.frames.take() {
             self.image = Some(decode(frame)?);
+            self.scaled = None;
             self.last_frame = Instant::now();
         }
         let Some(window) = self.window.as_ref() else {
@@ -202,6 +205,16 @@ impl App {
         if u64::from(size.width) * u64::from(size.height) > 16_777_216 {
             return Err("window exceeds rendering bound".into());
         }
+        if self
+            .scaled
+            .as_ref()
+            .is_none_or(|image| image.window != (size.width, size.height))
+        {
+            self.scaled = self
+                .image
+                .as_ref()
+                .and_then(|image| scale_image(image, (size.width, size.height)));
+        }
         let title = self.title();
         let surface = self.surface.as_mut().ok_or("window surface unavailable")?;
         surface.resize(width, height).map_err(|e| e.to_string())?;
@@ -216,23 +229,10 @@ impl App {
             "Ctrl+Alt+Shift+Escape releases control",
             28,
         );
-        if let Some(image) = &self.image {
-            if let Some(v) = Viewport::fit(
-                (size.width, size.height.saturating_sub(48)),
-                (image.width, image.height),
-            ) {
-                for y in 0..v.height as u32 {
-                    for x in 0..v.width as u32 {
-                        let sx = (f64::from(x) / v.width * f64::from(image.width)) as u32;
-                        let sy = (f64::from(y) / v.height * f64::from(image.height)) as u32;
-                        let dest = (u64::from(y + v.y as u32 + 48) * u64::from(size.width)
-                            + u64::from(x + v.x as u32))
-                            as usize;
-                        if let Some(pixel) = buffer.get_mut(dest) {
-                            *pixel = image.pixels[(sy * image.width + sx) as usize];
-                        }
-                    }
-                }
+        if let Some(image) = &self.scaled {
+            for (y, row) in image.pixels.chunks_exact(image.width as usize).enumerate() {
+                let dest = (y + image.y as usize) * size.width as usize + image.x as usize;
+                buffer[dest..dest + row.len()].copy_from_slice(row);
             }
         }
         buffer.present().map_err(|e| e.to_string())
@@ -404,6 +404,85 @@ impl ApplicationHandler for App {
         }
     }
 }
+// One bounded scaled image per decoded frame/window size. Status redraws can
+// copy it without repeating interpolation work when no new video arrived.
+struct Scaled {
+    window: (u32, u32),
+    x: u32,
+    y: u32,
+    width: u32,
+    pixels: Vec<u32>,
+}
+fn scale_image(image: &Image, window: (u32, u32)) -> Option<Scaled> {
+    let v = Viewport::fit(
+        (window.0, window.1.saturating_sub(48)),
+        (image.width, image.height),
+    )?;
+    let width = v.width as u32;
+    let height = v.height as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let horizontal: Vec<_> = (0..width)
+        .map(|x| sample_axis(x, v.width, image.width))
+        .collect();
+    let mut pixels = Vec::with_capacity((width * height) as usize);
+    for y in 0..height {
+        let vertical = sample_axis(y, v.height, image.height);
+        for x in &horizontal {
+            pixels.push(sample_pixel(image, *x, vertical));
+        }
+    }
+    Some(Scaled {
+        window,
+        x: v.x as u32,
+        y: v.y as u32 + 48,
+        width,
+        pixels,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct SampleAxis {
+    low: usize,
+    high: usize,
+    weight: u32,
+}
+fn sample_axis(position: u32, destination: f64, source: u32) -> SampleAxis {
+    let center = ((f64::from(position) + 0.5) * f64::from(source) / destination - 0.5)
+        .clamp(0., f64::from(source - 1));
+    let low = center.floor() as usize;
+    SampleAxis {
+        low,
+        high: (low + 1).min(source as usize - 1),
+        weight: ((center - low as f64) * 256.).round() as u32,
+    }
+}
+fn sample_pixel(image: &Image, x: SampleAxis, y: SampleAxis) -> u32 {
+    let row = image.width as usize;
+    let pixels = [
+        image.pixels[y.low * row + x.low],
+        image.pixels[y.low * row + x.high],
+        image.pixels[y.high * row + x.low],
+        image.pixels[y.high * row + x.high],
+    ];
+    let weights = [
+        (256 - x.weight) * (256 - y.weight),
+        x.weight * (256 - y.weight),
+        (256 - x.weight) * y.weight,
+        x.weight * y.weight,
+    ];
+    let mut result = 0;
+    for shift in [0, 8, 16] {
+        let channel: u32 = pixels
+            .iter()
+            .zip(weights)
+            .map(|(pixel, weight)| ((pixel >> shift) & 255) * weight)
+            .sum();
+        result |= ((channel + 32768) / 65536) << shift;
+    }
+    result
+}
 fn emergency(keys: &HashSet<u32>) -> bool {
     (keys.contains(&29) || keys.contains(&97))
         && (keys.contains(&56) || keys.contains(&100))
@@ -461,6 +540,48 @@ fn draw_text(pixels: &mut [u32], width: u32, height: u32, text: &str, top: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scaling_interpolates_colors_and_keeps_native_pixels_exact() {
+        let image = Image {
+            width: 2,
+            height: 1,
+            screen: None,
+            origin_known: false,
+            mapping_id: None,
+            pixels: vec![0xff0000, 0x0000ff],
+        };
+        assert_eq!(
+            sample_pixel(&image, sample_axis(0, 2., 2), sample_axis(0, 1., 1)),
+            0xff0000
+        );
+        assert_eq!(
+            sample_pixel(&image, sample_axis(1, 2., 2), sample_axis(0, 1., 1)),
+            0x0000ff
+        );
+        assert_eq!(
+            sample_pixel(&image, sample_axis(0, 1., 2), sample_axis(0, 1., 1)),
+            0x800080
+        );
+        assert_eq!(sample_axis(0, 4., 2).low, 0);
+        assert_eq!(sample_axis(3, 4., 2).high, 1);
+        // Cached rows must remain inside the resized surface and outside its
+        // status header, including portrait/letterboxed and one-pixel content.
+        assert!(scale_image(&image, (1, 49)).is_none());
+        for window in [(17, 61), (31, 75), (11, 96), (2, 49)] {
+            let scaled = scale_image(&image, window).unwrap();
+            assert_eq!(scaled.window, window);
+            assert!(scaled.y >= 48);
+            for (y, row) in scaled
+                .pixels
+                .chunks_exact(scaled.width as usize)
+                .enumerate()
+            {
+                let start = (scaled.y as usize + y) * window.0 as usize + scaled.x as usize;
+                assert!(start + row.len() <= (window.0 * window.1) as usize);
+                assert!(scaled.x + row.len() as u32 <= window.0);
+            }
+        }
+    }
     #[test]
     fn redraw_wakeups_do_not_create_a_busy_loop() {
         let now = Instant::now();
@@ -522,6 +643,7 @@ mod tests {
             window: None,
             surface: None,
             image: None,
+            scaled: None,
             cursor: (0., 0.),
             keys: HashSet::from([42]),
             modifiers: winit::keyboard::ModifiersState::empty(),

@@ -632,7 +632,7 @@ fn authorization_command(args: &[String]) -> Result<Value, String> {
         [action, flag] if action == "reset" && flag == "--yes" => true,
         _ => return Err("usage: ukvm authorization [status|reset [--yes]] [--json]".into()),
     };
-    confirm("Stop UKVM and forget remembered desktop input authorization? Normal portal approval will be required again; peer trust/permissions are unchanged.", yes)?;
+    confirm("Stop UKVM and forget remembered desktop input and screen-sharing authorization? Normal portal approval will be required again; peer trust/permissions are unchanged.", yes)?;
     #[cfg(target_os = "linux")]
     {
         use ukvm_runtime::ownership::{self, RuntimeStatus};

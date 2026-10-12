@@ -1381,6 +1381,9 @@
         },
         "input_capture": {
           "$ref": "#/$defs/authorization_state"
+        },
+        "screen_cast": {
+          "$ref": "#/$defs/authorization_state"
         }
       },
       "required": [

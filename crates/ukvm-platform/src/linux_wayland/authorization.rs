@@ -14,13 +14,22 @@ const MAX_RECORD: u64 = 16_384;
 pub enum Kind {
     RemoteDesktop,
     InputCapture,
+    ScreenCast,
 }
 impl Kind {
     fn name(self) -> &'static str {
         match self {
             Self::RemoteDesktop => "remote-desktop",
             Self::InputCapture => "input-capture",
+            Self::ScreenCast => "screen-cast",
         }
+    }
+    fn supports_persistence(self, version: u32) -> bool {
+        version
+            >= match self {
+                Self::ScreenCast => 4,
+                Self::RemoteDesktop | Self::InputCapture => 2,
+            }
     }
 }
 
@@ -279,7 +288,7 @@ impl Authorization {
     pub fn begin(kind: Kind, context: Context) -> Result<Self, String> {
         Self::begin_in(&directory()?, kind, context)
     }
-    pub(super) fn begin_in(dir: &Path, kind: Kind, context: Context) -> Result<Self, String> {
+    pub(crate) fn begin_in(dir: &Path, kind: Kind, context: Context) -> Result<Self, String> {
         private_directory(dir, true)?;
         let lock = private_file(&dir.join(format!("{}.lock", kind.name())), true)?.unwrap();
         lock.try_lock_exclusive().map_err(|_| {
@@ -294,7 +303,7 @@ impl Authorization {
             Some(record) => record.token,
             None => None,
         };
-        let restore_token = if context.version < 2 {
+        let restore_token = if !kind.supports_persistence(context.version) {
             reason = Reason::Unsupported;
             None
         } else {
@@ -332,7 +341,7 @@ impl Authorization {
         self.record.authorized = true;
         self.record.reason = if token.is_some() {
             Reason::Remembered
-        } else if self.record.context.version < 2 {
+        } else if !self.kind.supports_persistence(self.record.context.version) {
             Reason::Unsupported
         } else {
             Reason::BackendDidNotPersist
@@ -356,7 +365,7 @@ pub fn status(kind: Kind, version: Option<u32>) -> Result<Status, String> {
     status_in(&directory()?, kind, version)
 }
 fn status_in(dir: &Path, kind: Kind, version: Option<u32>) -> Result<Status, String> {
-    let supported = version.map(|v| v >= 2);
+    let supported = version.map(|v| kind.supports_persistence(v));
     let missing = |reason| Status {
         state: if supported == Some(false) {
             "unsupported"
@@ -411,7 +420,8 @@ fn status_in(dir: &Path, kind: Kind, version: Option<u32>) -> Result<Status, Str
         },
         active,
         remembered,
-        persistence_api_supported: supported.or(Some(record.context.version >= 2)),
+        persistence_api_supported: supported
+            .or(Some(kind.supports_persistence(record.context.version))),
         reason: record.reason,
         context_verified: context.is_some(),
     })
@@ -425,13 +435,13 @@ fn reset_in(dir: &Path) -> Result<(), String> {
         return Ok(());
     }
     let mut locks = Vec::new();
-    for kind in [Kind::RemoteDesktop, Kind::InputCapture] {
+    for kind in [Kind::RemoteDesktop, Kind::InputCapture, Kind::ScreenCast] {
         let lock = private_file(&dir.join(format!("{}.lock", kind.name())), true)?.unwrap();
         lock.try_lock_exclusive().map_err(|_| "desktop authorization is still in use; stop UKVM and any diagnostic portal sessions first")?;
         private_file(&dir.join(format!("{}.json", kind.name())), false)?;
         locks.push(lock);
     }
-    for kind in [Kind::RemoteDesktop, Kind::InputCapture] {
+    for kind in [Kind::RemoteDesktop, Kind::InputCapture, Kind::ScreenCast] {
         match fs::remove_file(dir.join(format!("{}.json", kind.name()))) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -459,6 +469,39 @@ mod tests {
     }
     fn context() -> Context {
         Context::current(2)
+    }
+    #[test]
+    fn screen_cast_is_separate_from_input_credentials_and_reset_honors_its_lease() {
+        let (_tmp, dir) = fixture();
+        for kind in [Kind::RemoteDesktop, Kind::InputCapture] {
+            let mut input = Authorization::begin_in(&dir, kind, context()).unwrap();
+            input.granted(Some("remembered-input-token")).unwrap();
+        }
+        let mut screen =
+            Authorization::begin_in(&dir, Kind::ScreenCast, Context::current(4)).unwrap();
+        screen.granted(Some("remembered-screen-token")).unwrap();
+        let status = status_in(&dir, Kind::ScreenCast, Some(4)).unwrap();
+        assert!(status.active && status.remembered);
+        assert!(!serde_json::to_string(&status)
+            .unwrap()
+            .contains("remembered-screen-token"));
+        assert!(reset_in(&dir).is_err());
+        drop(screen);
+        let screen = Authorization::begin_in(&dir, Kind::ScreenCast, Context::current(4)).unwrap();
+        assert_eq!(screen.restore_token(), Some("remembered-screen-token"));
+        for name in ["remote-desktop", "input-capture"] {
+            assert!(fs::read_to_string(dir.join(format!("{name}.json")))
+                .unwrap()
+                .contains("remembered-input-token"));
+        }
+        drop(screen);
+        reset_in(&dir).unwrap();
+        for kind in [Kind::RemoteDesktop, Kind::InputCapture, Kind::ScreenCast] {
+            assert!(!dir.join(format!("{}.json", kind.name())).exists());
+            assert!(dir.join(format!("{}.lock", kind.name())).exists());
+        }
+        assert!(!Kind::ScreenCast.supports_persistence(3));
+        assert!(Kind::ScreenCast.supports_persistence(4));
     }
     #[test]
     fn first_approval_rotation_and_restart_do_not_leak_secrets() {

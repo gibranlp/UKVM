@@ -24,7 +24,7 @@ ukvm authorization status --json
 ukvm authorization reset --yes --json
 ```
 
-Reset requires terminal confirmation or explicit `--yes` after frontend confirmation. It verifies runtime ownership, cooperatively stops the managed UKVM user service, requires the runtime to have released ownership, then forgets both interface credentials. A foreground/unknown runtime or another diagnostic portal session blocks reset. UKVM stays stopped; the service's enabled setting is unchanged. Start explicitly to request normal consent again. Reset does not edit peer pins, control permissions, identity or topology, and does not auto-start a new permission prompt. Partial storage failures return nonzero, explaining if the service was already stopped. This is forgetting UKVM's credentials and closing its active grant, not a desktop-wide revocation tool for other applications or copies of credentials; revoke desktop-wide permissions through the desktop's portal controls when available.
+Reset requires terminal confirmation or explicit `--yes` after frontend confirmation. It verifies runtime ownership, cooperatively stops the managed UKVM user service, requires the runtime to have released ownership, then forgets the RemoteDesktop, InputCapture and ScreenCast credentials. A foreground/unknown runtime or another diagnostic portal session blocks reset. UKVM stays stopped; the service's enabled setting is unchanged. Start explicitly to request normal consent again. Reset does not edit peer pins, control permissions, identity or topology, and does not auto-start a new permission prompt. Partial storage failures return nonzero, explaining if the service was already stopped. This is forgetting UKVM's credentials and closing its active grant, not a desktop-wide revocation tool for other applications or copies of credentials; revoke desktop-wide permissions through the desktop's portal controls when available.
 
 ## Status and frontend contract
 
@@ -60,3 +60,31 @@ After r18-3 corrected the context mismatch, the user physically observed a valid
 Verbose diagnostics report mode 2, whether a restore token was supplied, Start success, pointer/keyboard grants, whether a replacement was received, whether its value was reissued and successful durable storage. They never print token bytes, hashes or raw response dictionaries. The public response does not distinguish restored consent from normal consent; logs explicitly say `restoration_confirmation=not_exposed_by_portal` and do not claim that a dialog was skipped. No UKVM restoration error is silently turned into success.
 
 For a physical retest, install the new package, then `ukvm service install --verbose` and `ukvm service restart`. If the failed r18-3 attempt already consumed the old credential, explicitly approve/remember once to establish a fresh grant. Query `ukvm authorization status --json`, restart again, initiate control and require no new RemoteDesktop dialog. Inspect `journalctl --user -b -u ukvm.service --no-pager`; a reissued value must reach durable storage and ConnectToEIS, without the old rejection or an extra fresh authorization request. Then test logout/login and reboot. Do not reset authorization or print credential files. This correction is not physically accepted until that test passes.
+
+## ScreenCast remembered monitor (M21)
+
+Interactive remote viewing requests official ScreenCast v4+ `persist_mode=2` and
+`restore_token` on SelectSources, with one monitor and an embedded cursor. Start
+must succeed and return exactly the requested monitor before its replacement
+token is stored. OpenPipeWireRemote then uses only the portal-restricted FD.
+ScreenCast has a separate `screen-cast` credential/lock in the same private store;
+it never consumes, renews or grants RemoteDesktop/InputCapture permission.
+ScreenCast interfaces before v4 omit persistence options and use normal consent.
+A v4+ backend may omit a token, ignore an expired grant or prompt again: API
+support/token presence is not evidence of unattended restoration.
+
+The first approved source may be remembered until explicitly revoked by the
+portal. UKVM consumes before attempting, durably replaces tokens after successful
+Start, accepts a reissued value, and uses fixed errors for credential-bearing
+requests. Context/version changes, rejection, cancellation and crashes retain the
+existing fail-closed rules. A ScreenCast lease lasts through capture cleanup.
+`authorization status` adds the redacted `screen_cast` entry; confirmed reset now
+locks/forgets all three kinds and cannot forget an active sharing lease.
+[Official ScreenCast persistence specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html).
+
+Private-bus regressions exercise real ashpd SelectSources/Start requests for v3,
+v4, rotation/reissued values, denied restoration and missing tokens. Private-state
+tests cover independent credentials, redacted status and reset refusing an active
+ScreenCast lease. The user confirmed M21 viewing/control and the corrected redraw
+behavior; unattended ScreenCast restoration after close/restart/login/reboot is
+still pending. See [the focused retest](REMOTE_SESSIONS.md#remembered-sharing-and-quality-retest).
