@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+# Release packages bundle the locked codec for distros with libjpeg-turbo 2.x.
+bundled-jpeg = ["turbojpeg/cmake", "turbojpeg/require-simd"]
+
 [dependencies]
 ukvm-protocol.workspace = true
 ukvm-core.workspace = true

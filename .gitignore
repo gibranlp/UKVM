@@ -1,5 +1,6 @@
 # Cargo build output. Commit Cargo.lock for reproducible application builds.
 target/
+/dist/
 
 # Local UKVM node identity and runtime state. Never publish private keys.
 node.key

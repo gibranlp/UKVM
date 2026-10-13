@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+bundled-jpeg = ["ukvm-platform/bundled-jpeg"]
+
 [[bin]]
 name = "ukvm"
 path = "src/main.rs"

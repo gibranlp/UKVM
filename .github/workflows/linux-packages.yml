@@ -1,0 +1,84 @@
+name: Linux packages
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/linux-packages.yml'
+      - 'packaging/**'
+      - 'scripts/build-linux-packages.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'docs/PACKAGING.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build and package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev pkg-config libpipewire-0.3-dev libwayland-dev libxkbcommon-dev cmake nasm rpm dpkg-dev ripgrep
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup component add rustfmt clippy
+      - name: Validate workspace and bundled codec
+        env:
+          TURBOJPEG_SOURCE: vendor
+          TURBOJPEG_STATIC: '1'
+        run: |
+          cargo fmt --all -- --check
+          cargo check --locked --workspace --features ukvm/bundled-jpeg
+          cargo test --locked --workspace --features ukvm/bundled-jpeg
+          cargo clippy --locked --workspace --all-targets --features ukvm/bundled-jpeg -- -D warnings
+          cargo build --locked --workspace --features ukvm/bundled-jpeg
+      - name: Build packages
+        env:
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
+        run: bash scripts/build-linux-packages.sh
+      - name: Inspect and smoke-test Debian install
+        run: |
+          dpkg-deb --info dist/*.deb
+          rpm -qp --requires dist/*.rpm
+          rpm -qp --scripts dist/*.rpm
+          sudo apt-get install -y ./dist/*.deb
+          /usr/bin/ukvm --help
+          test -f /usr/lib/systemd/user/ukvm.service
+          sudo apt-get remove -y ukvm
+      - name: Smoke-test RPM install on Fedora
+        run: |
+          docker run --rm -v "$PWD/dist:/packages:ro" fedora:42 bash -euc '
+            dnf install -y /packages/*.rpm
+            /usr/bin/ukvm --help
+            test -f /usr/lib/systemd/user/ukvm.service
+            dnf remove -y ukvm
+          '
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ukvm-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ukvm-linux-x86_64
+          path: dist
+      - name: Publish prerelease downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/* --verify-tag --prerelease --generate-notes --title "UniversalKVM $RELEASE_TAG"

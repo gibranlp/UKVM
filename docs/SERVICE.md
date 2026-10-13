@@ -4,6 +4,10 @@ Linux systemd user service only. This service runs the existing persistent runti
 
 ## Installation
 
+For distro packages and GitHub download/release instructions, see
+[Linux packaging](PACKAGING.md). Packages own the `/usr` vendor assets and leave
+service activation and existing user state to the user.
+
 From the repository:
 
 ```sh

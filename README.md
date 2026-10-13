@@ -52,6 +52,12 @@ The first authorized incoming session requests RemoteDesktop consent. A valid po
 
 ## Installation and background use
 
+Linux x86_64 release packaging supports `.deb`, `.rpm`, and `.tar.gz` downloads
+through [GitHub Releases](https://github.com/gibranlp/UKVM/releases). See
+[installation, compatibility and release builds](docs/PACKAGING.md). Release
+availability depends on a successful package workflow and maintainer publication.
+Packages require compatible Wayland portals and do not enable/start the service.
+
 ```sh
 cargo build --release --workspace
 ./target/release/ukvm install
