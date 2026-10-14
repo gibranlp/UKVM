@@ -306,7 +306,24 @@ pub fn doctor() -> Result<Value, String> {
             json!({"backend_state": backend_state, "os": "linux", "session": {"type_hint": report.session.session_type_hint, "desktop_hint": report.session.desktop_hint, "wayland_display": report.session.wayland_display, "wayland_socket_reachable": report.session.wayland_socket_reachable}, "portal": {"available": report.portal_service, "error": report.portal_error}, "input_capture": interface(&report.capture), "remote_desktop": interface(&report.remote), "connect_to_eis_available": report.remote.version.is_some_and(|v| v >= 2), "consent_requested": false, "authorization": "not_tested", "desktop_authorization": super::authorization::status(report.remote.version, report.capture.version), "clipboard": {"supported": super::with_runtime(ukvm_platform::clipboard::wayland::supported()), "backend": "wayland_data_control", "protocol_version": ukvm_protocol::clipboard::CLIPBOARD_VERSION, "max_text_bytes": ukvm_protocol::clipboard::MAX_CLIPBOARD_BYTES, "contents_read": false}, "physical_input": "not_tested", "limitations": ["hyprland_partial_external_edge_barriers"]}),
         )
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        let (session, error) = match ukvm_platform::windows::session::probe() {
+            Ok(info) => (
+                json!({"id":info.session_id,"active":info.active,"elevated":info.elevated,"interactive_desktop":info.interactive_desktop,"ready_for_input":info.require_interactive().is_ok()}),
+                None,
+            ),
+            Err(error) => (Value::Null, Some(error.to_string())),
+        };
+        Ok(
+            json!({"backend_state":"unsupported","os":"windows","session":session,"session_error":error,
+            "portal":null,"input_capture":{"implemented":false},"remote_desktop":{"implemented":false},
+            "connect_to_eis_available":false,"consent_requested":false,"authorization":"not_tested","physical_input":"not_tested",
+            "storage":{"backend":"windows_protected_dacl","implemented":true,"validation":"not_requested"},
+            "limitations":["native_input_backend_not_implemented","higher_integrity_apps","secure_desktop"]}),
+        )
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     Err("doctor management interface currently requires Linux".into())
 }
 

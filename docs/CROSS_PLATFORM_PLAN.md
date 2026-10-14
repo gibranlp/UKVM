@@ -3,6 +3,8 @@
 Planning date: 2026-10-14. This is an implementation proposal, not a claim of
 additional platform support. The user has Windows and Apple Silicon Mac hardware
 for physical testing; no native X11 test desktop is currently available.
+The Windows test PC runs Windows 11 without Rust; native checks use a compiled
+foundation test kit and command runner.
 
 Implementation order: shared foundations → Windows → macOS Apple Silicon →
 clipboard/files/remote-session parity on those platforms → Linux X11 → final
@@ -20,10 +22,10 @@ or a lost stop channel. Existing session/focus tests remain backend independent.
 
 `native-platforms.yml` adds Linux, Windows MSVC and Apple Silicon macOS build,
 test-compilation and Clippy jobs. Linux executes the full workspace suite;
-Windows/macOS execute core, protocol, config, platform and shared runtime tests.
-The workflow compiles all workspace tests on each target. Native network/CLI state tests are
-not yet executed: secure storage, durable pairing records and OS management
-still need native implementations. The native jobs establish compiler/test
+Windows now schedules the full workspace suite; macOS executes core, protocol,
+config, platform and shared runtime tests. The workflow compiles all workspace
+tests on each target; macOS state/management integration remains pending.
+Native jobs establish compiler/test
 evidence only, not input capability, user grants or physical acceptance.
 Wayland test dependencies are now Linux-scoped.
 
@@ -63,8 +65,16 @@ Clippy and compilation/linking of every test executable also passed. Physical
 switching regression and native Windows/Mac execution remain separate acceptance
 steps; no new OS capability is claimed from these checks.
 
-Remaining M22 work includes native backend session contracts, capture-driven
-handoff adapters, physical-key mapping, native ownership/private storage,
+The third slice adds Windows protected private state, bounded
+identity/trust/recovery reads, flushed revocation markers, desktop/session
+probing and permanent kernel runtime ownership. Portable snapshot types preserve
+the Linux schema; Windows doctor remains read-only and reports input unsupported.
+A compiled Windows 11 test kit needs no Rust. See [native storage/ownership and
+acceptance](WINDOWS_FOUNDATION.md). Native execution, ACL enforcement and durability
+acceptance are pending; Windows input and startup remain unavailable.
+
+Remaining M22 work includes native capture/injection session contracts,
+capture-driven handoff adapters, physical-key mapping, macOS ownership/private storage,
 backend selection and cross-platform management status. Windows/macOS input and
 X11 are still unimplemented. No protocol version or stored portal credential
 changes are part of this slice.

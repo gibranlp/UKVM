@@ -1,7 +1,6 @@
 //! Linux user-runtime ownership and a read-only, advisory status snapshot.
 //! The permanent lock inode is never removed. Kernel ownership, not PID files,
 //! decides whether a runtime exists; all snapshots are ignored without that lock.
-use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{self, File, OpenOptions},
@@ -10,38 +9,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct PeerStatus {
-    pub id: String,
-    pub coordinate: String,
-    pub availability: String,
-}
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct RuntimeSnapshot {
-    pub pid: u32,
-    pub updated: u64,
-    pub name: String,
-    pub node_id: String,
-    pub state: String,
-    pub focus: String,
-    pub active_peer: Option<String>,
-    pub active_coordinate: Option<String>,
-    pub capture: String,
-    pub receiver: String,
-    pub peers: Vec<PeerStatus>,
-    #[serde(default)]
-    pub file_protocol_version: Option<u16>,
-    #[serde(default)]
-    pub display_protocol_version: Option<u16>,
-    #[serde(default)]
-    pub clipboard: crate::wayland::clipboard::ClipboardStatus,
-}
-#[derive(Debug)]
-pub enum RuntimeStatus {
-    Stopped,
-    Running(Box<RuntimeSnapshot>),
-    StartingOrUnavailable(String),
-}
+pub use crate::snapshot::{PeerStatus, RuntimeSnapshot, RuntimeStatus};
 
 pub fn directory() -> Result<PathBuf, String> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")

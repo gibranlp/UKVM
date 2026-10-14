@@ -60,6 +60,13 @@ Stop sends SIGINT and allows 45 seconds for cooperative capture, held-input, net
 
 ## Ownership and status
 
+M22 extracts the portable snapshot types without changing Linux's schema or
+ownership behavior. A separate Windows adapter implements protected private
+state, permanent kernel locks and bounded advisory snapshots, with session
+checks before acquisition. Windows input-runtime/startup integration and native
+acceptance remain pending; no Windows service command is enabled by this work.
+See [Windows foundation](WINDOWS_FOUNDATION.md).
+
 `ukvm run` takes a nonblocking kernel file lock at `$XDG_RUNTIME_DIR/ukvm/runtime.lock` before listener, discovery or portals. A second runtime explains how to inspect/stop the existing owner. The lock inode is retained, never unlinked to unlock; process exit/crash releases the kernel lock automatically. Private owned directories and regular, non-symlink lock files are required. A stale PID/snapshot never grants ownership or prevents recovery.
 
 The owner atomically writes a private, bounded `status.toml` snapshot once per second, containing public node identity, focus, active peer/coordinate, independent topology readiness and portal/EI lifecycle state. It contains no key material, events or commands. Status never controls the daemon. Snapshots older than five seconds or unreadable/malformed are marked unknown; snapshots without a held lock are ignored. This is advisory sampling, not an IPC/control API or an instantaneous health guarantee. Shutdown removes snapshot/pending files while retaining the lock inode.

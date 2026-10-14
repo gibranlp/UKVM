@@ -6,6 +6,8 @@ use ukvm_protocol::{EdgePosition, InputEvent};
 pub mod clipboard;
 #[cfg(target_os = "linux")]
 pub mod linux_wayland;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackendKind {

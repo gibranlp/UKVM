@@ -13,7 +13,10 @@ authority, accessing shared peer state through explicit composition. These
 internal modules are compiled for the current Linux runtime and for native
 portable-policy tests.
 The foreground entry point still requires Linux Wayland. Native Windows/macOS
-capture, injection, ownership and service adapters are not implemented yet.
+capture, injection and service adapters are not implemented yet. Windows now has
+private ACL state and a session-checked ownership adapter behind platform APIs;
+it awaits native acceptance and input-runtime integration. Portable snapshot
+types preserve the existing schema. See [Windows foundation](WINDOWS_FOUNDATION.md).
 See [implementation sequence and progress](CROSS_PLATFORM_PLAN.md).
 
 ## Scope and terminology

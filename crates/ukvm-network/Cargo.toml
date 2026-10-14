@@ -24,6 +24,9 @@ ukvm-protocol.workspace = true
 ukvm-core.workspace = true
 x509-parser = "0.18.1"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+ukvm-platform.workspace = true
+
 [dev-dependencies]
 ukvm-platform.workspace = true
 tempfile = "3"

@@ -50,6 +50,8 @@ M20 secure file transfer is implemented for Linux with automated protocol/storag
     focus/session leases, cooperative cancellation, pinned-peer readiness and
     source-owned adjacency extracted from the working runtime;
     native Linux/Windows/Apple Silicon compiler and portable-test CI
-    added. Native secure storage, session/capture adapters and key mapping
-    remain. No additional input backend is operational yet. See
+    added. Windows private ACL state, session probes and ownership are implemented
+    pending native acceptance; a Windows 11 test kit needs no Rust. Capture
+    adapters, key mapping and macOS native state remain. No additional input
+    backend is operational yet. See [Windows foundation](WINDOWS_FOUNDATION.md) and
     [cross-platform plan and progress](CROSS_PLATFORM_PLAN.md).

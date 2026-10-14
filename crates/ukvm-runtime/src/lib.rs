@@ -25,6 +25,10 @@ use lifecycle::{cancelled, pause, shutdown_signal};
 
 #[cfg(target_os = "linux")]
 pub mod ownership;
+#[cfg(target_os = "windows")]
+#[path = "ownership_windows.rs"]
+pub mod ownership;
+pub mod snapshot;
 #[cfg(target_os = "linux")]
 mod wayland;
 

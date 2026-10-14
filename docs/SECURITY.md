@@ -21,6 +21,15 @@ The parser bounds frames to 512 bytes before body read, validates version, ident
 
 ## OS permission boundary
 
+M22's Windows foundation creates state with protected current-user-only ACLs and
+checks existing owner/DACLs and objects through handles. Unsafe state, reparse
+points, extra hard links and unsupported paths fail closed; ACLs are not repaired
+automatically. Identity/trust/recovery reads are bounded, and Identity Debug
+redacts private bytes. Windows removal flushes invalidation before deletion so
+a retained revoked receipt cannot recreate trust. Native enforcement/durability
+acceptance is pending. Session/ownership checks do not implement input or grant
+peer permissions. See [Windows foundation](WINDOWS_FOUNDATION.md).
+
 Input capture and injection must use OS sanctioned interfaces and surface permission failures. On Wayland, portal approval belongs to the compositor and user; UKVM must not bypass it with XWayland, privileged `/dev/input` access, compositor patches, or fake global hooks. On macOS, respect Accessibility/Input Monitoring permissions. On Windows, respect session and integrity boundaries. Do not run the network-facing node with elevated privileges merely to make input work.
 
 ## Reporting issues

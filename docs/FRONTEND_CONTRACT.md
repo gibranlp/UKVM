@@ -1,5 +1,15 @@
 # Linux management CLI contract — schema version 1
 
+M22 adds a read-only Windows `doctor --json` subset under the same envelope.
+Its `os` is `windows`; `backend_state` stays `unsupported`. `session` is null
+on probe failure, otherwise it contains `id`, `active`, `elevated`,
+`interactive_desktop` and `ready_for_input`; `session_error` is nullable.
+The portal field is null, input implementation fields are false and physical
+input remains `not_tested`. Storage reports `windows_protected_dacl` with
+`validation:not_requested`. These observations create no state/identity/grants
+and establish no working input backend. Other Windows management/startup
+integration remains pending. See [Windows foundation](WINDOWS_FOUNDATION.md).
+
 M16 adds Linux configuration and management UX over the existing M15 runtime. A frontend invokes the installed `ukvm` executable as the logged-in user with an argument array, inherits that user's graphical/XDG environment, and parses JSON. It never edits config, certificates, trust, runtime snapshots or systemd files itself. UKVM has no SpectrumOS dependency. M18 adds local-only initialization and backend classification without changing trust, pairing or input protocols.
 
 ## Framing, compatibility and errors

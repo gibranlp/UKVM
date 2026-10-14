@@ -115,13 +115,7 @@ impl PendingPairing {
         self.validate()?;
         let path = record_path(dir, &self.transaction_id)?;
         let folder = path.parent().ok_or("pairing record has no parent")?;
-        fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(folder, fs::Permissions::from_mode(0o700))
-                .map_err(|e| e.to_string())?;
-        }
+        crate::storage::directory(folder).map_err(|e| e.to_string())?;
         if path.exists() {
             let old = Self::load(dir, &self.transaction_id)?;
             if old.local_id != self.local_id
@@ -145,7 +139,7 @@ impl PendingPairing {
     }
 
     pub fn load(dir: &Path, tx: &str) -> Result<Self, String> {
-        let source = fs::read_to_string(record_path(dir, tx)?)
+        let source = crate::storage::text(&record_path(dir, tx)?, 64 * 1024)
             .map_err(|e| format!("pairing recovery record: {e}"))?;
         let record: Self =
             toml::from_str(&source).map_err(|e| format!("invalid pairing recovery record: {e}"))?;
@@ -159,7 +153,8 @@ impl PendingPairing {
     pub fn remove(&self, dir: &Path) -> Result<(), String> {
         let _lock = edit_lock(dir)?;
         let path = record_path(dir, &self.transaction_id)?;
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
+        crate::storage::remove(&path).map_err(|e| e.to_string())?;
+        #[cfg(not(target_os = "windows"))]
         if let Some(parent) = path.parent() {
             fs::File::open(parent)
                 .and_then(|folder| folder.sync_all())
@@ -198,6 +193,12 @@ impl PendingPairing {
 
 pub fn list(dir: &Path) -> Result<Vec<PendingPairing>, String> {
     let folder = dir.join("pairing");
+    #[cfg(target_os = "windows")]
+    let _directory = match ukvm_platform::windows::state::StateDirectory::open(&folder, false) {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -210,7 +211,11 @@ pub fn list(dir: &Path) -> Result<Vec<PendingPairing>, String> {
         if path.extension().and_then(|v| v.to_str()) != Some("toml") {
             continue;
         }
-        let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let source = crate::storage::text(&path, 64 * 1024).map_err(|e| e.to_string())?;
+        #[cfg(target_os = "windows")]
+        if source == ukvm_platform::windows::state::REVOKED_RECORD {
+            continue;
+        }
         let record: PendingPairing =
             toml::from_str(&source).map_err(|e| format!("invalid pairing recovery record: {e}"))?;
         if Some(format!("{}.toml", record.transaction_id).as_str())
@@ -229,11 +234,12 @@ pub fn cleanup_expired(dir: &Path) -> Result<usize, String> {
     let mut count = 0;
     for record in list(dir)? {
         if record.validate().is_err() {
-            fs::remove_file(record_path(dir, &record.transaction_id)?)
+            crate::storage::remove(&record_path(dir, &record.transaction_id)?)
                 .map_err(|e| e.to_string())?;
             count += 1;
         }
     }
+    #[cfg(not(target_os = "windows"))]
     if count > 0 {
         fs::File::open(dir.join("pairing"))
             .and_then(|folder| folder.sync_all())
@@ -245,14 +251,19 @@ pub fn cleanup_expired(dir: &Path) -> Result<usize, String> {
 /// Called by explicit peer removal while the caller owns the trust edit lock.
 /// A removed peer must never be resurrected by an old recovery receipt.
 pub(crate) fn revoke_for_peer(dir: &Path, peer_id: &str) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
     let mut removed = false;
     for record in list(dir)? {
         if record.remote_id == peer_id {
-            fs::remove_file(record_path(dir, &record.transaction_id)?)
+            crate::storage::remove(&record_path(dir, &record.transaction_id)?)
                 .map_err(|e| e.to_string())?;
-            removed = true;
+            #[cfg(not(target_os = "windows"))]
+            {
+                removed = true;
+            }
         }
     }
+    #[cfg(not(target_os = "windows"))]
     if removed {
         fs::File::open(dir.join("pairing"))
             .and_then(|folder| folder.sync_all())
@@ -264,6 +275,24 @@ pub(crate) fn revoke_for_peer(dir: &Path, peer_id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn a_flushed_revocation_marker_never_recreates_trust_or_recovery() {
+        let (temp, record, _) = fixture();
+        let dir = temp.path().join("trust");
+        record.save(&dir).unwrap();
+        let path = record_path(&dir, &record.transaction_id).unwrap();
+        atomic_write(
+            &path,
+            ukvm_platform::windows::state::REVOKED_RECORD.as_bytes(),
+        )
+        .unwrap();
+        assert!(PendingPairing::load(&dir, &record.transaction_id).is_err());
+        assert!(record.save(&dir).is_err());
+        assert!(list(&dir).unwrap().is_empty());
+        assert!(TrustStore::load(&dir).unwrap().peers.is_empty());
+    }
     use crate::{identity::Identity, trust::SessionPermission};
 
     fn fixture() -> (tempfile::TempDir, PendingPairing, Identity) {

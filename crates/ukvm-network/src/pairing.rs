@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn identity_message_contains_public_certificate_only() {
         let temp = tempfile::tempdir().unwrap();
-        let identity = Identity::load_or_create(temp.path()).unwrap();
+        let identity = Identity::load_or_create(&temp.path().join("identity")).unwrap();
         let cert = identity.tls_cert().as_ref().to_vec();
         let key = identity.tls_key();
         let encoded = codec()
@@ -1114,6 +1114,7 @@ mod tests {
         let b = Identity::load_or_create(&temp.path().join("b-identity")).unwrap();
         let a_dir = temp.path().join("a-trust");
         let b_dir = temp.path().join("b-trust");
+        crate::storage::directory(&b_dir.join("peers")).unwrap();
         fs::create_dir_all(b_dir.join("peers").join(format!("{}.der", a.id))).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

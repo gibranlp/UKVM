@@ -26,6 +26,25 @@ fn unsupported_native_input_commands_fail_before_creating_identity_or_state() {
     }
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn windows_doctor_is_read_only_and_does_not_claim_an_input_backend() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ukvm"))
+        .args(["doctor", "--json"])
+        .env("APPDATA", temp.path().join("roaming"))
+        .env("LOCALAPPDATA", temp.path().join("local"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["data"]["os"], "windows");
+    assert_eq!(response["data"]["backend_state"], "unsupported");
+    assert_eq!(response["data"]["consent_requested"], false);
+    assert_eq!(response["data"]["physical_input"], "not_tested");
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
 #[test]
 fn discovery_help_is_not_pairing_help() {
     let output = Command::new(env!("CARGO_BIN_EXE_ukvm"))

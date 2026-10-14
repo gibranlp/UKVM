@@ -8,15 +8,7 @@ use ukvm_network::{clipboard as wire, trust::SessionPermission};
 use ukvm_platform::clipboard::{ClipboardBackend, ClipboardEvent, ClipboardWrite};
 use ukvm_protocol::clipboard::ClipboardMessage;
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-pub struct ClipboardStatus {
-    pub supported: Option<bool>,
-    pub enabled: bool,
-    pub connected_peers: usize,
-    pub last_sync: Option<u64>,
-    pub state: String,
-    pub error: Option<String>,
-}
+pub use crate::snapshot::ClipboardStatus;
 use ukvm_core::clipboard::ClipboardState as Engine;
 
 pub(super) struct Clipboard {

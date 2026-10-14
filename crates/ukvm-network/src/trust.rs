@@ -1,9 +1,10 @@
 //! User-owned peer trust records, separate from preferences and the node private key.
 use crate::identity::certificate_id;
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "windows"))]
+use std::io::Write;
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -25,8 +26,9 @@ pub fn default_trust_dir() -> Result<PathBuf, String> {
 }
 
 /// Serialize read-modify-write trust operations across local processes.
+#[cfg(not(target_os = "windows"))]
 pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
-    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    crate::storage::directory(dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -46,6 +48,17 @@ pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
     Ok(file)
 }
 
+#[cfg(target_os = "windows")]
+pub fn edit_lock(dir: &Path) -> Result<fs::File, String> {
+    let directory = ukvm_platform::windows::state::StateDirectory::open(dir, true)
+        .map_err(|e| e.to_string())?;
+    let file = directory
+        .lock_file(std::ffi::OsStr::new(".edit.lock"), true)
+        .map_err(|e| e.to_string())?;
+    fs2::FileExt::lock_exclusive(&file).map_err(|e| format!("cannot lock UKVM edits: {e}"))?;
+    Ok(file)
+}
+
 pub fn clipboard_guard(dir: &Path, id: &str) -> Result<fs::File, String> {
     permission_guard(dir, id, SessionPermission::ShareClipboard)
 }
@@ -55,16 +68,23 @@ pub fn permission_guard(
     id: &str,
     permission: SessionPermission,
 ) -> Result<fs::File, String> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let guard = options
-        .open(dir.join(".edit.lock"))
+    #[cfg(target_os = "windows")]
+    let guard = ukvm_platform::windows::state::StateDirectory::open(dir, false)
+        .and_then(|dir| dir.lock_file(std::ffi::OsStr::new(".edit.lock"), true))
         .map_err(|_| "clipboard policy unavailable".to_string())?;
+    #[cfg(not(target_os = "windows"))]
+    let guard = {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        options
+            .open(dir.join(".edit.lock"))
+            .map_err(|_| "clipboard policy unavailable".to_string())?
+    };
     fs2::FileExt::try_lock_shared(&guard)
         .map_err(|_| "clipboard policy edit in progress".to_string())?;
     TrustStore::load(dir)?.authorize(id, permission)?;
@@ -118,7 +138,7 @@ pub enum SessionPermission {
 impl TrustStore {
     pub fn load(dir: &Path) -> Result<Self, String> {
         let path = dir.join("peers.toml");
-        let source = match fs::read_to_string(path) {
+        let source = match crate::storage::text(&path, 1024 * 1024) {
             Ok(s) => s,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e.to_string()),
@@ -147,7 +167,7 @@ impl TrustStore {
             if let Some(address) = &peer.address {
                 resolve_address(address)?;
             }
-            let cert = fs::read(cert_path(dir, &peer.id))
+            let cert = crate::storage::read(&cert_path(dir, &peer.id), 4096)
                 .map_err(|e| format!("certificate for {}: {e}", peer.alias))?;
             if cert.is_empty() || cert.len() > 4096 || certificate_id(&cert) != peer.id {
                 return Err(format!(
@@ -219,13 +239,13 @@ impl TrustStore {
         if self.find(&peer.id).is_some() || self.find(&peer.alias).is_some() {
             return Err("peer ID or alias already exists".into());
         }
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        crate::storage::directory(dir).map_err(|e| e.to_string())?;
         private_dir(dir)?;
         atomic_write(&cert_path(dir, &peer.id), cert)?;
         self.peers.push(peer.clone());
         if let Err(e) = self.save(dir) {
             self.peers.pop();
-            let _ = fs::remove_file(cert_path(dir, &peer.id));
+            let _ = crate::storage::remove(&cert_path(dir, &peer.id));
             return Err(e);
         }
         Ok(peer)
@@ -245,7 +265,7 @@ impl TrustStore {
             self.peers.insert(index, peer);
             return Err(e);
         }
-        fs::remove_file(cert_path(dir, &peer.id)).map_err(|e| e.to_string())?;
+        crate::storage::remove(&cert_path(dir, &peer.id)).map_err(|e| e.to_string())?;
         Ok(peer)
     }
     pub fn set_permission(
@@ -296,7 +316,7 @@ impl TrustStore {
         Ok(())
     }
     pub fn save(&self, dir: &Path) -> Result<(), String> {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        crate::storage::directory(dir).map_err(|e| e.to_string())?;
         private_dir(dir)?;
         self.validate(dir)?;
         let mut value = toml::Value::try_from(self).map_err(|e| e.to_string())?;
@@ -364,16 +384,14 @@ fn validate_certificate(cert: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("invalid X.509 certificate: {e}"))
 }
 fn private_dir(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir.join("peers")).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
-        fs::set_permissions(dir.join("peers"), fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    crate::storage::directory(dir).map_err(|e| e.to_string())?;
+    crate::storage::directory(&dir.join("peers")).map_err(|e| e.to_string())
 }
+#[cfg(target_os = "windows")]
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    ukvm_platform::windows::state::replace(path, bytes).map_err(|e| e.to_string())
+}
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path.parent().ok_or("path has no parent")?;
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;

@@ -37,7 +37,7 @@ jobs:
           - runner: windows-2022
             target: x86_64-pc-windows-msvc
             build_options: ''
-            test_packages: '-p ukvm-core -p ukvm-protocol -p ukvm-config -p ukvm-platform -p ukvm-runtime'
+            test_packages: '--workspace'
           - runner: macos-14
             target: aarch64-apple-darwin
             build_options: ''
@@ -64,9 +64,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Check native workspace
         run: cargo check --locked --workspace --all-targets --target ${{ matrix.target }} ${{ matrix.build_options }}
-      # Native input/storage are not implemented yet. Compile every test, but
-      # execute portable policy/session tests until native state durability and
-      # private storage have their own implementation and acceptance.
+      # Windows now exercises private native state, pairing and ownership as
+      # well as portable policy. macOS native state/management remain pending.
       - name: Compile every workspace test
         run: cargo test --locked --workspace --no-run --target ${{ matrix.target }} ${{ matrix.build_options }}
       - name: Run applicable tests

@@ -4,6 +4,7 @@ pub mod clipboard;
 pub mod identity;
 pub mod pairing;
 pub mod pairing_state;
+mod storage;
 pub mod transport;
 pub mod trust;
 
