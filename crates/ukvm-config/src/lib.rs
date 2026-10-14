@@ -268,23 +268,15 @@ pub fn default_path() -> Result<PathBuf, ConfigError> {
     }
 }
 pub fn default_name() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|n| valid_name(n))
-        .or_else(|| {
-            #[cfg(target_os = "linux")]
-            {
-                std::fs::read_to_string("/etc/hostname")
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|n| valid_name(n))
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                None
-            }
-        })
-        .unwrap_or_else(|| "ukvm-node".into())
+    let name = std::env::var("HOSTNAME").ok().filter(|n| valid_name(n));
+    #[cfg(target_os = "linux")]
+    let name = name.or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|n| valid_name(n))
+    });
+    name.unwrap_or_else(|| "ukvm-node".into())
 }
 fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.chars().count() <= 63 && !name.chars().any(char::is_control)

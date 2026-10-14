@@ -5,7 +5,9 @@ use std::{
     time::Duration,
 };
 #[cfg(any(target_os = "linux", test))]
-use ukvm_core::controlled::{InputSink, SinkAction, SinkFuture, SinkKind};
+use ukvm_core::controlled::{InputSink, SinkAction};
+#[cfg(target_os = "linux")]
+use ukvm_core::controlled::{SinkFuture, SinkKind};
 #[cfg(any(target_os = "linux", test))]
 use ukvm_protocol::{EdgePosition, InputEvent};
 

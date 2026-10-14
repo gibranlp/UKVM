@@ -24,6 +24,7 @@ pub fn dispatch(args: &[String]) -> Option<ExitCode> {
         );
         return Some(ExitCode::SUCCESS);
     }
+    #[cfg(target_os = "linux")]
     let plain = args[1..]
         .iter()
         .filter(|a| a.as_str() != "--json")

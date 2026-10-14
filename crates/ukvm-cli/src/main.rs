@@ -95,7 +95,12 @@ fn main() -> ExitCode {
         [command, rest @ ..] if command == "pair" => pairing::pair(rest),
         [command, rest @ ..] if command == "discover" => discovery::discover(rest),
         [command, rest @ ..] if command == "setup" => setup::setup(rest),
+        #[cfg(target_os = "linux")]
         [command, edge, rest @ ..] if command == "control" => network::control(edge, rest),
+        #[cfg(not(target_os = "linux"))]
+        [command, ..] if command == "control" => {
+            fail("edge input capture currently requires Linux Wayland")
+        }
         [command] if command == "status" => daily::status(),
         [command, rest @ ..] if command == "peers" => daily::peers(rest),
         #[cfg(target_os = "linux")]

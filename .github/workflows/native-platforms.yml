@@ -71,6 +71,9 @@ jobs:
         run: cargo test --locked --workspace --no-run --target ${{ matrix.target }} ${{ matrix.build_options }}
       - name: Run applicable tests
         run: cargo test --locked ${{ matrix.test_packages }} --target ${{ matrix.target }} ${{ matrix.build_options }}
+      - name: Check unsupported native CLI boundaries
+        if: runner.os != 'Linux'
+        run: cargo test --locked -p ukvm --test cli_help --target ${{ matrix.target }}
       - name: Lint native targets
         run: cargo clippy --locked --workspace --all-targets --target ${{ matrix.target }} ${{ matrix.build_options }} -- -D warnings
       - name: Build native workspace

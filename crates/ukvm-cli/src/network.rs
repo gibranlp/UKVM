@@ -1,7 +1,8 @@
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::{
     path::PathBuf,
     process::ExitCode,
-    sync::atomic::{AtomicU64, AtomicU8, Ordering},
     time::{Duration, Instant},
 };
 use ukvm_network::{
@@ -87,7 +88,13 @@ pub fn identity(args: &[String]) -> ExitCode {
 
 pub fn listen(args: &[String]) -> ExitCode {
     if let Some(rest) = args.strip_prefix(&["--remote".to_string()]) {
+        #[cfg(target_os = "linux")]
         return listen_remote(rest);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = rest;
+            return super::fail("remote input receiving currently requires Linux Wayland");
+        }
     }
     let result = options(args).and_then(|options| {
         let mut options = options;

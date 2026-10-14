@@ -29,8 +29,16 @@ Wayland test dependencies are now Linux-scoped.
 
 Local validation passed all five required Linux workspace checks. Cross-target
 `cargo check --all-targets` passed for core, protocol, config and platform on
-Windows GNU and Apple Silicon macOS. These are Linux-hosted compiler checks;
-native MSVC/Apple CI and physical testing provide separate evidence.
+Windows GNU and Apple Silicon macOS, with Clippy warnings denied on both.
+The entire Windows GNU workspace also passed Clippy and compiled/linked every
+workspace test executable. This exposed and fixed Linux-only CLI calls and
+imports; unsupported native `control`, `listen --remote` and `run` fail before
+creating identity/state, with a native-only CLI regression scheduled in CI.
+Full Apple workspace cross-checking is blocked by the lack of an Apple SDK for
+the existing TLS dependency's C compilation. These are Linux-hosted compiler
+checks; native MSVC/Apple CI and physical testing provide separate evidence.
+Hosted CI results have not been inspected: this workspace's GitHub CLI has no
+API authentication, and the public repository API returns 404.
 
 Remaining M22 work includes reusable readiness/routing orchestration, backend
 session contracts, physical-key mapping, native ownership/private storage,

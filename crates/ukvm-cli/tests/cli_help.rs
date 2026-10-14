@@ -1,5 +1,31 @@
 use std::process::Command;
 
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn unsupported_native_input_commands_fail_before_creating_identity_or_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    for args in [
+        vec!["control", "right"],
+        vec!["listen", "--remote"],
+        vec!["run"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_ukvm"))
+            .args(args)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("APPDATA", temp.path().join("roaming"))
+            .env("LOCALAPPDATA", temp.path().join("local"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("requires"));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn discovery_help_is_not_pairing_help() {
     let output = Command::new(env!("CARGO_BIN_EXE_ukvm"))

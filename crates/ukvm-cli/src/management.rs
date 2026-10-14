@@ -581,7 +581,10 @@ fn service_command(args: &[String]) -> Result<Value, String> {
         Ok(json!({"action": args[0], "service": service()}))
     }
     #[cfg(not(target_os = "linux"))]
-    Err("service management currently requires Linux".into())
+    {
+        let _ = args;
+        Err("service management currently requires Linux".into())
+    }
 }
 
 fn print_human(command: &str, data: &Value) {
