@@ -2,6 +2,13 @@
 
 This sequence is directional, not a release commitment.
 
+The next proposed platform sequence is shared runtime foundations, Windows,
+macOS on Apple Silicon, feature parity, then Linux X11 and universal acceptance.
+Windows and Apple Silicon testing hardware are available; native X11 physical
+testing hardware is not yet available. See [native platform implementation plan](CROSS_PLATFORM_PLAN.md)
+for M22–M27 scope, dependencies and acceptance gates. These backends remain
+unimplemented; this plan does not change existing acceptance evidence.
+
 1. **Foundation (complete):** buildable Rust workspace, CLI skeleton, config schema, input traits, protocol concepts, security and platform plans.
 2. **Wayland capture foundation (proven on Hyprland):** permissioned zones, outer-edge barriers, activation, EI pointer/keyboard events and Release. Zone-change recovery, generic trait integration and compositor coverage remain.
 3. **Wayland injection investigation (complete on current machine):** active portal lacks RemoteDesktop, so no legitimate controlled-node injection was proven. A suitable compositor/backend is needed for that vertical slice.
@@ -38,3 +45,10 @@ M20 secure file transfer is implemented for Linux with automated protocol/storag
     emergency release preserves viewing. Input 1.4; pairing/clipboard/files unchanged.
     No audio, recording, multiple viewing monitors, headless output, Windows or macOS.
     See [architecture, limits and two-PC acceptance](REMOTE_SESSIONS.md).
+
+22. **Shared native-platform foundation (in progress):** backend-independent
+    focus/session leases and cooperative cancellation extracted from the working
+    runtime; native Linux/Windows/Apple Silicon compiler and portable-test CI
+    added. Readiness/routing extraction, native secure storage and session
+    adapters remain. No additional input backend is operational yet. See
+    [cross-platform plan and progress](CROSS_PLATFORM_PLAN.md).

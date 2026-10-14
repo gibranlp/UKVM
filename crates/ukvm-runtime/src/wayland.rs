@@ -75,16 +75,6 @@ impl Context {
         }
     }
 }
-async fn cancelled(stop: &mut watch::Receiver<bool>) {
-    if *stop.borrow() {
-        return;
-    }
-    let _ = stop.changed().await;
-}
-async fn pause(delay: Duration, stop: &mut watch::Receiver<bool>) {
-    tokio::select! { _ = tokio::time::sleep(delay) => {}, _ = cancelled(stop) => {} }
-}
-
 pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Result<(), String> {
     let path = ukvm_config::default_path().map_err(|e| e.to_string())?;
     let config = ukvm_config::load_or_default(&path).map_err(|e| e.to_string())?;
@@ -169,11 +159,6 @@ pub(super) async fn run(verbose: bool, owner: &ownership::RuntimeOwner) -> Resul
     context.log("all sessions closed; local input restored");
     println!("UKVM stopped.");
     signal_result
-}
-
-async fn shutdown_signal() -> Result<(), std::io::Error> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! { result = tokio::signal::ctrl_c() => result, _ = terminate.recv() => Ok(()) }
 }
 
 async fn publish_status(

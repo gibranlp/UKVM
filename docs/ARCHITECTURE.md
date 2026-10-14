@@ -1,5 +1,16 @@
 # Architecture
 
+## Cross-platform runtime foundation (M22, in progress)
+
+`ukvm-runtime::session` owns the backend-independent exclusive focus gate and
+prepared injector leases used by the working Wayland runtime.
+`ukvm-runtime::lifecycle` owns cooperative cancellation and retry pauses;
+platform signal registration remains explicitly scoped. These internal modules
+are compiled for the current Linux runtime and for native portable-policy tests.
+The foreground entry point still requires Linux Wayland. Native Windows/macOS
+capture, injection, ownership and service adapters are not implemented yet.
+See [implementation sequence and progress](CROSS_PLATFORM_PLAN.md).
+
 ## Scope and terminology
 
 A **node** is one installed `ukvm` process with both controller and controlled capabilities available subject to its configuration and platform permissions. A **controller** captures local input after a boundary transition; a **controlled** node injects authenticated input into its own session. A node may do both. A **peer** is another node. **Discovery** locates candidate peers and never grants trust. **Pairing** establishes trust with explicit user authorization. **Focus** is the node currently receiving the user's input. A **session** is one authorized control relationship, not a remote desktop stream.
