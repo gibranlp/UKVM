@@ -1,5 +1,12 @@
 # Multi-node runtime and 2D topology — Milestone 14
 
+M22 now shares pinned connection preparation, independent peer readiness,
+availability/pools and source-owned adjacency checks through
+`ukvm-runtime::peers`. Wayland capture-driven handoff and emergency geometry
+still use the existing portal adapter. This extraction preserves topology,
+receiver authorization and protocol versions; it adds no native OS backend or
+new physical acceptance. See [cross-platform progress](CROSS_PLATFORM_PLAN.md).
+
 M13 is physically validated on spectrum/io, including emergency release and recovery. M14 adds multiple independently available peers and coordinate-based focus traversal. M14 automated tests use real localhost pinned mTLS with simulated injection; multi-node portal/EI operation has not yet been physically tested.
 
 ## Configuration

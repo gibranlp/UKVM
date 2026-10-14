@@ -1,33 +1,12 @@
 use super::*;
-use std::sync::atomic::AtomicUsize;
 use ukvm_network::trust::SessionPermission;
 
-struct Sink(Arc<AtomicUsize>);
-impl InputSink for Sink {
-    fn kind(&self) -> SinkKind {
-        SinkKind::RemoteInput
-    }
-    fn begin_session(&mut self) -> Result<(), String> {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        Ok(())
-    }
-    fn enter_remote(&mut self, _: EdgePosition) -> Result<(), String> {
-        Ok(())
-    }
-    fn handle_event(&mut self, _: &InputEvent) -> Result<SinkAction, String> {
-        Ok(SinkAction::Continue)
-    }
-    fn end_session(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
 pub(super) struct Fixture {
     _temp: tempfile::TempDir,
     pub(super) context: Context,
     pub(super) peer: Identity,
     peer_store: TrustStore,
     peer_trust: PathBuf,
-    begins: Arc<AtomicUsize>,
 }
 impl Fixture {
     pub(super) fn new(allowed: bool) -> Self {
@@ -64,31 +43,28 @@ impl Fixture {
             .unwrap();
         let context = Context {
             clipboard: clipboard::Clipboard::new(&local.id).unwrap(),
-            config: Config {
-                file_transfer: Default::default(),
-                node: ukvm_config::Node {
-                    name: "local".into(),
-                    role: ukvm_config::ConfigRole::Both,
+            peers: PeerRuntime::new(
+                Config {
+                    file_transfer: Default::default(),
+                    node: ukvm_config::Node {
+                        name: "local".into(),
+                        role: ukvm_config::ConfigRole::Both,
+                    },
+                    network: Default::default(),
+                    layout: ukvm_config::Layout {
+                        nodes: Vec::new(),
+                        links: vec![Link {
+                            edge: ukvm_config::Edge::Right,
+                            peer_id: peer.id.clone(),
+                            entry_edge: ukvm_config::Edge::Left,
+                        }],
+                    },
                 },
-                network: Default::default(),
-                layout: ukvm_config::Layout {
-                    nodes: Vec::new(),
-                    links: vec![Link {
-                        edge: ukvm_config::Edge::Right,
-                        peer_id: peer.id.clone(),
-                        entry_edge: ukvm_config::Edge::Left,
-                    }],
-                },
-            },
-            identity: local,
-            trust_dir: trust,
+                local,
+                trust,
+                false,
+            ),
             gate: FocusGate::default(),
-            stop: AtomicBool::new(false),
-            verbose: false,
-            hints: Mutex::new(Vec::new()),
-            availability: Mutex::new(HashMap::new()),
-            pool: Mutex::new(HashMap::new()),
-            active: Mutex::new(None),
             rearm: Mutex::new(EmergencyRearmGuard::Ready),
             incoming_peer: Mutex::new(None),
             capture_status: Mutex::new("not requested".into()),
@@ -100,11 +76,10 @@ impl Fixture {
             peer,
             peer_store,
             peer_trust,
-            begins: Arc::new(AtomicUsize::new(0)),
         }
     }
     fn hint(&self, address: std::net::SocketAddr) {
-        *self.context.hints.lock().unwrap() = vec![DiscoveryResult {
+        *self.context.peers.hints.lock().unwrap() = vec![DiscoveryResult {
             service_instance: "test._ukvm._tcp.local.".into(),
             display_name: "spoofable label".into(),
             advertised_node_id: Some(self.peer.id.clone()),
@@ -115,86 +90,13 @@ impl Fixture {
             addresses: vec![address],
         }];
     }
-    async fn serve(&self, identity: Identity) -> tokio::task::JoinHandle<Result<(), String>> {
-        let listener = transport::bind("127.0.0.1:0").await.unwrap();
-        self.hint(listener.local_addr().unwrap());
-        let store = self.peer_store.clone();
-        let trust = self.peer_trust.clone();
-        let begins = self.begins.clone();
-        tokio::spawn(async move {
-            let (tcp, _) = listener.accept().await.map_err(|e| e.to_string())?;
-            let mut sink = Sink(begins);
-            let connection =
-                transport::accept_remote_trusted(tcp, &identity, &store, &trust, "peer", &sink)
-                    .await?;
-            transport::receive_session(connection, &mut sink, |_| {})
-                .await
-                .map(|_| ())
-        })
-    }
     async fn prepare(&self) -> Result<transport::Sender, String> {
-        prepare(&self.context, &self.context.config.layout.links[0]).await
-    }
-}
-
-#[tokio::test]
-async fn offline_and_permission_denial_never_arm_capture() {
-    let fixture = Fixture::new(false);
-    assert!(fixture.prepare().await.is_err());
-    assert_eq!(fixture.context.gate.state(), Focus::Local);
-    let receiver = fixture.serve(fixture.peer.clone()).await;
-    assert!(fixture.prepare().await.is_err());
-    assert!(receiver.await.unwrap().unwrap_err().contains("permission"));
-    assert_eq!(fixture.begins.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.context.gate.state(), Focus::Local);
-}
-
-#[tokio::test]
-async fn spoofed_discovery_identity_cannot_replace_pinned_peer() {
-    let fixture = Fixture::new(true);
-    let impostor = Identity::load_or_create(&fixture._temp.path().join("impostor")).unwrap();
-    let receiver = fixture.serve(impostor).await;
-    assert!(fixture.prepare().await.is_err());
-    assert!(receiver.await.unwrap().is_err());
-    assert_eq!(fixture.begins.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.context.gate.state(), Focus::Local);
-    assert_eq!(
-        TrustStore::load(&fixture.context.trust_dir).unwrap().peers[0].id,
-        fixture.peer.id
-    );
-}
-
-#[tokio::test]
-async fn peer_restart_at_new_discovered_address_recovers_without_trust_edit() {
-    let fixture = Fixture::new(true);
-    for _ in 0..3 {
-        let receiver = fixture.serve(fixture.peer.clone()).await;
-        let sender = fixture.prepare().await.unwrap();
-        assert!(*sender.alive.borrow());
-        sender.finish().await.unwrap();
-        receiver.await.unwrap().unwrap();
-        assert_eq!(fixture.context.gate.state(), Focus::Local);
-        // Previous ephemeral endpoint is now closed. A later advertised hint
-        // connects to the same certificate on a new listener/port.
-        assert!(fixture.prepare().await.is_err());
-    }
-    assert_eq!(fixture.begins.load(Ordering::SeqCst), 3);
-    let store = TrustStore::load(&fixture.context.trust_dir).unwrap();
-    assert_eq!(store.peers[0].address.as_deref(), Some("127.0.0.1:1"));
-    assert!(!store.peers[0].permissions.control_this_node);
-}
-
-#[tokio::test]
-async fn dropping_sender_cancels_both_tasks_and_closes_receiver_connection() {
-    let fixture = Fixture::new(true);
-    let receiver = fixture.serve(fixture.peer.clone()).await;
-    let sender = fixture.prepare().await.unwrap();
-    drop(sender);
-    let result = tokio::time::timeout(Duration::from_secs(2), receiver)
+        prepare(
+            &self.context.peers,
+            &self.context.peers.config.layout.links[0],
+        )
         .await
-        .unwrap()
-        .unwrap();
-    assert!(result.is_err());
+    }
 }
 
 #[tokio::test]
@@ -300,36 +202,6 @@ async fn cancellation_interrupts_reconnect_wait_without_waiting_for_backoff() {
     })
     .await
     .unwrap();
-}
-
-#[test]
-fn bounded_discovery_candidates_preserve_configured_fallback_and_ignore_names() {
-    let fixture = Fixture::new(true);
-    let mut hints = fixture.context.hints.lock().unwrap();
-    for index in 2..40 {
-        hints.push(DiscoveryResult {
-            service_instance: format!("spoof-{index}"),
-            display_name: "peer".into(),
-            advertised_node_id: Some(fixture.peer.id.clone()),
-            pairing_version: 2,
-            pairing_available: false,
-            input_version: Some((1, 2)),
-            control_port: Some(24800),
-            addresses: vec![format!("192.0.2.{index}:24800").parse().unwrap()],
-        });
-    }
-    drop(hints);
-    let store = TrustStore::load(&fixture.context.trust_dir).unwrap();
-    let candidates = addresses(&fixture.context, &store.peers[0]);
-    assert_eq!(candidates.len(), 16);
-    assert_eq!(candidates.last().unwrap(), "127.0.0.1:1");
-    for hint in fixture.context.hints.lock().unwrap().iter_mut() {
-        hint.advertised_node_id = Some("f".repeat(64));
-    }
-    assert_eq!(
-        addresses(&fixture.context, &store.peers[0]),
-        ["127.0.0.1:1"]
-    );
 }
 
 #[tokio::test]

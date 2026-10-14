@@ -4,10 +4,10 @@ async fn bidirectional_session_revocation_blocks_queued_write() {
     let fixture = super::super::tests::Fixture::new(false);
     let context = &fixture.context;
     let id = fixture.peer.id.clone();
-    let mut store = TrustStore::load(&context.trust_dir).unwrap();
+    let mut store = TrustStore::load(&context.peers.trust_dir).unwrap();
     store
         .set_permission(
-            &context.trust_dir,
+            &context.peers.trust_dir,
             &id,
             SessionPermission::ShareClipboard,
             true,
@@ -68,10 +68,10 @@ async fn bidirectional_session_revocation_blocks_queued_write() {
         }
         let queued = writes.borrow().clone().unwrap();
         {
-            let _edit = ukvm_network::trust::edit_lock(&context.trust_dir).unwrap();
+            let _edit = ukvm_network::trust::edit_lock(&context.peers.trust_dir).unwrap();
             store
                 .set_permission(
-                    &context.trust_dir,
+                    &context.peers.trust_dir,
                     &id,
                     SessionPermission::ShareClipboard,
                     false,
@@ -130,10 +130,10 @@ async fn reconnect_deduplicates_old_generation_and_accepts_new_text() {
     let fixture = super::super::tests::Fixture::new(false);
     let context = &fixture.context;
     let id = fixture.peer.id.clone();
-    let mut store = TrustStore::load(&context.trust_dir).unwrap();
+    let mut store = TrustStore::load(&context.peers.trust_dir).unwrap();
     store
         .set_permission(
-            &context.trust_dir,
+            &context.peers.trust_dir,
             &id,
             SessionPermission::ShareClipboard,
             true,
@@ -207,10 +207,10 @@ async fn local_copy_fans_out_only_to_connected_permitted_peers() {
     let temp = tempfile::tempdir().unwrap();
     let third = Identity::load_or_create(&temp.path().join("third")).unwrap();
     let context = &fixture.context;
-    let mut store = TrustStore::load(&context.trust_dir).unwrap();
+    let mut store = TrustStore::load(&context.peers.trust_dir).unwrap();
     store
         .import(
-            &context.trust_dir,
+            &context.peers.trust_dir,
             "third".into(),
             None,
             &std::fs::read(&third.cert_path).unwrap(),
@@ -219,7 +219,7 @@ async fn local_copy_fans_out_only_to_connected_permitted_peers() {
     for id in [&fixture.peer.id, &third.id] {
         store
             .set_permission(
-                &context.trust_dir,
+                &context.peers.trust_dir,
                 id,
                 SessionPermission::ShareClipboard,
                 true,

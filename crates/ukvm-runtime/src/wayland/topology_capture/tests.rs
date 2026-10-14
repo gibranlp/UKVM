@@ -148,16 +148,8 @@ impl Fixture {
         }
         let context = Context {
             clipboard: clipboard::Clipboard::new(&identity.id).unwrap(),
-            config,
-            identity,
-            trust_dir: trust,
+            peers: PeerRuntime::new(config, identity, trust, false),
             gate: FocusGate::default(),
-            stop: AtomicBool::new(false),
-            verbose: false,
-            hints: Mutex::new(Vec::new()),
-            availability: Mutex::new(HashMap::new()),
-            pool: Mutex::new(HashMap::new()),
-            active: Mutex::new(None),
             rearm: Mutex::new(EmergencyRearmGuard::Ready),
             incoming_peer: Mutex::new(None),
             capture_status: Mutex::new("not requested".into()),
@@ -172,22 +164,28 @@ impl Fixture {
     async fn prepare(&self, coordinate: Coordinate) {
         let node = self
             .context
+            .peers
             .config
             .layout
             .topology()
             .into_iter()
             .find(|node| node.coordinate() == coordinate)
             .unwrap();
-        let sender = prepare_for(&self.context, &link_for(&node), true)
+        let sender = prepare_for(&self.context.peers, &link_for(&node), true)
             .await
             .unwrap();
-        self.context.pool.lock().unwrap().insert(coordinate, sender);
+        self.context
+            .peers
+            .pool
+            .lock()
+            .unwrap()
+            .insert(coordinate, sender);
     }
     async fn finish(self, mut path: Path) {
         if let Some(active) = path.active.take() {
             let _ = active.sender.finish().await;
         }
-        let senders = std::mem::take(&mut *self.context.pool.lock().unwrap());
+        let senders = std::mem::take(&mut *self.context.peers.pool.lock().unwrap());
         for sender in senders.into_values() {
             let _ = sender.finish().await;
         }
@@ -361,7 +359,7 @@ async fn emergency_from_second_node_cleans_held_state_and_only_suppresses_launch
     let active = path.active.take().unwrap();
     active.sender.finish().await.unwrap();
     fixture.context.gate.outbound_closed();
-    *fixture.context.active.lock().unwrap() = None;
+    *fixture.context.peers.active.lock().unwrap() = None;
     assert_eq!(
         allowed_edges(&fixture.context),
         vec![linux_wayland::Edge::Top]
@@ -431,10 +429,10 @@ async fn active_disconnect_restores_source_and_preserves_other_ready_paths() {
 async fn independent_workers_keep_other_paths_ready_and_prepare_return_standby() {
     let mut fixture = Fixture::new().await;
     let offline = Identity::load_or_create(&fixture._temp.path().join("offline")).unwrap();
-    let mut store = TrustStore::load(&fixture.context.trust_dir).unwrap();
+    let mut store = TrustStore::load(&fixture.context.peers.trust_dir).unwrap();
     store
         .import(
-            &fixture.context.trust_dir,
+            &fixture.context.peers.trust_dir,
             "offline".into(),
             Some("127.0.0.1:1".into()),
             &std::fs::read(&offline.cert_path).unwrap(),
@@ -442,6 +440,7 @@ async fn independent_workers_keep_other_paths_ready_and_prepare_return_standby()
         .unwrap();
     fixture
         .context
+        .peers
         .config
         .set_position(-1, 0, offline.id)
         .unwrap();
@@ -449,7 +448,10 @@ async fn independent_workers_keep_other_paths_ready_and_prepare_return_standby()
     let context = &fixture.context;
     let run = async {
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !ready(context, RIGHT) || !ready(context, FAR) || !ready(context, TOP) {
+            while !ready(&context.peers, RIGHT)
+                || !ready(&context.peers, FAR)
+                || !ready(&context.peers, TOP)
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -464,7 +466,7 @@ async fn independent_workers_keep_other_paths_ready_and_prepare_return_standby()
         };
         path.enter(context, RIGHT, entry()).unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !ready(context, RIGHT) {
+            while !ready(&context.peers, RIGHT) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -478,17 +480,18 @@ async fn independent_workers_keep_other_paths_ready_and_prepare_return_standby()
         returned(&mut path, context, -100.0, 0.0).await;
         assert!(path.returned_local.is_some());
         context.gate.outbound_closed();
-        context.stop.store(true, Ordering::Release);
+        context.peers.stop.store(true, Ordering::Release);
         stop_tx.send(true).unwrap();
         path
     };
     let ((), path) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(peers(context, stop), run)
+        tokio::join!(peers(&context.peers, stop), run)
     })
     .await
     .unwrap();
-    assert!(context.pool.lock().unwrap().is_empty());
+    assert!(context.peers.pool.lock().unwrap().is_empty());
     assert!(context
+        .peers
         .availability
         .lock()
         .unwrap()
@@ -519,7 +522,14 @@ async fn live_availability_updates_add_and_remove_exits_without_restarting_focus
         .unwrap()
         .permitted_exits
         .contains(&Direction::Right));
-    let far = fixture.context.pool.lock().unwrap().remove(&FAR).unwrap();
+    let far = fixture
+        .context
+        .peers
+        .pool
+        .lock()
+        .unwrap()
+        .remove(&FAR)
+        .unwrap();
     far.finish().await.unwrap();
     path.refresh_exits(&fixture.context);
     assert!(!path
@@ -543,7 +553,7 @@ async fn out_of_order_refresh_and_duplicate_entry_fail_closed_and_cleanup_focus(
         } else {
             path.active = Some(Active {
                 coordinate: RIGHT,
-                sender: take_ready(&fixture.context, RIGHT).unwrap(),
+                sender: take_ready(&fixture.context.peers, RIGHT).unwrap(),
                 permitted_exits: Vec::new(),
                 entry_edge: Direction::Left,
             });
@@ -603,7 +613,7 @@ async fn remote_cannot_select_an_unadvertised_direction_or_another_identity() {
     returned(&mut path, &fixture.context, 0.0, -100.0).await;
     assert!(path.failure.as_ref().unwrap().contains("unadvertised"));
     assert_eq!(path.active.as_ref().unwrap().coordinate, RIGHT);
-    assert!(ready(&fixture.context, TOP));
+    assert!(ready(&fixture.context.peers, TOP));
     fixture.finish(path).await;
 }
 

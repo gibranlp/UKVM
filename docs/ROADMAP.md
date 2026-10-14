@@ -47,8 +47,9 @@ M20 secure file transfer is implemented for Linux with automated protocol/storag
     See [architecture, limits and two-PC acceptance](REMOTE_SESSIONS.md).
 
 22. **Shared native-platform foundation (in progress):** backend-independent
-    focus/session leases and cooperative cancellation extracted from the working
-    runtime; native Linux/Windows/Apple Silicon compiler and portable-test CI
-    added. Readiness/routing extraction, native secure storage and session
-    adapters remain. No additional input backend is operational yet. See
+    focus/session leases, cooperative cancellation, pinned-peer readiness and
+    source-owned adjacency extracted from the working runtime;
+    native Linux/Windows/Apple Silicon compiler and portable-test CI
+    added. Native secure storage, session/capture adapters and key mapping
+    remain. No additional input backend is operational yet. See
     [cross-platform plan and progress](CROSS_PLATFORM_PLAN.md).

@@ -1,13 +1,6 @@
 //! A physical source keeps capture while focus traverses authenticated nodes.
 use super::*;
 use ukvm_protocol::Edge as Direction;
-const DIRECTIONS: [Direction; 4] = [
-    Direction::Left,
-    Direction::Right,
-    Direction::Top,
-    Direction::Bottom,
-];
-
 struct Active {
     coordinate: Coordinate,
     sender: transport::Sender,
@@ -31,48 +24,6 @@ fn direction(edge: linux_wayland::Edge) -> Direction {
         linux_wayland::Edge::Bottom => Direction::Bottom,
     }
 }
-fn ready(context: &Context, coordinate: Coordinate) -> bool {
-    let allowed = TrustStore::load(&context.trust_dir)
-        .ok()
-        .is_some_and(|store| {
-            context
-                .config
-                .layout
-                .topology()
-                .iter()
-                .find(|node| node.coordinate() == coordinate)
-                .and_then(|node| store.find_id(&node.peer_id))
-                .is_some_and(|peer| peer.permissions.connect)
-        });
-    allowed
-        && context
-            .pool
-            .lock()
-            .unwrap()
-            .get(&coordinate)
-            .is_some_and(|sender| *sender.alive.borrow())
-}
-fn exits(context: &Context, coordinate: Coordinate) -> Vec<Direction> {
-    DIRECTIONS
-        .into_iter()
-        .filter(|edge| {
-            let next = coordinate.adjacent(*edge);
-            next == Coordinate::LOCAL || ready(context, next)
-        })
-        .collect()
-}
-fn take_ready(context: &Context, coordinate: Coordinate) -> Option<transport::Sender> {
-    if !ready(context, coordinate) {
-        return None;
-    }
-    let sender = context.pool.lock().unwrap().remove(&coordinate)?;
-    if *sender.alive.borrow() {
-        Some(sender)
-    } else {
-        drop(sender);
-        None
-    }
-}
 impl Path {
     fn enter(
         &mut self,
@@ -80,8 +31,9 @@ impl Path {
         coordinate: Coordinate,
         entry: EdgePosition,
     ) -> Result<(), String> {
-        let sender = take_ready(context, coordinate).ok_or("adjacent node is no longer ready")?;
-        let mut permitted_exits = exits(context, coordinate);
+        let sender =
+            take_ready(&context.peers, coordinate).ok_or("adjacent node is no longer ready")?;
+        let mut permitted_exits = exits(&context.peers, coordinate);
         if !permitted_exits.contains(&entry.edge) {
             permitted_exits.push(entry.edge);
         }
@@ -112,17 +64,18 @@ impl Path {
                 })
                 .map_err(|_| "held button handoff queue failed")?;
         }
-        *context.active.lock().unwrap() = Some(coordinate);
+        *context.peers.active.lock().unwrap() = Some(coordinate);
         if let Some(node) = context
+            .peers
             .config
             .layout
             .topology()
             .iter()
             .find(|node| node.coordinate() == coordinate)
         {
-            context.availability(node, PeerAvailability::Active);
+            context.peers.availability(node, PeerAvailability::Active);
         }
-        context.log(format!(
+        context.peers.log(format!(
             "focus -> {} via {:?} entry",
             coordinate, entry.edge
         ));
@@ -141,7 +94,7 @@ impl Path {
         if active.sender.returned.borrow().is_some() {
             return;
         }
-        let mut updated = exits(context, active.coordinate);
+        let mut updated = exits(&context.peers, active.coordinate);
         if !updated.contains(&active.entry_edge) {
             updated.push(active.entry_edge);
         }
@@ -175,15 +128,16 @@ impl Path {
         let destination = active.coordinate.adjacent(position.edge);
         let previous = active.coordinate;
         if let Some(node) = context
+            .peers
             .config
             .layout
             .topology()
             .iter()
             .find(|node| node.coordinate() == previous)
         {
-            context.availability(
+            context.peers.availability(
                 node,
-                if ready(context, previous) {
+                if ready(&context.peers, previous) {
                     PeerAvailability::Ready
                 } else {
                     PeerAvailability::Dormant
@@ -193,8 +147,8 @@ impl Path {
         // ReturnControl is sent only AFTER remote held-state cleanup. Dropping
         // its finished sender owns/cancels both halves before next entry.
         drop(self.active.take());
-        *context.active.lock().unwrap() = None;
-        context.log(format!(
+        *context.peers.active.lock().unwrap() = None;
+        context.peers.log(format!(
             "ReturnControl {:?}: {} -> {}",
             position.edge, previous, destination
         ));
@@ -241,21 +195,24 @@ impl Path {
         if let Some(active) = self.active.as_ref() {
             let _ = active.sender.control.try_send(WireMessage::SessionEnd);
         }
-        context.log("emergency chord detected; launching edge disarmed until inward movement");
+        context
+            .peers
+            .log("emergency chord detected; launching edge disarmed until inward movement");
         eprintln!("Emergency release: launching edge stays disarmed until 32 logical pixels inward movement.");
     }
     fn health(&self, context: &Context, initial_edges: &[linux_wayland::Edge]) -> bool {
-        if context.stop.load(Ordering::Acquire) || self.failure.is_some() {
+        if context.peers.stop.load(Ordering::Acquire) || self.failure.is_some() {
             return false;
         }
         if let Some(active) = self.active.as_ref() {
             if context.gate.state() != Focus::Controlling || !*active.sender.alive.borrow() {
                 return false;
             }
-            let allowed = TrustStore::load(&context.trust_dir)
+            let allowed = TrustStore::load(&context.peers.trust_dir)
                 .ok()
                 .is_some_and(|store| {
                     context
+                        .peers
                         .config
                         .layout
                         .topology()
@@ -283,7 +240,7 @@ pub(super) async fn capture_topology(
             activation_id,
             barrier_id,
         } => {
-            context.log(format!("InputCapture Activated: activation_id={activation_id:?}, barrier_id={barrier_id:?}, direction={edge:?}, fraction={edge_fraction:.4}"));
+            context.peers.log(format!("InputCapture Activated: activation_id={activation_id:?}, barrier_id={barrier_id:?}, direction={edge:?}, fraction={edge_fraction:.4}"));
             let mut path = path.lock().unwrap();
             let Some(edge) = edge else {
                 path.failure = Some("activation lacks an identifiable launching edge".into());
@@ -310,18 +267,18 @@ pub(super) async fn capture_topology(
             path.lock().unwrap().emergency(context, boundary)
         }
         CaptureNotice::Zones(zones) => {
-            context.log(format!(
+            context.peers.log(format!(
                 "portal zone set {}: {} logical output rectangles",
                 zones.id,
                 zones.zones.len()
             ));
             for (index, zone) in zones.zones.iter().enumerate() {
-                context.log(format!("zone {index}: origin ({},{}) size {}x{} logical units (portal coordinate space)", zone.x, zone.y, zone.width, zone.height));
+                context.peers.log(format!("zone {index}: origin ({},{}) size {}x{} logical units (portal coordinate space)", zone.x, zone.y, zone.width, zone.height));
             }
         }
         CaptureNotice::BarriersRequested(barriers) => {
             for barrier in barriers {
-                context.log(format!(
+                context.peers.log(format!(
                     "external {:?} barrier {} zone {}: {:?} -> {:?}",
                     barrier.segment.edge,
                     barrier.id,
@@ -331,28 +288,28 @@ pub(super) async fn capture_topology(
                 ));
             }
         }
-        CaptureNotice::BarrierDecision(decision) => context.log(format!(
+        CaptureNotice::BarrierDecision(decision) => context.peers.log(format!(
             "barriers accepted {:?}; rejected {:?}",
             decision.accepted, decision.rejected
         )),
         CaptureNotice::Lifecycle { phase, detail } => {
             *context.capture_status.lock().unwrap() = format!("{phase:?}: {detail}");
-            context.log(format!("InputCapture {phase:?}: {detail}"));
+            context.peers.log(format!("InputCapture {phase:?}: {detail}"));
         },
-        CaptureNotice::SessionCreated { version, keyboard_granted } => context.log(format!("InputCapture session created: portal v{version}, keyboard_granted={keyboard_granted}")),
-        CaptureNotice::EisSocketAcquired => context.log("InputCapture EIS socket acquired"),
-        CaptureNotice::EisContextConnected => context.log("InputCapture EI context connected (receiver)"),
-        CaptureNotice::EisHandshakeComplete => context.log("InputCapture EI handshake complete"),
-        CaptureNotice::SeatAvailable => context.log("InputCapture EI seat announced; capture capabilities bound and flushed"),
-        CaptureNotice::DeviceAvailable { pointer, keyboard, button, scroll } => context.log(format!("InputCapture EI device announced: pointer={pointer}, keyboard={keyboard}, button={button}, scroll={scroll}")),
-        CaptureNotice::Deactivated { activation_id } => context.log(format!("InputCapture Deactivated: activation_id={activation_id:?}")),
-        CaptureNotice::ZonesChanged { zone_set } => context.log(format!("InputCapture ZonesChanged: invalidated zone_set={zone_set:?}; rebuilding capture")),
-        CaptureNotice::EisStarted { sequence } => context.log(format!("InputCapture EI start_emulating: sequence={sequence}")),
-        CaptureNotice::EisStopped => context.log("InputCapture EI stop_emulating"),
-        CaptureNotice::Enabled => context.log(format!("InputCapture edges enabled: {edges:?}")),
-        CaptureNotice::ReleaseRequested { activation_id, cursor_position } => context.log(format!("InputCapture Release requested: activation_id={activation_id:?}, cursor_position={cursor_position:?}")),
-        CaptureNotice::ReleaseResult(result) => context.log(format!("InputCapture Release result: {result:?}")),
-        CaptureNotice::Closed(result) => context.log(format!("InputCapture closed: {result:?}")),
+        CaptureNotice::SessionCreated { version, keyboard_granted } => context.peers.log(format!("InputCapture session created: portal v{version}, keyboard_granted={keyboard_granted}")),
+        CaptureNotice::EisSocketAcquired => context.peers.log("InputCapture EIS socket acquired"),
+        CaptureNotice::EisContextConnected => context.peers.log("InputCapture EI context connected (receiver)"),
+        CaptureNotice::EisHandshakeComplete => context.peers.log("InputCapture EI handshake complete"),
+        CaptureNotice::SeatAvailable => context.peers.log("InputCapture EI seat announced; capture capabilities bound and flushed"),
+        CaptureNotice::DeviceAvailable { pointer, keyboard, button, scroll } => context.peers.log(format!("InputCapture EI device announced: pointer={pointer}, keyboard={keyboard}, button={button}, scroll={scroll}")),
+        CaptureNotice::Deactivated { activation_id } => context.peers.log(format!("InputCapture Deactivated: activation_id={activation_id:?}")),
+        CaptureNotice::ZonesChanged { zone_set } => context.peers.log(format!("InputCapture ZonesChanged: invalidated zone_set={zone_set:?}; rebuilding capture")),
+        CaptureNotice::EisStarted { sequence } => context.peers.log(format!("InputCapture EI start_emulating: sequence={sequence}")),
+        CaptureNotice::EisStopped => context.peers.log("InputCapture EI stop_emulating"),
+        CaptureNotice::Enabled => context.peers.log(format!("InputCapture edges enabled: {edges:?}")),
+        CaptureNotice::ReleaseRequested { activation_id, cursor_position } => context.peers.log(format!("InputCapture Release requested: activation_id={activation_id:?}, cursor_position={cursor_position:?}")),
+        CaptureNotice::ReleaseResult(result) => context.peers.log(format!("InputCapture Release result: {result:?}")),
+        CaptureNotice::Closed(result) => context.peers.log(format!("InputCapture closed: {result:?}")),
         _ => {}
     }
     };

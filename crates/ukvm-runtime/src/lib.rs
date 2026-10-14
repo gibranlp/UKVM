@@ -18,6 +18,8 @@ use session::{Backoff, ExclusiveSink, Focus, FocusGate, SharedSession};
 
 #[cfg(any(target_os = "linux", test))]
 mod lifecycle;
+#[cfg(any(target_os = "linux", test))]
+mod peers;
 #[cfg(target_os = "linux")]
 use lifecycle::{cancelled, pause, shutdown_signal};
 

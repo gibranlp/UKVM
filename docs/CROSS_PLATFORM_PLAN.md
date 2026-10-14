@@ -40,8 +40,31 @@ checks; native MSVC/Apple CI and physical testing provide separate evidence.
 Hosted CI results have not been inspected: this workspace's GitHub CLI has no
 API authentication, and the public repository API returns 404.
 
-Remaining M22 work includes reusable readiness/routing orchestration, backend
-session contracts, physical-key mapping, native ownership/private storage,
+The second foundation slice introduces `ukvm-runtime::peers::PeerRuntime` for
+shared runtime configuration/identity, ephemeral discovery hints, pinned TLS
+connection preparation, independent per-peer retry workers, connection pools
+and availability. Source-owned adjacency readiness, permitted exits and taking
+a live authorized sender now live alongside those workers. Wayland capture,
+emergency geometry and portal/EI grants remain in the Wayland adapter; it uses
+the same shared state for input, clipboard, files, viewing and advisory status.
+No policy, protocol or stored-consent migration is introduced.
+
+Readiness/security tests previously coupled to Wayland fixtures now run without
+portal dependencies. Added regressions cover independent offline/ready paths,
+preserving active status while preparing a return standby, live outbound
+revocation, corrupt trust, pre-stopped discovery and draining live connections
+on watch cancellation or loss of the stop sender. Workers check the stop watch
+at the top of their loops, preventing immediate retry pauses from spinning when
+the separate atomic shutdown flag has not been set.
+
+Second-slice validation passed all five required Linux workspace checks with
+310 passing tests and six opt-in tests ignored. Windows GNU whole-workspace
+Clippy and compilation/linking of every test executable also passed. Physical
+switching regression and native Windows/Mac execution remain separate acceptance
+steps; no new OS capability is claimed from these checks.
+
+Remaining M22 work includes native backend session contracts, capture-driven
+handoff adapters, physical-key mapping, native ownership/private storage,
 backend selection and cross-platform management status. Windows/macOS input and
 X11 are still unimplemented. No protocol version or stored portal credential
 changes are part of this slice.

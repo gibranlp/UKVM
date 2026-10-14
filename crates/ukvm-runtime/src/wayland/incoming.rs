@@ -156,10 +156,10 @@ async fn incoming(
     tcp: tokio::net::TcpStream,
     mut stop: watch::Receiver<bool>,
 ) {
-    let store = match TrustStore::load(&context.trust_dir) {
+    let store = match TrustStore::load(&context.peers.trust_dir) {
         Ok(store) => store,
         Err(error) => {
-            context.log(error);
+            context.peers.log(error);
             return;
         }
     };
@@ -171,8 +171,8 @@ async fn incoming(
                 entered: false,
             },
             authority,
-            policy: (context.trust_dir.clone(), String::new()),
-            verbose: context.verbose,
+            policy: (context.peers.trust_dir.clone(), String::new()),
+            verbose: context.peers.verbose,
             gate: context.gate.clone(),
         },
         gate: context.gate.clone(),
@@ -180,7 +180,7 @@ async fn incoming(
     };
     let connection = tokio::select! {
         _ = cancelled(&mut stop) => return,
-        result = transport::accept_runtime(tcp, &context.identity, &store, &context.trust_dir, &context.config.node.name) => match result {
+        result = transport::accept_runtime(tcp, &context.peers.identity, &store, &context.peers.trust_dir, &context.peers.config.node.name) => match result {
             Ok(connection) => connection,
             Err(error) => { eprintln!("[runtime] incoming authentication rejected: {error}"); return; }
         }
@@ -212,7 +212,7 @@ async fn incoming(
                 if let Err(error) =
                     super::files::session(context, &peer_id, &mut stream, stop).await
                 {
-                    context.log(format!("file transfer: {error}"));
+                    context.peers.log(format!("file transfer: {error}"));
                 }
             } else {
                 let _ = ukvm_network::files::write(
@@ -225,21 +225,25 @@ async fn incoming(
         }
         transport::RuntimeConnection::Clipboard { stream, peer_id } => {
             if let Err(error) = super::clipboard::session(context, &peer_id, stream, stop).await {
-                context.log(format!("clipboard peer {peer_id}: {error}"));
+                context
+                    .peers
+                    .log(format!("clipboard peer {peer_id}: {error}"));
             }
             return;
         }
     };
     let Ok(_input_slot) = input_authority.input_slots.try_acquire() else {
-        context.log("incoming input capacity reached");
+        context.peers.log("incoming input capacity reached");
         return;
     };
     let peer_id = connection.peer.id.clone();
     sink.inner.policy.1 = peer_id.clone();
-    context.log(format!("authenticated incoming peer {peer_id}"));
+    context
+        .peers
+        .log(format!("authenticated incoming peer {peer_id}"));
     let shutdown = async {
         loop {
-            let allowed = TrustStore::load(&context.trust_dir)
+            let allowed = TrustStore::load(&context.peers.trust_dir)
                 .ok()
                 .and_then(|store| store.find_id(&peer_id).cloned())
                 .is_some_and(|peer| peer.permissions.connect && peer.permissions.control_this_node);
@@ -253,23 +257,23 @@ async fn incoming(
         connection,
         &mut sink,
         |notice| match notice {
-            ReceiverNotice::SessionStarted => {
-                context.log(format!("peer {peer_id}: receiver portal/EI ready"))
-            }
+            ReceiverNotice::SessionStarted => context
+                .peers
+                .log(format!("peer {peer_id}: receiver portal/EI ready")),
             ReceiverNotice::RemoteEntered(position) => {
                 *context.incoming_peer.lock().unwrap() = Some(peer_id.clone());
-                context.log(format!(
+                context.peers.log(format!(
                     "peer {peer_id}: incoming {:?} entry; controlled focus",
                     position.edge
                 ));
             }
-            ReceiverNotice::RemoteReturned(position) => context.log(format!(
+            ReceiverNotice::RemoteReturned(position) => context.peers.log(format!(
                 "peer {peer_id}: ReturnControl {:?}; held input released",
                 position.edge
             )),
-            ReceiverNotice::SessionEnded(_) => {
-                context.log(format!("peer {peer_id}: incoming cleanup complete"))
-            }
+            ReceiverNotice::SessionEnded(_) => context
+                .peers
+                .log(format!("peer {peer_id}: incoming cleanup complete")),
             ReceiverNotice::Counts(_) => {}
         },
         shutdown,
@@ -282,7 +286,9 @@ async fn incoming(
         }
     }
     if let Err(error) = result {
-        context.log(format!("peer {peer_id}: incoming ended: {error}"));
+        context
+            .peers
+            .log(format!("peer {peer_id}: incoming ended: {error}"));
     }
 }
 
@@ -292,7 +298,7 @@ async fn prepare_receiver<S: InputSink + Send>(
     sink: &mut S,
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let store = TrustStore::load(&context.trust_dir)?;
+    let store = TrustStore::load(&context.peers.trust_dir)?;
     let Some(peer) = store
         .peers
         .iter()
@@ -303,7 +309,7 @@ async fn prepare_receiver<S: InputSink + Send>(
     let peer_id = peer.id.clone();
     let revoked = async {
         loop {
-            if TrustStore::load(&context.trust_dir)
+            if TrustStore::load(&context.peers.trust_dir)
                 .and_then(|store| {
                     store
                         .authorize(
@@ -332,13 +338,15 @@ async fn prepare_authority(
     authority: Arc<Authority>,
     stop: watch::Receiver<bool>,
 ) {
-    let peer = TrustStore::load(&context.trust_dir).ok().and_then(|store| {
-        store
-            .peers
-            .iter()
-            .find(|peer| peer.permissions.connect && peer.permissions.control_this_node)
-            .map(|peer| peer.id.clone())
-    });
+    let peer = TrustStore::load(&context.peers.trust_dir)
+        .ok()
+        .and_then(|store| {
+            store
+                .peers
+                .iter()
+                .find(|peer| peer.permissions.connect && peer.permissions.control_this_node)
+                .map(|peer| peer.id.clone())
+        });
     let Some(peer) = peer else {
         return;
     };
@@ -348,13 +356,13 @@ async fn prepare_authority(
             entered: false,
         },
         authority,
-        policy: (context.trust_dir.clone(), peer),
-        verbose: context.verbose,
+        policy: (context.peers.trust_dir.clone(), peer),
+        verbose: context.peers.verbose,
         gate: context.gate.clone(),
     };
     if let Err(error) = prepare_receiver(context, &mut sink, stop).await {
         *context.receiver_status.lock().unwrap() = format!("unavailable: {error}");
-        context.log(format!("receiver preparation: {error}"));
+        context.peers.log(format!("receiver preparation: {error}"));
     }
 }
 
@@ -385,10 +393,10 @@ pub(super) async fn receiver(
             _ = connections.next(), if !connections.is_empty() => {},
             accepted = listener.accept() => match accepted {
                 Ok((tcp, address)) => {
-                    if connections.len() >= MAX_INCOMING { context.log(format!("incoming capacity reached; closing {address}")); }
+                    if connections.len() >= MAX_INCOMING { context.peers.log(format!("incoming capacity reached; closing {address}")); }
                     else { connections.push(incoming(context, Arc::clone(&authority), tcp, stop.clone()).boxed()); }
                 }
-                Err(error) => { context.log(format!("accept failed: {error}")); pause(Duration::from_secs(1), &mut stop).await; }
+                Err(error) => { context.peers.log(format!("accept failed: {error}")); pause(Duration::from_secs(1), &mut stop).await; }
             }
         }
     }
@@ -397,7 +405,7 @@ pub(super) async fn receiver(
     let closing = authority.sink.lock().unwrap().take();
     if let Some(mut sink) = closing {
         if let Err(error) = sink.shutdown() {
-            context.log(format!("injector shutdown: {error}"));
+            context.peers.log(format!("injector shutdown: {error}"));
         }
     }
 }
@@ -418,7 +426,7 @@ pub(super) async fn assert_denied_before_portal(context: &Context, peer: &str) {
             entered: false,
         },
         authority: Arc::clone(&authority),
-        policy: (context.trust_dir.clone(), peer.into()),
+        policy: (context.peers.trust_dir.clone(), peer.into()),
         verbose: false,
         gate: context.gate.clone(),
     };
@@ -470,9 +478,9 @@ mod preparation_tests {
         }
     }
     fn allow(f: &Fixture, permission: SessionPermission, value: bool) {
-        TrustStore::load(&f.context.trust_dir)
+        TrustStore::load(&f.context.peers.trust_dir)
             .unwrap()
-            .set_permission(&f.context.trust_dir, "peer", permission, value)
+            .set_permission(&f.context.peers.trust_dir, "peer", permission, value)
             .unwrap();
     }
 

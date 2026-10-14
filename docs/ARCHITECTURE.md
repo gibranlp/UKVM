@@ -5,8 +5,13 @@
 `ukvm-runtime::session` owns the backend-independent exclusive focus gate and
 prepared injector leases used by the working Wayland runtime.
 `ukvm-runtime::lifecycle` owns cooperative cancellation and retry pauses;
-platform signal registration remains explicitly scoped. These internal modules
-are compiled for the current Linux runtime and for native portable-policy tests.
+platform signal registration remains explicitly scoped. `ukvm-runtime::peers`
+owns ephemeral discovery hints, pinned connection preparation, independent
+readiness workers, availability/connection pools and source-owned adjacency
+checks. Wayland retains capture geometry, focus transitions and portal/EI
+authority, accessing shared peer state through explicit composition. These
+internal modules are compiled for the current Linux runtime and for native
+portable-policy tests.
 The foreground entry point still requires Linux Wayland. Native Windows/macOS
 capture, injection, ownership and service adapters are not implemented yet.
 See [implementation sequence and progress](CROSS_PLATFORM_PLAN.md).

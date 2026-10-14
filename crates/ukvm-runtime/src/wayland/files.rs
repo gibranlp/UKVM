@@ -43,9 +43,9 @@ pub(super) async fn session<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     stream: &mut S,
     stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let history = History::new(&context.trust_dir)?;
+    let history = History::new(&context.peers.trust_dir)?;
     let row: Arc<Mutex<Option<Record>>> = Arc::new(Mutex::new(None));
-    let dir = context.trust_dir.clone();
+    let dir = context.peers.trust_dir.clone();
     let peer = peer.to_owned();
     let other = peer.clone();
     let state = history.clone();
@@ -80,12 +80,13 @@ pub(super) async fn session<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         }
         Ok(())
     });
-    let name = TrustStore::load(&context.trust_dir)?
+    let name = TrustStore::load(&context.peers.trust_dir)?
         .find_id(&peer)
         .ok_or("peer disappeared")?
         .alias
         .clone();
     let destination = context
+        .peers
         .config
         .file_transfer
         .receive_directory
@@ -93,7 +94,7 @@ pub(super) async fn session<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         .map(PathBuf::from)
         .map(Ok)
         .unwrap_or_else(ukvm_platform::files::linux::default_receive_directory)?;
-    let dir = context.trust_dir.clone();
+    let dir = context.peers.trust_dir.clone();
     let recorded = Arc::clone(&row);
     let result = files::receive(stream, check, observer, move |offer| {
         let _guard = permission_guard(&dir, &peer, SessionPermission::ReceiveFiles)?;

@@ -6,6 +6,8 @@ The [native platform implementation plan](docs/CROSS_PLATFORM_PLAN.md) proposes
 Windows first, macOS on Apple Silicon next, and Linux X11 last, after shared
 runtime work. It separates physical KVM acceptance from clipboard, file and
 remote-session parity; additional native backends are not implemented yet.
+M22 has started with shared focus/session ownership, pinned-peer readiness and
+source-owned adjacency, plus native compiler and portable-policy CI checks.
 
 **Current state:** Linux Wayland InputCapture, authenticated transport, pairing, discovery and real cross-PC input have been physically tested between `spectrum` and `io`. With a reversible consent-capable portal draft on io, the user confirmed pointer movement, clicks, keyboard, modifiers, scrolling, emergency release and controller-side recovery after receiver loss. Input Protocol 1.2 natural return by crossing io's left edge has been physically repeated three times on one listener, with local control restored. A timed abrupt sender stop while Shift and a mouse button were held left both PCs with normal local input and no held state. The packaged Hyprland portal lacks RemoteDesktop; see [Wayland injection trial](docs/WAYLAND_INJECTION_TRIAL.md). `ukvm run` now provides a foreground persistent runtime; M13 normal switching, 10+ round trips and receiver/network/active-disconnect recovery are user-confirmed; M13, including its emergency rearm fix, is complete and physically validated. M14 coordinate topology is implemented with automated tests; multi-node physical acceptance is pending.
 

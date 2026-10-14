@@ -54,7 +54,7 @@ impl Clipboard {
     }
 }
 fn permitted(context: &Context, peer: &str) -> bool {
-    TrustStore::load(&context.trust_dir).is_ok_and(|store| {
+    TrustStore::load(&context.peers.trust_dir).is_ok_and(|store| {
         store
             .authorize(peer, SessionPermission::ShareClipboard)
             .is_ok()
@@ -87,7 +87,7 @@ pub(super) async fn supervise(context: &Context, mut stop: watch::Receiver<bool>
             result = events.changed(), if backend.is_some() => {
                 if result.is_ok() {
                     let event = events.borrow_and_update().clone();
-                    let enabled = TrustStore::load(&context.trust_dir).is_ok_and(|store| store.peers.iter().any(|p| p.permissions.connect && p.permissions.share_clipboard));
+                    let enabled = TrustStore::load(&context.peers.trust_dir).is_ok_and(|store| store.peers.iter().any(|p| p.permissions.connect && p.permissions.share_clipboard));
                     if enabled {
                         { let mut state = context.clipboard.status.lock().unwrap(); state.supported = Some(true); state.state = "ready".into(); }
                         match event {
@@ -103,7 +103,7 @@ pub(super) async fn supervise(context: &Context, mut stop: watch::Receiver<bool>
                 }
             },
             _ = tick.tick() => {
-                let store = TrustStore::load(&context.trust_dir).unwrap_or_default();
+                let store = TrustStore::load(&context.peers.trust_dir).unwrap_or_default();
                 let enabled = store.peers.iter().any(|p| p.permissions.connect && p.permissions.share_clipboard);
                 context.clipboard.status.lock().unwrap().enabled = enabled;
                 if !enabled {
@@ -121,7 +121,7 @@ pub(super) async fn supervise(context: &Context, mut stop: watch::Receiver<bool>
                     let mut state = context.clipboard.status.lock().unwrap(); state.supported = None; state.state = "starting".into(); state.error = None;
                 }
                 if ready(context) {
-                    for peer in store.peers.iter().filter(|p| p.permissions.connect && p.permissions.share_clipboard && context.identity.id < p.id).take(64) {
+                    for peer in store.peers.iter().filter(|p| p.permissions.connect && p.permissions.share_clipboard && context.peers.identity.id < p.id).take(64) {
                         if active.insert(peer.id.clone()) { workers.push(peer_worker(context,peer.id.clone(),stop.clone())); }
                     }
                 }
@@ -140,21 +140,21 @@ pub(super) async fn supervise(context: &Context, mut stop: watch::Receiver<bool>
 async fn peer_worker(context: &Context, id: String, mut stop: watch::Receiver<bool>) -> String {
     let mut backoff = Backoff::default();
     while !*stop.borrow() && permitted(context, &id) && ready(context) {
-        let peer = TrustStore::load(&context.trust_dir)
+        let peer = TrustStore::load(&context.peers.trust_dir)
             .ok()
             .and_then(|store| store.find_id(&id).cloned());
         let Some(peer) = peer else {
             break;
         };
         let mut connected = false;
-        for address in addresses(context, &peer) {
-            let certificate = cert_path(&context.trust_dir, &id);
-            let connection = tokio::select! { _ = cancelled(&mut stop) => return id, result = wire::connect(&address,&context.identity,&certificate,&id) => result };
+        for address in addresses(&context.peers, &peer) {
+            let certificate = cert_path(&context.peers.trust_dir, &id);
+            let connection = tokio::select! { _ = cancelled(&mut stop) => return id, result = wire::connect(&address,&context.peers.identity,&certificate,&id) => result };
             if let Ok(stream) = connection {
                 connected = true;
                 backoff.reset();
                 if let Err(error) = session(context, &id, stream, stop.clone()).await {
-                    context.log(format!("clipboard peer {id}: {error}"));
+                    context.peers.log(format!("clipboard peer {id}: {error}"));
                     context.clipboard.status.lock().unwrap().error = Some(error);
                 }
                 break;
@@ -234,7 +234,7 @@ pub(super) async fn session<S: AsyncRead + AsyncWrite + Unpin>(
                                 let text = context.clipboard.engine.lock().unwrap().remote(id,&message)?;
                                 if let Some(text) = text {
                                     context.clipboard.latest.send_replace(None);
-                                    let trust = context.trust_dir.clone(); let peer = id.to_string();
+                                    let trust = context.peers.trust_dir.clone(); let peer = id.to_string();
                                     context.clipboard.writes.send_replace(Some(ClipboardWrite { text, authorize: Arc::new(move || ukvm_network::trust::clipboard_guard(&trust,&peer).ok().map(|guard| Box::new(guard) as Box<dyn Send>)) })); context.clipboard.sync();
                                 }
                             },
@@ -268,7 +268,7 @@ async fn send<W: AsyncWrite + Unpin>(
     writer: &mut W,
     message: &ClipboardMessage,
 ) -> Result<(), String> {
-    let _guard = ukvm_network::trust::clipboard_guard(&context.trust_dir, id)?;
+    let _guard = ukvm_network::trust::clipboard_guard(&context.peers.trust_dir, id)?;
     if let ClipboardMessage::Text { text, .. } = message {
         if !context.clipboard.engine.lock().unwrap().matches(text) {
             return Ok(());

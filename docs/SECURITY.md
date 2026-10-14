@@ -39,6 +39,15 @@ Emergency release latches a rearm guard before cleanup and prioritizes SessionEn
 
 ## Multi-node topology boundary (M14)
 
+M22 shares pinned connection preparation, ephemeral discovery hints, independent
+readiness workers and source-owned adjacency checks in `ukvm-runtime::peers`.
+The Wayland runtime composes that state with its existing focus and portal/EI
+authority. A live sender alone cannot satisfy readiness after outbound policy
+revocation or a trust-store read failure. Stop requests and lost cancellation
+senders drain ready connections even without the separate atomic shutdown flag.
+This refactor changes no authentication, receiver permission, consent or input
+protocol contract and does not enable a Windows/macOS injector.
+
 The physical source chooses each adjacent pinned destination from its local validated coordinate topology. Every receiver directly authenticates that source and independently enforces control-this-node and normal portal/EI consent. There is no permission delegation, remote-selected identity, relay or implicit trust between intermediates. Input Protocol 1.3 topology entry/exit-refresh messages contain at most four distinct cardinal exits, with at most 40 refreshes per second; malformed/out-of-order messages fail closed. A receiver can only report a boundary to the same authenticated source, which checks the advertised exit and readiness.
 
 At most eight ready outbound senders plus one active sender and 16 incoming preparation/session connections are retained. Consent initialization is serialized; inactive connection cleanup cannot park another owner’s input. Held input is released before ReturnControl; still-physically-held state is transferred only to the next authorized recipient. Invalid/busy/unavailable handoff restores the physical source instead of waiting with captured input or skipping nodes. Independent retry does not weaken certificate pinning. The emergency guard suppresses the launching edge independently of other ready edges. Multi-node physical behavior remains pending acceptance.

@@ -14,7 +14,7 @@ pub(super) async fn display_session(
     mut stop: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let check = || {
-        TrustStore::load(&context.trust_dir)?
+        TrustStore::load(&context.peers.trust_dir)?
             .authorize(peer, SessionPermission::ViewScreen)
             .map(|_| ())
     };
@@ -45,7 +45,7 @@ pub(super) async fn display_session(
             }}
         };
         let result=async {
-        let mut interactive=TrustStore::load(&context.trust_dir)?.authorize(peer,SessionPermission::ControlThisNode).is_ok();
+        let mut interactive=TrustStore::load(&context.peers.trust_dir)?.authorize(peer,SessionPermission::ControlThisNode).is_ok();
         display::write(stream,&Message::Ready{interactive}).await?;
         let mut closed=capture.session.receive_closed().await.map_err(|e|e.to_string())?;
             let mut last=None;
@@ -62,7 +62,7 @@ pub(super) async fn display_session(
                 if policy_checked.elapsed()>=Duration::from_millis(100) {
                 check()?;
                 policy_checked=std::time::Instant::now();
-                let allowed=TrustStore::load(&context.trust_dir)?.authorize(peer,SessionPermission::ControlThisNode).is_ok();
+                let allowed=TrustStore::load(&context.peers.trust_dir)?.authorize(peer,SessionPermission::ControlThisNode).is_ok();
                 if allowed!=interactive {display::write(stream,&Message::Ready{interactive:allowed}).await?;interactive=allowed;}
                 }
                 if std::time::Instant::now()<next_send {continue;}
@@ -86,7 +86,7 @@ pub(super) async fn display_session(
                 let bytes=frame.jpeg.len();
                 let sent=std::time::Instant::now();
                 let send=async {
-                    let guard=permission_guard(&context.trust_dir,peer,SessionPermission::ViewScreen)?;
+                    let guard=permission_guard(&context.peers.trust_dir,peer,SessionPermission::ViewScreen)?;
                     display::write(stream,&Message::Frame(frame)).await?;
                     drop(guard);
                     let Message::Ack { sequence:ack,received_us,sent_us }=display::read(stream).await? else { return Err("expected display acknowledgement".into()); };
@@ -145,7 +145,7 @@ async fn window_input(
         let id = std::str::from_utf8(&id)
             .map_err(|_| "invalid window peer ID")?
             .to_owned();
-        let store = TrustStore::load(&context.trust_dir)?;
+        let store = TrustStore::load(&context.peers.trust_dir)?;
         let peer = store.authorize(&id, SessionPermission::Connect)?.clone();
         let (entry, _) = ukvm_network::read_frame(&mut local).await?;
         let WireMessage::WindowEntry { target, x, y } = entry else {
@@ -174,12 +174,12 @@ async fn window_input(
             }
             *focus = Focus::Window;
         }
-        for address in addresses(context, &peer) {
+        for address in addresses(&context.peers, &peer) {
             if let Ok(connection) = transport::connect(
                 &address,
-                &context.identity,
-                &cert_path(&context.trust_dir, &peer.id),
-                &context.config.node.name,
+                &context.peers.identity,
+                &cert_path(&context.peers.trust_dir, &peer.id),
+                &context.peers.config.node.name,
             )
             .await
             {
@@ -211,7 +211,7 @@ async fn window_input(
             let message=loop {tokio::select! {
                 _=cancelled(&mut stop)=>return Ok(()),
                 _=sender.alive.changed()=>{if !*sender.alive.borrow(){return Err("peer input disconnected".into());}},
-                _=policy.tick()=>{TrustStore::load(&context.trust_dir)?.authorize(&peer.id,SessionPermission::Connect)?;},
+                _=policy.tick()=>{TrustStore::load(&context.peers.trust_dir)?.authorize(&peer.id,SessionPermission::Connect)?;},
                 result=&mut read=>break result?.0,
             }};
             match message {
@@ -250,7 +250,9 @@ pub(super) async fn bridge(context: &Context, mut stop: watch::Receiver<bool>) {
     let (listener, path) = match bind {
         Ok(v) => v,
         Err(e) => {
-            context.log(format!("remote window bridge unavailable: {e}"));
+            context
+                .peers
+                .log(format!("remote window bridge unavailable: {e}"));
             return;
         }
     };
@@ -260,7 +262,7 @@ pub(super) async fn bridge(context: &Context, mut stop: watch::Receiver<bool>) {
             _=cancelled(&mut stop)=>break,
             _=sessions.next(),if !sessions.is_empty()=>{},
             accepted=listener.accept()=>if let Ok((socket,_))=accepted {
-                if sessions.len()<4 {let stop=stop.clone();sessions.push(async move {if let Err(e)=window_input(context,socket,stop).await {context.log(format!("remote window input: {e}"));}});}
+                if sessions.len()<4 {let stop=stop.clone();sessions.push(async move {if let Err(e)=window_input(context,socket,stop).await {context.peers.log(format!("remote window input: {e}"));}});}
             },
         }
     }
@@ -308,7 +310,7 @@ mod tests {
                 &trust,
                 "local".into(),
                 None,
-                fixture.context.identity.tls_cert().as_ref(),
+                fixture.context.peers.identity.tls_cert().as_ref(),
             )
             .unwrap();
         for permission in [
@@ -321,9 +323,9 @@ mod tests {
         }
         let listener = transport::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let mut local_store = TrustStore::load(&fixture.context.trust_dir).unwrap();
+        let mut local_store = TrustStore::load(&fixture.context.peers.trust_dir).unwrap();
         local_store
-            .set_address(&fixture.context.trust_dir, &fixture.peer.id, &address)
+            .set_address(&fixture.context.peers.trust_dir, &fixture.peer.id, &address)
             .unwrap();
         let held = Arc::new(AtomicBool::new(false));
         let receiver_held = held.clone();
